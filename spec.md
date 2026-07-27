@@ -23,7 +23,7 @@ Integrated SIP monitoring: capture, metrics, dashboards, alerting, and echo — 
 6. RBAC (admin / operator / viewer), API tokens, audit log.
 7. Alerting via Slack, generic webhook, email.
 8. Prometheus-compatible `/metrics` endpoint.
-9. Use Mako `crew` / `kick` / `chan` for concurrency — never Go `go` / goroutines.
+9. Structured concurrency via Mako `crew` / `kick` / `chan`.
 
 ### 1.2 Non-goals
 
@@ -131,11 +131,10 @@ Selected via `ZAMAN_DB_DRIVER` (default: `sqlite`).
 
 ## 5. Concurrency model
 
-1. Only Mako `crew` / `kick` / `join` / `drain` / `chan`.
-2. Never Go `go f()`, goroutine pools, or `async`/`await`.
-3. Capture producers enqueue JSON via `chan[string]` — never open the database directly.
-4. One kicked `db_writer` owns the database connection (or ClickHouse HTTP client).
-5. Optional TCP/TLS collectors are kicked only when enabled.
+1. Concurrency uses Mako's structured primitives: `crew`, `kick`, `join`, `drain`, `chan`.
+2. Capture producers enqueue JSON via `chan[string]` — they do not open the database directly.
+3. A single `db_writer` job owns the database connection (or ClickHouse HTTP client).
+4. Optional TCP/TLS collectors are started only when enabled.
 
 ---
 
