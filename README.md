@@ -2,13 +2,79 @@
 
 SIP monitoring for people who are tired of running five systems to answer one question.
 
+![Call Ladder](docs/call-ladder.png)
+![Reports](docs/reports.png)
+
 ## Why this exists
 
 If you run a VoIP network, you probably have one tool for SIP capture, another for metrics, another for dashboards, some scripts for keepalive checks, and maybe a wiki page explaining how they all connect. Each tool is fine on its own. The problem is gluing them together, keeping them running, and training new engineers on four different UIs.
 
 Zaman started as a question: what if one process did all of that? Not better than each tool individually — just simpler to deploy and operate as a whole.
 
-It captures SIP and HEP traffic, stores it in SQLite (or PostgreSQL), shows a live dashboard with call ladders, and exposes Prometheus-compatible metrics. One binary for the core, one process for the dashboard. No external databases required unless you want them.
+It captures SIP and HEP traffic, stores it, shows a live dashboard with call ladders, and exposes Prometheus-compatible metrics. One binary for the core, one process for the dashboard. No external databases required unless you want them.
+
+## Install
+
+### One-line install (Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/loreste/zaman/main/install.sh | sudo bash
+```
+
+The installer:
+- Detects your distro (Debian/Ubuntu, RHEL/CentOS/Fedora/Rocky)
+- Installs all dependencies (Mako, Weft, clang, openssl)
+- Asks you to pick a database (SQLite, PostgreSQL, or ClickHouse)
+- Installs and configures the chosen database
+- Builds the core binary
+- Creates systemd services
+- Starts everything
+- Prints the dashboard URL and admin password
+
+To pick the database non-interactively:
+
+```bash
+# SQLite (default, zero-config)
+curl -fsSL .../install.sh | sudo ZAMAN_DB=sqlite bash
+
+# PostgreSQL
+curl -fsSL .../install.sh | sudo ZAMAN_DB=postgres bash
+
+# ClickHouse (millions of calls/day)
+curl -fsSL .../install.sh | sudo ZAMAN_DB=clickhouse bash
+```
+
+### Docker
+
+```bash
+# SQLite (simplest)
+docker compose up
+
+# With PostgreSQL
+docker compose --profile pg up
+
+# With ClickHouse
+docker compose --profile ch up
+```
+
+### Manual build
+
+Requirements: [Mako](https://mako-lang.dev) ≥ 0.4.17, [Weft](https://weft.dev).
+
+```bash
+make build          # → bin/zaman-core
+make smoke          # end-to-end test
+./scripts/demo.sh   # core + dashboard → http://127.0.0.1:3000
+```
+
+### Systemd (after manual build)
+
+```bash
+sudo bash deploy/install.sh
+sudo systemctl enable --now zaman-core zaman-web
+```
+
+Config: `/etc/zaman/core.env` and `/etc/zaman/web.env`. Logs: `journalctl -u zaman-core`.
 
 ## What it does
 
@@ -25,66 +91,27 @@ It captures SIP and HEP traffic, stores it in SQLite (or PostgreSQL), shows a li
 └──────────────┘
 ```
 
-**Capture:** SIP over UDP, HEPv3 over UDP/TCP/TLS. Compatible with any HEP-speaking SIP proxy or agent.
+**Capture** — SIP over UDP, HEPv3 over UDP/TCP/TLS. Compatible with any HEP-speaking SIP proxy or agent.
 
-**Dashboard:** Real-time NOC overview with active calls, ASR/NER gauges, per-node health grid, anomaly detection. HTMX live-refresh, no JavaScript frameworks.
+**Dashboard** — Real-time overview with active calls, ASR/NER gauges, node health, anomaly detection. HTMX live-refresh, no JavaScript frameworks.
 
-**Call ladder:** SIP flow diagrams with directional arrows between endpoints. PCAP export for Wireshark. Call recording upload and playback.
+**Call ladder** — SIP flow diagrams with directional arrows between endpoints. PCAP export for Wireshark. Call recording upload and playback. Public share links.
 
-**Search:** Filter by Call-ID, agent/server, SIP method, transport, endpoint IP. Save searches. Export as JSON or CSV.
+**Search** — Filter by Call-ID, agent/server, SIP method, transport, endpoint IP. Save searches. Export as JSON, CSV, or PCAP.
 
-**Reports:** Telecom KPIs (ASR, NER), response code breakdown, top talkers, agent inventory, daily rollups, SLA dashboard.
+**Reports** — Telecom KPIs (ASR, NER), response code breakdown, top talkers, agent inventory, daily rollups.
 
-**Alerting:** Threshold rules on ASR, error rates, 5xx spikes, auth failures. Notify via Slack, generic webhook, or email.
+**SLA** — Per-agent and per-destination SLA tracking with configurable thresholds.
 
-**Auth:** Role-based access — admin, operator, viewer. API tokens for automation. Audit log. Password policy. IP allowlisting.
+**NOC** — Dedicated network operations view with node status table, anomaly alerts, traffic summary.
 
-**Metrics:** Prometheus-compatible `/metrics` endpoint on the core.
+**Alerting** — Threshold rules on ASR, error rates, 5xx spikes, auth failures. Notify via Slack, generic webhook, or email. Retry on failure.
 
-## Quick start
+**Auth** — RBAC (admin/operator/viewer), API tokens, audit log, password policy, IP allowlisting, LDAP/SSO.
 
-Requirements: [Mako](https://mako-lang.dev) ≥ 0.4.17 and [Weft](https://weft.dev) on PATH.
+**Metrics** — Prometheus-compatible `/metrics`, Grafana datasource API.
 
-```bash
-make build          # → bin/zaman-core
-make smoke          # end-to-end test (high ports, no root)
-./scripts/demo.sh   # core + dashboard → http://127.0.0.1:3000
-```
-
-Manual run:
-
-```bash
-# terminal 1 — core
-./bin/zaman-core 15060 19060 19090
-
-# terminal 2 — dashboard
-ZAMAN_CORE=http://127.0.0.1:19090 weft run web/main.weft
-```
-
-On first start with auth enabled, the dashboard prints a default admin password to stdout. Change it immediately.
-
-### Docker
-
-```bash
-# SQLite (simplest)
-docker compose up
-
-# With PostgreSQL
-docker compose --profile pg up
-
-# With ClickHouse (for scale)
-docker compose --profile ch up
-```
-
-### Systemd (bare metal)
-
-```bash
-make build
-sudo bash deploy/install.sh
-sudo systemctl enable --now zaman-core zaman-web
-```
-
-Config: `/etc/zaman/core.env` and `/etc/zaman/web.env`. Logs: `journalctl -u zaman-core`.
+**CLI** — `scripts/zaman-cli.sh` for terminal search, export, and ASCII call ladders.
 
 ## Database
 
@@ -96,25 +123,7 @@ Three backends, depending on scale:
 | **PostgreSQL** | Production with existing Postgres infrastructure | `ZAMAN_DB_DRIVER=postgres` |
 | **ClickHouse** | High volume — millions of calls/day, long retention | `ZAMAN_DB_DRIVER=clickhouse` |
 
-```bash
-# SQLite (default — zero config)
-./bin/zaman-core
-
-# PostgreSQL
-ZAMAN_DB_DRIVER=postgres \
-  ZAMAN_DB_DSN="host=localhost dbname=zaman user=zaman password=secret sslmode=disable" \
-  ./bin/zaman-core
-
-# ClickHouse (for scale)
-ZAMAN_DB_DRIVER=clickhouse \
-  ZAMAN_CH_URL=http://localhost:8123 \
-  ZAMAN_CH_DB=zaman \
-  ./bin/zaman-core
-```
-
 Tables are auto-created on first run for all backends.
-
-**ClickHouse notes:** Uses MergeTree engine partitioned by month, ordered by `(ts_ms, call_id)` for fast time-range and call-correlation queries. The daily rollup table uses SummingMergeTree for automatic counter aggregation. Communication is via ClickHouse's HTTP interface — no native driver needed. Designed for append-heavy workloads with millions of rows per day.
 
 ## HEP
 
@@ -128,56 +137,44 @@ Native HEPv3 collector. Point your existing SIP proxies at Zaman's HEP port and 
 
 Optional HEP password and peer IP allowlisting are supported.
 
-## Echo
-
-Inbound SIP is always captured. By default, Zaman replies to OPTIONS with 200 OK (useful for keepalive monitoring). REGISTER always gets 401 — it never pretends to be a registrar.
-
 ## Dashboard pages
 
 | Page | What it shows |
 |------|--------------|
-| **Overview** | Real-time NOC view — active calls, ASR, error rate, node health grid, anomaly alerts, live capture feed |
-| **Messages** | Full search with saved filters, JSON/CSV/PCAP export |
-| **Call ladder** | SIP flow diagram with arrows, recording playback, PCAP download, share link |
-| **Probe** | Active OPTIONS RTT test (operator+ role) |
-| **Metrics** | Charts + Prometheus scrape config |
+| **Overview** | Active calls, ASR, error rate, node summary, traffic charts with time windows (5m–24h + custom), live capture feed |
+| **NOC** | Full network operations — node status table, anomaly alerts, agent inventory |
+| **Messages** | Multi-field search, saved filters, JSON/CSV/PCAP export |
+| **Calls** | SIP ladder with arrows, PCAP download, recording player, public share links, B2BUA correlation |
+| **Probe** | Active OPTIONS RTT test |
+| **Metrics** | Core health, capture counters, HEP ingest, real-time window, telecom KPIs, method/response charts, Prometheus + Grafana config |
 | **Reports** | ASR/NER gauges, response codes, top talkers, agents, daily rollups |
-| **Alerts** | Threshold rules, Slack/webhook/email channels, alert history |
-| **SLA** | Service level dashboard with availability status |
-| **Users** | Admin: create/delete users, assign roles |
-| **API Tokens** | Admin: generate/revoke Bearer tokens for automation |
-| **Audit Log** | Admin: who logged in, who changed what |
+| **SLA** | Per-agent and per-destination SLA with configurable targets |
+| **Alerts** | Threshold rules, notification channels (Slack/webhook/email), alert history |
+| **Users** | User management with inline password reset |
+| **API Tokens** | Generate/revoke Bearer tokens for automation |
+| **Audit Log** | Login attempts, config changes, exports |
 
-## Auth and access control
+## Auth
 
-Three roles: **admin** (full access), **operator** (+ probe, alerts), **viewer** (read-only dashboard).
+Three roles: **admin** (full access), **operator** (+ probe, alerts, SLA), **viewer** (read-only).
 
-Set `ZAMAN_AUTH=0` to disable auth entirely for lab use.
+Disable with `ZAMAN_AUTH=0` for lab use.
 
-API tokens can be generated from the admin panel for scripts and CI pipelines. Use as `Authorization: Bearer <token>`.
+API tokens for scripts: `Authorization: Bearer <token>`.
 
-IP allowlisting: set `ZAMAN_DASHBOARD_ALLOW_IPS=10.0.0.,192.168.1.` to restrict dashboard access.
+IP allowlisting: `ZAMAN_DASHBOARD_ALLOW_IPS=10.0.0.,192.168.1.`
 
-## Core API
+LDAP: set `ZAMAN_LDAP_URL` to your LDAP HTTP bind proxy.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/health` | Liveness (always open) |
-| GET | `/api/metrics`, `/metrics` | JSON counters, Prometheus text |
-| GET | `/api/messages?limit=&call_id=&agent=&method=&transport=&src=` | Search captures |
-| GET | `/api/messages/:id` | Single message |
-| GET | `/api/report/summary` | Totals, methods, transports |
-| GET | `/api/report/kpi` | ASR, NER, registration stats |
-| GET | `/api/report/response-codes` | Status code distribution |
-| GET | `/api/report/top-calls` | Busiest Call-IDs |
-| GET | `/api/report/top-talkers` | Busiest endpoints |
-| GET | `/api/report/agents` | HEP node inventory |
-| GET | `/api/report/daily` | Daily rollup |
-| GET | `/api/report/cps?minutes=` | Calls per minute |
-| GET | `/api/realtime?window=` | Windowed stats (default 5 min) |
-| GET | `/api/nodes` | Per-agent health with status |
-| GET | `/api/anomalies` | Active anomaly indicators |
-| POST | `/api/probe` | OPTIONS RTT test |
+## Integrations
+
+**Prometheus** — scrape `/metrics` on the core port.
+
+**Grafana** — SimpleJSON datasource at `/api/grafana/`.
+
+**LDAP/SSO** — `ZAMAN_LDAP_URL` env var.
+
+**CLI** — `scripts/zaman-cli.sh health|kpi|nodes|search|calls|ladder|export`
 
 ## Configuration
 
@@ -204,16 +201,17 @@ IP allowlisting: set `ZAMAN_DASHBOARD_ALLOW_IPS=10.0.0.,192.168.1.` to restrict 
 | `ZAMAN_AUTH` | _(enabled)_ | Set `0` to disable dashboard auth |
 | `ZAMAN_DASHBOARD_ALLOW_IPS` | _(empty)_ | IP allowlist for dashboard |
 | `ZAMAN_RATE_LIMIT` | `100` | API requests/sec per IP (0 = disabled) |
-| `ZAMAN_LDAP_URL` | _(empty)_ | LDAP HTTP bind proxy URL for auth |
+| `ZAMAN_LDAP_URL` | _(empty)_ | LDAP HTTP bind proxy URL |
+| `ZAMAN_BRAND_NAME` | `Zaman` | Custom dashboard title |
+| `ZAMAN_BRAND_SUBTITLE` | `SIP monitoring · echo` | Custom subtitle |
 | `ZAMAN_CORE` | `http://127.0.0.1:9090` | Core URL (for dashboard) |
 
-## Integrations
+## Scale
 
-**Grafana:** The core exposes a JSON datasource at `/api/grafana/`. Point Grafana's SimpleJSON datasource at `http://zaman-core:9090/api/grafana/` for metrics.
+- **Small**: SQLite, single binary, laptop or VM. Thousands of calls/day. No dependencies.
+- **Large**: ClickHouse backend, millions of calls/day, months of retention. Same binary, different env var.
 
-**LDAP/SSO:** Set `ZAMAN_LDAP_URL` to an LDAP HTTP bind proxy. Zaman POSTs `{"username","password"}` and expects `{"ok":true,"role":"..."}`. Falls back to local users if LDAP is unavailable.
-
-**Prometheus:** Scrape `/metrics` on the core port. Standard text exposition format.
+The dashboard is stateless (HMAC-signed cookies). Run multiple instances behind a load balancer.
 
 ## Project layout
 
@@ -221,43 +219,32 @@ IP allowlisting: set `ZAMAN_DASHBOARD_ALLOW_IPS=10.0.0.,192.168.1.` to restrict 
 zaman/
   core/main.mko          # capture, echo, HEP, API, metrics (Mako)
   web/main.weft           # dashboard, auth, alerting (Weft + HTMX)
+  install.sh              # universal Linux installer
   Dockerfile              # multi-stage build
   docker-compose.yml      # SQLite / PostgreSQL / ClickHouse profiles
   deploy/
     zaman-core.service    # systemd unit
     zaman-web.service     # systemd unit
-    install.sh            # bare-metal installer
+    install.sh            # bare-metal installer (post-build)
   scripts/
     smoke.sh              # end-to-end test
     demo.sh               # local demo
+    zaman-cli.sh          # command-line interface
     send_hep.py           # HEP test client
     send_options.py       # SIP OPTIONS test client
     gen_pcap.py           # PCAP generation
   spec.md                 # engineering spec
   SECURITY_REVIEW.md      # threat model
+  docs/                   # screenshots
 ```
 
-## Scale
-
-Zaman is designed to run at two speeds:
-
-- **Small**: SQLite, single binary, laptop or VM. Thousands of calls/day. No dependencies.
-- **Large**: ClickHouse backend, millions of calls/day, months of retention. Same binary, different env var.
-
-The core writes captures through a single serialized channel (`chan[string]` → `db_writer`). The channel capacity (`DB_CH_CAP=1024`) provides backpressure when the database lags. For ClickHouse deployments, this is append-only with no UPDATE overhead — each capture is a single INSERT.
-
-The dashboard is stateless (HMAC-signed cookies, no server-side sessions). You can run multiple dashboard instances behind a load balancer against the same core.
-
 ## Limitations
-
-Some things Zaman does not do today:
 
 - No RTP/media capture or MOS scoring (SIP signaling only)
 - No multi-node federation (single core instance)
 - No built-in TLS on the dashboard (use a reverse proxy)
 - Alert evaluation is poll-based (30s), not streaming
 - The UI is server-rendered with HTMX — no client-side SPA
-- ClickHouse batch inserts are per-row over HTTP; for maximum throughput at extreme scale, a batching proxy (e.g. `clickhouse-bulk`) can sit between Zaman and ClickHouse
 
 ## License
 

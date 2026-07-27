@@ -1395,6 +1395,106 @@ fn db_anomalies_json() -> string {
     return out
 }
 
+// ---- SLA per-dimension KPIs ----
+
+fn db_sla_by_agent_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let rows = sql_query_rows(db,
+        "SELECT agent, " +
+        "COUNT(CASE WHEN method = 'INVITE' AND kind = 'request' THEN 1 END) AS invites, " +
+        "COUNT(CASE WHEN status >= 200 AND status < 300 THEN 1 END) AS ok_2xx, " +
+        "COUNT(CASE WHEN status >= 400 THEN 1 END) AS errors, " +
+        "COUNT(*) AS total, " +
+        "MIN(ts_ms) AS first_seen, MAX(ts_ms) AS last_seen " +
+        "FROM captures WHERE agent IS NOT NULL AND agent != '' " +
+        "GROUP BY agent ORDER BY total DESC", [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let agent = sql_rows_str(rows, 0)
+            let invites = sql_rows_int(rows, 1)
+            let ok2 = sql_rows_int(rows, 2)
+            let errors = sql_rows_int(rows, 3)
+            let total = sql_rows_int(rows, 4)
+            let t0 = sql_rows_int(rows, 5)
+            let t1 = sql_rows_int(rows, 6)
+            let mut asr = 0
+            if invites > 0 {
+                asr = ok2 * 100 / invites
+            }
+            let mut err_rate = 0
+            if total > 0 {
+                err_rate = errors * 100 / total
+            }
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"agent\":\"" + jesc(agent) + "\",\"invites\":" + string(invites) +
+                ",\"ok_2xx\":" + string(ok2) + ",\"errors\":" + string(errors) +
+                ",\"total\":" + string(total) + ",\"asr\":" + string(asr) +
+                ",\"err_rate\":" + string(err_rate) +
+                ",\"first_seen\":" + string(t0) + ",\"last_seen\":" + string(t1) + "}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
+fn db_sla_by_dest_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let rows = sql_query_rows(db,
+        "SELECT dst, " +
+        "COUNT(CASE WHEN method = 'INVITE' AND kind = 'request' THEN 1 END) AS invites, " +
+        "COUNT(CASE WHEN status >= 200 AND status < 300 THEN 1 END) AS ok_2xx, " +
+        "COUNT(CASE WHEN status >= 400 THEN 1 END) AS errors, " +
+        "COUNT(*) AS total " +
+        "FROM captures WHERE dst IS NOT NULL AND dst != '' " +
+        "GROUP BY dst ORDER BY total DESC LIMIT 30", [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let dst = sql_rows_str(rows, 0)
+            let invites = sql_rows_int(rows, 1)
+            let ok2 = sql_rows_int(rows, 2)
+            let errors = sql_rows_int(rows, 3)
+            let total = sql_rows_int(rows, 4)
+            let mut asr = 0
+            if invites > 0 {
+                asr = ok2 * 100 / invites
+            }
+            let mut err_rate = 0
+            if total > 0 {
+                err_rate = errors * 100 / total
+            }
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"dst\":\"" + jesc(dst) + "\",\"invites\":" + string(invites) +
+                ",\"ok_2xx\":" + string(ok2) + ",\"errors\":" + string(errors) +
+                ",\"total\":" + string(total) + ",\"asr\":" + string(asr) +
+                ",\"err_rate\":" + string(err_rate) + "}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
 // ---- B2BUA leg correlation ----
 // Links related Call-IDs: same HEP correlation ID, or overlapping From/To within a time window.
 fn db_related_calls_json(call_id: string) -> string {
@@ -2622,6 +2722,10 @@ fn http_worker(store: CMap, metrics: CMap, port: int) -> int {
             let _ = http_respond_json(c, 200, db_realtime_json(win))
         } else if str_eq(path, "/api/nodes") {
             let _ = http_respond_json(c, 200, db_node_health_json())
+        } else if str_eq(path, "/api/sla/agents") {
+            let _ = http_respond_json(c, 200, db_sla_by_agent_json())
+        } else if str_eq(path, "/api/sla/destinations") {
+            let _ = http_respond_json(c, 200, db_sla_by_dest_json())
         } else if str_eq(path, "/api/anomalies") {
             let _ = http_respond_json(c, 200, db_anomalies_json())
         } else if str_eq(path, "/api/delete") && str_eq(method, "POST") {

@@ -452,8 +452,8 @@ fn msg_row(m) {
     "</td>" +
     "<td class=\"py-2 px-3 text-xs max-w-[12rem] truncate text-[#a1a1aa]\">" + h(from) + "</td>" +
     "<td class=\"py-2 px-3 text-xs\">" +
-    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/messages/" + ("" + (id)) + "\" hx-boost=\"true\">view</a> · " +
-    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/calls?call_id=" + cid + "\" hx-boost=\"true\">ladder</a>" +
+    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/messages/" + ("" + (id)) + "\">view</a> · " +
+    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/calls?call_id=" + cid + "\">ladder</a>" +
     "</td></tr>"
 }
 
@@ -467,7 +467,7 @@ fn messages_table(items) {
     if rows == "" {
         rows = "<tr><td colspan=\"7\" class=\"py-8 text-center text-[#a1a1aa] text-sm\">No messages yet — send SIP to the core or run a probe.</td></tr>"
     }
-    "<div class=\"overflow-x-auto rounded-2xl border border-[#1e1e22] bg-[#131316]\">" +
+    "<div class=\"overflow-x-auto card\">" +
     "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#a1a1aa] border-b border-[#1e1e22]\">" +
     "<th class=\"py-2 px-3 font-semibold hide-mobile\">ID</th><th class=\"py-2 px-3 font-semibold\">Method</th>" +
     "<th class=\"py-2 px-3 font-semibold\">Call-ID</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Src</th>" +
@@ -590,6 +590,20 @@ fn fetch_nodes() {
     if p.ok { p.value } else { [] }
 }
 
+fn fetch_sla_agents() {
+    r := http.get(core_base() + "/api/sla/agents", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_sla_destinations() {
+    r := http.get(core_base() + "/api/sla/destinations", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
 fn fetch_related(call_id) {
     r := http.get(core_base() + "/api/related?call_id=" + call_id, api_headers())
     if !r.ok { return [] }
@@ -604,6 +618,16 @@ fn fetch_anomalies() {
     if p.ok { p.value } else { [] }
 }
 
+fn time_ago(unix_ts) {
+    if unix_ts == 0 { return "never" }
+    diff := time.unix() - unix_ts
+    if diff < 0 { return "just now" }
+    if diff < 60 { return ("" + (diff)) + "s ago" }
+    if diff < 3600 { return ("" + (diff / 60)) + "m ago" }
+    if diff < 86400 { return ("" + (diff / 3600)) + "h ago" }
+    ("" + (diff / 86400)) + "d ago"
+}
+
 fn n(m, key) {
     v := m[key]
     if v == null { 0 } else { v }
@@ -612,7 +636,7 @@ fn n(m, key) {
 fn build_traffic_charts(minutes) {
     cps := fetch_cps(minutes)
     rt := fetch_realtime(minutes)
-    crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+    crd := "card"
 
     // Build line chart data from CPS buckets
     mut line_data := {}
@@ -816,7 +840,7 @@ fn ladder_html(call_id) {
         i = i - 1
     }
     if len(ordered) == 0 {
-        return "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-6\">" +
+        return "<div class=\"card p-6\">" +
             "<p class=\"text-sm text-[#71717a]\">No messages for this Call-ID.</p></div>"
     }
 
@@ -950,7 +974,7 @@ fn ladder_html(call_id) {
                 "<span class=\"mono truncate max-w-[20rem]\">" + rcid + "</span>" +
                 "<span class=\"text-[10px] text-[#52525b] shrink-0 ml-2\">" + reason_label + " · " + ("" + (rmsgs)) + " msgs</span></a>"
         }
-        related_html = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] mt-4 overflow-hidden\">" +
+        related_html = "<div class=\"card mt-4 overflow-hidden\">" +
             "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center gap-2\">" +
             "<svg class=\"w-4 h-4 text-[#a78bfa]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1\"/></svg>" +
             "<span class=\"text-sm font-semibold\">Related calls (B2BUA)</span>" +
@@ -966,7 +990,7 @@ fn ladder_html(call_id) {
         if (rm["proto"] ?? "") == "rtcp" { has_rtcp = true }
     }
     if has_rtcp {
-        qos_html = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5 mt-4\">" +
+        qos_html = "<div class=\"card p-5 mt-4\">" +
             "<div class=\"flex items-center gap-2 mb-3\">" +
             "<svg class=\"w-4 h-4 text-[#34d399]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z\"/></svg>" +
             "<span class=\"text-sm font-semibold\">QoS / RTCP</span></div>" +
@@ -978,7 +1002,7 @@ fn ladder_html(call_id) {
     upload := recording_upload_form(call_id)
 
     // Assemble
-    "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] overflow-hidden\">" +
+    "<div class=\"card overflow-hidden\">" +
     "<div class=\"p-5 border-b border-[#1e1e22]\">" +
     "<div class=\"flex items-start justify-between gap-4\">" +
     "<div><div class=\"text-[11px] text-[#71717a] uppercase tracking-wider font-medium mb-1\">Call-ID</div>" +
@@ -1023,7 +1047,7 @@ fn has_recording(call_id) {
 
 fn recording_player(call_id) {
     if !has_recording(call_id) { return "" }
-    "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5 mt-4\">" +
+    "<div class=\"card p-5 mt-4\">" +
     "<div class=\"flex items-center gap-3 mb-3\">" +
     "<svg class=\"w-5 h-5 text-[#34d399]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z\"/></svg>" +
     "<span class=\"text-sm font-medium\">Call recording</span></div>" +
@@ -1157,62 +1181,83 @@ fn delete_search(id) {
 
 fn admin_users_page(user, flash) {
     users := list_users()
-    mut rows := ""
+    th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
+    inp := "w-full rounded-md bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm"
+    lbl := "block text-[10px] text-[#52525b] uppercase tracking-wider mb-1.5"
+
+    // Flash message
+    mut flash_html := ""
+    if flash != "" {
+        is_err := str.starts_with(flash, "Error")
+        cls := if is_err { "border-[#f87171]/20 bg-[#f87171]/5 text-[#f87171]" } else { "border-[#34d399]/20 bg-[#34d399]/5 text-[#34d399]" }
+        flash_html = "<div class=\"rounded-lg border " + cls + " px-3 py-2 text-xs mb-4\">" + h(flash) + "</div>"
+    }
+
+    // User rows — each user is a card-like row with inline actions
+    mut user_list := ""
     for u in users {
         uid := u["id"] ?? 0
         uname := h(u["username"] ?? "")
         urole := u["role"] ?? "viewer"
         is_self := (uid == (user["id"] ?? -1))
+
         mut actions := ""
         if !is_self {
-            actions = "<form method=\"post\" action=\"/admin/users/" + ("" + (uid)) + "/delete\" class=\"inline\" onsubmit=\"return confirm('Delete " + uname + "?')\">" +
-                "<button class=\"text-[#f87171] hover:underline text-xs\">delete</button></form>"
+            // Reset password inline
+            actions = "<details class=\"inline\"><summary class=\"text-[11px] text-[#52525b] hover:text-[#a1a1aa] cursor-pointer\">reset pw</summary>" +
+                "<form method=\"post\" action=\"/admin/users/password\" class=\"flex gap-2 mt-2\">" +
+                "<input type=\"hidden\" name=\"user_id\" value=\"" + ("" + (uid)) + "\"/>" +
+                "<input name=\"new_password\" type=\"password\" required placeholder=\"new password\" class=\"flex-1 rounded-md bg-[#0a0a0c] border border-[#1e1e22] px-2 py-1 text-xs mono\"/>" +
+                "<button class=\"rounded-md px-2 py-1 text-[11px] bg-[#1e1e22] text-[#a1a1aa] hover:text-[#e4e4e7]\">Set</button></form></details>" +
+                " <form method=\"post\" action=\"/admin/users/" + ("" + (uid)) + "/delete\" class=\"inline\" onsubmit=\"return confirm('Delete " + uname + "?')\">" +
+                "<button class=\"text-[11px] text-[#52525b] hover:text-[#f87171] ml-2\">delete</button></form>"
         } else {
-            actions = "<span class=\"text-[10px] text-[#a1a1aa]\">you</span>"
+            actions = "<span class=\"text-[10px] text-[#3f3f46]\">current session</span>"
         }
-        rows = rows + "<tr class=\"hover:bg-white/[0.02]\">" +
-            "<td class=\"py-2 px-3 mono text-xs text-[#a1a1aa]\">" + ("" + (uid)) + "</td>" +
-            "<td class=\"py-2 px-3 text-sm font-medium\">" + uname + "</td>" +
-            "<td class=\"py-2 px-3\">" + role_badge(urole) + "</td>" +
-            "<td class=\"py-2 px-3 text-xs\">" + actions + "</td></tr>"
+
+        user_list = user_list +
+            "<div class=\"flex items-center justify-between py-3 px-4 border-b border-[#1e1e22]/50 last:border-0\">" +
+            "<div class=\"flex items-center gap-3\">" +
+            "<div class=\"w-8 h-8 rounded-full bg-[#1e1e22] flex items-center justify-center text-xs font-semibold text-[#71717a]\">" + str.slice(uname, 0, 1) + "</div>" +
+            "<div><div class=\"text-sm font-medium\">" + uname + "</div>" +
+            "<div class=\"text-[10px] text-[#3f3f46]\">ID " + ("" + (uid)) + "</div></div>" +
+            "<div class=\"ml-4\">" + role_badge(urole) + "</div></div>" +
+            "<div class=\"flex items-center gap-1\">" + actions + "</div></div>"
     }
-    mut flash_html := ""
-    if flash != "" {
-        is_err := str.starts_with(flash, "Error")
-        cls := if is_err { "border-[rgba(248,113,113,.35)] bg-[rgba(248,113,113,.08)] text-[#f87171]" } else { "border-[rgba(52,211,153,.35)] bg-[rgba(52,211,153,.08)] text-[#34d399]" }
-        flash_html = "<div class=\"rounded-xl border " + cls + " p-3 text-sm mb-4\">" + h(flash) + "</div>"
-    }
+
+    // Role descriptions
+    roles_info := "<div class=\"card p-4 mb-5\">" +
+        "<div class=\"grid grid-cols-3 gap-4 text-xs\">" +
+        "<div><div class=\"flex items-center gap-1.5 mb-1.5\">" + role_badge("viewer") + "</div>" +
+        "<p class=\"text-[#52525b]\">Read-only. View dashboard, messages, calls, reports.</p></div>" +
+        "<div><div class=\"flex items-center gap-1.5 mb-1.5\">" + role_badge("operator") + "</div>" +
+        "<p class=\"text-[#52525b]\">+ Run probes, manage alerts, configure SLA targets.</p></div>" +
+        "<div><div class=\"flex items-center gap-1.5 mb-1.5\">" + role_badge("admin") + "</div>" +
+        "<p class=\"text-[#52525b]\">+ Create/delete users, API tokens, audit log, config.</p></div>" +
+        "</div></div>"
+
     flash_html +
-    "<div class=\"flex items-end justify-between gap-3 mb-6\">" +
-    "<div><h1 class=\"text-2xl font-bold\">Users</h1>" +
-    "<p class=\"text-sm text-[#a1a1aa] mt-1\">Manage dashboard access — admin, operator, viewer.</p></div>" +
-    "<span class=\"text-xs text-[#a1a1aa] mono\">" + ("" + (len(users))) + " users</span></div>" +
-    "<div class=\"grid lg:grid-cols-3 gap-4\">" +
-    "<div class=\"lg:col-span-2 rounded-2xl border border-[#1e1e22] bg-[#131316] overflow-x-auto\">" +
-    "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#a1a1aa] border-b border-[#1e1e22]\">" +
-    "<th class=\"py-2 px-3\">ID</th><th class=\"py-2 px-3\">Username</th><th class=\"py-2 px-3\">Role</th><th class=\"py-2 px-3\"></th></tr></thead>" +
-    "<tbody class=\"divide-y divide-[#27272a]\">" + rows + "</tbody></table></div>" +
-    "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5\">" +
-    "<h2 class=\"text-sm font-semibold mb-4\">Create user</h2>" +
-    "<form method=\"post\" action=\"/admin/users\" class=\"space-y-3\">" +
-    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">Username</label>" +
-    "<input name=\"username\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm focus:border-[#a78bfa] outline-none\"/></div>" +
-    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">Password</label>" +
-    "<input name=\"password\" type=\"password\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm focus:border-[#a78bfa] outline-none\"/></div>" +
-    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">Role</label>" +
-    "<select name=\"role\" class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm\">" +
-    "<option value=\"viewer\">viewer — read-only dashboard</option>" +
-    "<option value=\"operator\">operator — + probe access</option>" +
-    "<option value=\"admin\">admin — + user management</option></select></div>" +
-    "<button type=\"submit\" class=\"w-full rounded-lg px-4 py-2 text-sm font-semibold bg-gradient-to-br from-[#a78bfa] to-[#7c3aed] text-white\">Create</button></form>" +
-    "<h2 class=\"text-sm font-semibold mt-6 mb-3 pt-4 border-t border-[#1e1e22]\">Reset password</h2>" +
-    "<form method=\"post\" action=\"/admin/users/password\" class=\"space-y-3\">" +
-    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">User ID</label>" +
-    "<input name=\"user_id\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono focus:border-[#a78bfa] outline-none\" placeholder=\"1\"/></div>" +
-    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">New password</label>" +
-    "<input name=\"new_password\" type=\"password\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm focus:border-[#a78bfa] outline-none\"/></div>" +
-    "<button type=\"submit\" class=\"w-full rounded-lg px-4 py-2 text-sm border border-[#1e1e22] bg-[#27272a]\">Reset password</button></form>" +
-    "</div></div>"
+    "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+    "<h1 class=\"text-xl font-semibold\">Users</h1>" +
+    "<span class=\"text-[10px] text-[#3f3f46] mono\">" + ("" + (len(users))) + " accounts</span></div>" +
+    roles_info +
+    // User list
+    "<div class=\"card overflow-hidden mb-5\">" + user_list + "</div>" +
+    // Create form — clean, single row
+    "<div class=\"card p-4\">" +
+    "<div class=\"section-title\">Add user</div>" +
+    "<form method=\"post\" action=\"/admin/users\" class=\"grid grid-cols-4 gap-3 items-end\">" +
+    "<div><label class=\"" + lbl + "\">Username</label>" +
+    "<input name=\"username\" required placeholder=\"jdoe\" class=\"" + inp + "\"/></div>" +
+    "<div><label class=\"" + lbl + "\">Password</label>" +
+    "<input name=\"password\" type=\"password\" required placeholder=\"min 8 chars + digit\" class=\"" + inp + "\"/></div>" +
+    "<div><label class=\"" + lbl + "\">Role</label>" +
+    "<select name=\"role\" class=\"" + inp + "\">" +
+    "<option value=\"viewer\">viewer</option>" +
+    "<option value=\"operator\">operator</option>" +
+    "<option value=\"admin\">admin</option></select></div>" +
+    "<button type=\"submit\" class=\"rounded-md px-4 py-2 text-sm bg-[#a78bfa] text-[#0a0a0c] font-medium hover:bg-[#c4b5fd] transition-colors\">Create user</button>" +
+    "</form></div>"
 }
 
 // ---- audit log ----
@@ -1274,6 +1319,50 @@ fn load_audit(limit) {
         i = i - 1
     }
     entries
+}
+
+// ---- SLA targets (configurable) ----
+
+fn sla_targets_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-sla-targets.json"
+}
+
+fn load_sla_targets() {
+    r := fs.read(sla_targets_path())
+    if !r.ok {
+        return {
+            "asr_target": 45, "asr_warning": 40, "asr_critical": 35,
+            "ner_target": 98, "ner_warning": 90, "ner_critical": 80,
+            "err_rate_max": 5,
+            "reg_fail_max": 3,
+            "fivexx_max": 2
+        }
+    }
+    p := json.parse(r.value)
+    if p.ok { p.value } else { {"asr_target": 45, "asr_warning": 40, "asr_critical": 35, "ner_target": 98, "err_rate_max": 5} }
+}
+
+fn save_sla_targets(targets) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(sla_targets_path(), json.stringify(targets))
+}
+
+fn sla_status_for(value, target, warning, critical) {
+    if value >= target { return "pass" }
+    if value >= warning { return "warning" }
+    "fail"
+}
+
+fn sla_dot(status) {
+    if status == "pass" { "<span class=\"w-2 h-2 rounded-full bg-[#34d399] inline-block\"></span>" }
+    else if status == "warning" { "<span class=\"w-2 h-2 rounded-full bg-[#fbbf24] inline-block\"></span>" }
+    else { "<span class=\"w-2 h-2 rounded-full bg-[#f87171] inline-block\"></span>" }
+}
+
+fn sla_color(status) {
+    if status == "pass" { "#34d399" } else if status == "warning" { "#fbbf24" } else { "#f87171" }
 }
 
 // ---- custom branding ----
@@ -1724,7 +1813,7 @@ fn evaluate_alerts(rt) {
 // ---- report helpers ----
 
 fn gauge_card(label, value, unit, color, sub) {
-    crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+    crd := "card"
     "<div class=\"" + crd + " p-5\">" +
     "<div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold mb-3\">" + label + "</div>" +
     "<div class=\"flex items-end gap-1 mb-2\">" +
@@ -1891,7 +1980,7 @@ fn main {
 
     app.get("/partials/nodes", fn(req) {
         nodes := fetch_nodes()
-        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        crd := "card"
         mut ncards := ""
         for nd in nodes {
             nname := h(nd["agent"] ?? "")
@@ -1982,7 +2071,7 @@ fn main {
                     "<form method=\"post\" action=\"/searches/" + ("" + (sid)) + "/delete\" class=\"shrink-0\">" +
                     "<button class=\"text-[10px] text-[#52525b] hover:text-[#f87171]\">&times;</button></form></div>"
             }
-            saved_html = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4 mb-4\">" +
+            saved_html = "<div class=\"card p-4 mb-4\">" +
                 "<div class=\"text-[11px] text-[#71717a] uppercase tracking-wider font-medium mb-2\">Saved searches</div>" +
                 slinks + "</div>"
         }
@@ -2017,7 +2106,7 @@ fn main {
             "<p class=\"text-sm text-[#71717a] mt-1\">SIP/HEP captures with full search across all fields.</p></div>" +
             export_btns + "</div>" +
             saved_html +
-            "<form class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4 mb-5\" method=\"get\" action=\"/messages\">" +
+            "<form class=\"card p-4 mb-5\" method=\"get\" action=\"/messages\">" +
             "<div class=\"grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3\">" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"any\" class=\"w-full " + inp + "\"/></div>" +
@@ -2101,14 +2190,14 @@ fn main {
                     "<span class=\"truncate max-w-[20rem]\">" + rc_h + "</span>" +
                     "<span class=\"text-[#52525b] shrink-0 ml-2\">" + ("" + (cnt)) + "</span></a>"
             }
-            recent = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] overflow-hidden mb-6\">" +
+            recent = "<div class=\"card overflow-hidden mb-6\">" +
                 "<div class=\"px-4 py-3 border-b border-[#1e1e22] text-xs font-medium text-[#71717a] uppercase tracking-wider\">Recent calls</div>" +
                 "<div class=\"p-2 max-h-[280px] overflow-y-auto space-y-0.5\">" + links + "</div></div>"
         }
         cid_h := h(cid)
         mut empty_hint := ""
         if cid == "" {
-            empty_hint = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-8 text-center\">" +
+            empty_hint = "<div class=\"card p-8 text-center\">" +
                 "<div class=\"text-[#52525b] mb-2\"><svg class=\"w-10 h-10 mx-auto\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1\" d=\"M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2\"/></svg></div>" +
                 "<p class=\"text-sm text-[#71717a]\">Select a Call-ID from the list or search above to view the signaling ladder.</p></div>"
         }
@@ -2134,7 +2223,7 @@ fn main {
         }
         body := "<h1 class=\"text-2xl font-bold mb-1\">Echo probe</h1>" +
             "<p class=\"text-sm text-[#a1a1aa] mb-6\">Active OPTIONS RTT. Core must set <code class=\"mono\">ZAMAN_PROBE=1</code> (off by default).</p>" +
-            "<form hx-post=\"/probe\" hx-target=\"#probe-result\" hx-swap=\"innerHTML\" class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5 grid md:grid-cols-3 gap-3 max-w-3xl\">" +
+            "<form hx-post=\"/probe\" hx-target=\"#probe-result\" hx-swap=\"innerHTML\" class=\"card p-5 grid md:grid-cols-3 gap-3 max-w-3xl\">" +
             "<label class=\"text-sm block\"><span class=\"text-[#a1a1aa] text-xs\">Host</span>" +
             "<input name=\"host\" value=\"127.0.0.1\" class=\"mt-1 w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 mono text-sm\"/></label>" +
             "<label class=\"text-sm block\"><span class=\"text-[#a1a1aa] text-xs\">Port</span>" +
@@ -2194,31 +2283,168 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         m := fetch_metrics()
+        rt := fetch_realtime(5)
+        kpi := fetch_kpi()
+        rcodes := fetch_response_codes()
+        crd := "card"
+
         mut methods := m["methods"]
         if methods == null { methods = {} }
-        pie := viz.pie({
-            "INVITE": methods["INVITE"] ?? 0,
-            "OPTIONS": methods["OPTIONS"] ?? 0,
-            "REGISTER": methods["REGISTER"] ?? 0,
-            "other": (methods["BYE"] ?? 0) + (methods["ACK"] ?? 0) + (methods["INFO"] ?? 0) + (methods["MESSAGE"] ?? 0) + (methods["UNKNOWN"] ?? 0),
-        }, {"title": "Share", "width": 420, "height": 280})
-        prom_url := h(core_base() + "/metrics")
-        body := "<h1 class=\"text-2xl font-bold mb-1\">Metrics</h1>" +
-            "<p class=\"text-sm text-[#a1a1aa] mb-6\">Integrated counters — also scrape Prometheus text at the core.</p>" +
-            "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
-            stat_card("msgs", n(m, "msgs_total"), "total captured") +
-            stat_card("requests", n(m, "requests"), "SIP requests") +
-            stat_card("echoes", n(m, "echoes"), "auto replies") +
-            stat_card("HEP", n(m, "hep_total"), "sip " + ("" + (n(m, "hep_sip"))) + " · rtcp " + ("" + (n(m, "hep_rtcp")))) +
-            "</div>" +
-            "<div class=\"grid lg:grid-cols-2 gap-4\">" +
-            "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4\">" + pie.html + "</div>" +
-            "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4 text-sm space-y-3\">" +
-            "<h2 class=\"font-semibold\">Prometheus endpoint</h2>" +
-            "<p class=\"text-[#a1a1aa]\">Point any scraper at:</p>" +
-            "<code class=\"block mono text-xs bg-[#0a0a0c] border border-[#1e1e22] rounded-lg p-3 break-all\">" + prom_url + "</code>" +
-            "<pre class=\"mono text-xs text-[#a1a1aa] bg-[#0a0a0c] border border-[#1e1e22] rounded-lg p-3 overflow-x-auto\">scrape_configs:\n  - job_name: zaman\n    static_configs:\n      - targets: ['127.0.0.1:9090']</pre>" +
+
+        up_ms := n(m, "uptime_ms")
+        up_h := up_ms / 3600000
+        up_m := (up_ms % 3600000) / 60000
+
+        // ── Core health ──
+        health := "<div class=\"section\">" +
+            "<div class=\"section-title\">Core health</div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3\">" +
+            stat_card("Uptime", ("" + (up_h)) + "h " + ("" + (up_m)) + "m", "process") +
+            stat_card("DB writes", n(m, "db_ok"), "errors " + ("" + (n(m, "db_err")))) +
+            stat_card("Ring", ("" + (n(m, "ring_idx"))) + " / " + ("" + (n(m, "ring_size"))), "capture buffer") +
+            stat_card("Parse errors", n(m, "parse_err"), "malformed SIP") +
+            stat_card("Rate limited", n(m, "rate_limited"), "429 responses") +
+            stat_card("Probe RTT", ("" + (n(m, "probe_rtt_ms"))) + "ms", "ok " + ("" + (n(m, "probes_ok"))) + " fail " + ("" + (n(m, "probes_fail")))) +
             "</div></div>"
+
+        // ── Capture counters ──
+        captures := "<div class=\"section\">" +
+            "<div class=\"section-title\">Capture counters</div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3\">" +
+            stat_card("Total messages", n(m, "msgs_total"), "all protocols") +
+            stat_card("SIP requests", n(m, "requests"), "inbound") +
+            stat_card("SIP responses", n(m, "responses"), "received") +
+            stat_card("Echoes sent", n(m, "echoes"), "auto-reply") +
+            stat_card("2xx", n(m, "status_2xx"), "success responses") +
+            "</div></div>"
+
+        // ── HEP counters ──
+        hep := "<div class=\"section\">" +
+            "<div class=\"section-title\">HEP ingest</div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3\">" +
+            stat_card("HEP total", n(m, "hep_total"), "accepted packets") +
+            stat_card("HEP/UDP", n(m, "hep_udp"), "standard") +
+            stat_card("HEP/TCP", n(m, "hep_tcp"), "stream") +
+            stat_card("HEP/TLS", n(m, "hep_tls"), "encrypted") +
+            stat_card("HEP errors", n(m, "hep_err"), "decode failures") +
+            stat_card("HEP denied", n(m, "hep_deny"), "ACL blocked") +
+            "</div>" +
+            "<div class=\"grid grid-cols-3 gap-3 mt-3\">" +
+            stat_card("HEP auth fail", n(m, "hep_auth_fail"), "password mismatch") +
+            stat_card("HEP SIP", n(m, "hep_sip"), "proto_type=1") +
+            stat_card("HEP RTCP", n(m, "hep_rtcp"), "proto_type=5") +
+            "</div></div>"
+
+        // ── Method breakdown ──
+        inv := methods["INVITE"] ?? 0
+        opts := methods["OPTIONS"] ?? 0
+        reg := methods["REGISTER"] ?? 0
+        bye := methods["BYE"] ?? 0
+        ack := methods["ACK"] ?? 0
+        info := methods["INFO"] ?? 0
+        msg := methods["MESSAGE"] ?? 0
+        unk := methods["UNKNOWN"] ?? 0
+
+        method_bar := viz.bar({
+            "INVITE": inv, "OPTIONS": opts, "REGISTER": reg, "BYE": bye,
+            "ACK": ack, "INFO": info, "MESSAGE": msg,
+        }, {"title": "SIP methods (all time)", "width": 560, "height": 200, "colors": ["#a78bfa", "#34d399", "#f472b6", "#fb923c", "#facc15", "#94a3b8", "#22d3ee"]})
+
+        // Method table
+        mut method_rows := ""
+        mut total_methods := inv + opts + reg + bye + ack + info + msg + unk
+        if total_methods == 0 { total_methods = 1 }
+        for pair in [["INVITE", inv], ["OPTIONS", opts], ["REGISTER", reg], ["BYE", bye], ["ACK", ack], ["INFO", info], ["MESSAGE", msg], ["UNKNOWN", unk]] {
+            mname := pair[0]
+            mcount := pair[1]
+            pct := mcount * 100 / total_methods
+            if mcount > 0 {
+                method_rows = method_rows + "<tr><td class=\"py-1.5 px-3 text-sm\">" + ("" + (mname)) + "</td>" +
+                    "<td class=\"py-1.5 px-3 mono text-sm text-right\">" + ("" + (mcount)) + "</td>" +
+                    "<td class=\"py-1.5 px-3 text-right\">" +
+                    "<div class=\"flex items-center gap-2 justify-end\"><span class=\"text-xs text-[#52525b]\">" + ("" + (pct)) + "%</span>" +
+                    "<div class=\"w-16 h-1.5 rounded-full bg-[#1e1e22] overflow-hidden\"><div class=\"h-full rounded-full bg-[#a78bfa]\" style=\"width:" + ("" + (pct)) + "%\"></div></div></div></td></tr>"
+            }
+        }
+
+        // Response code breakdown
+        mut rcode_rows := ""
+        for rc in rcodes {
+            st := rc["status"] ?? 0
+            cnt := rc["count"] ?? 0
+            cls := if st >= 200 && st < 300 { "text-[#34d399]" } else if st >= 400 { "text-[#f87171]" } else { "text-[#fbbf24]" }
+            rcode_rows = rcode_rows + "<tr><td class=\"py-1.5 px-3 mono text-sm " + cls + " font-medium\">" + ("" + (st)) + "</td>" +
+                "<td class=\"py-1.5 px-3 mono text-sm text-right\">" + ("" + (cnt)) + "</td></tr>"
+        }
+        if rcode_rows == "" { rcode_rows = "<tr><td colspan=\"2\" class=\"py-4 text-center text-[#3f3f46] text-sm\">No responses</td></tr>" }
+
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
+        method_section := "<div class=\"section\">" +
+            "<div class=\"section-title\">SIP methods &amp; response codes</div>" +
+            "<div class=\"grid lg:grid-cols-3 gap-4\">" +
+            "<div class=\"" + crd + " p-4 overflow-x-auto\">" + method_bar.html + "</div>" +
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-1.5 px-3\">Method</th><th class=\"py-1.5 px-3 text-right\">Count</th><th class=\"py-1.5 px-3 text-right\">Share</th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e1e22]/50\">" + method_rows + "</tbody></table></div>" +
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-1.5 px-3\">Status</th><th class=\"py-1.5 px-3 text-right\">Count</th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e1e22]/50\">" + rcode_rows + "</tbody></table></div>" +
+            "</div></div>"
+
+        // ── Real-time window ──
+        realtime := "<div class=\"section\">" +
+            "<div class=\"section-title\">Real-time (5 min window)</div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3\">" +
+            stat_card("Messages", rt["total"] ?? 0, "5-min window") +
+            stat_card("INVITEs", rt["invites"] ?? 0, "call attempts") +
+            stat_card("Active calls", rt["active_calls"] ?? 0, "in progress") +
+            stat_card("ASR", ("" + (rt["asr"] ?? 0)) + "%", "answer-seizure") +
+            stat_card("4xx errors", rt["resp_4xx"] ?? 0, "client errors") +
+            stat_card("5xx errors", rt["resp_5xx"] ?? 0, "server errors") +
+            "</div></div>"
+
+        // ── KPI section ──
+        asr := kpi["asr"] ?? 0
+        ner := kpi["ner"] ?? 0
+        asr_c := if asr >= 70 { "#34d399" } else if asr >= 40 { "#fbbf24" } else { "#f87171" }
+        ner_c := if ner >= 80 { "#34d399" } else if ner >= 50 { "#fbbf24" } else { "#f87171" }
+        kpi_section := "<div class=\"section\">" +
+            "<div class=\"section-title\">Telecom KPIs (all time)</div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3\">" +
+            gauge_card("ASR", asr, "%", asr_c, "answer-seizure ratio") +
+            gauge_card("NER", ner, "%", ner_c, "network effectiveness") +
+            stat_card("INVITEs", kpi["total_invites"] ?? 0, "answered " + ("" + (kpi["answered"] ?? 0))) +
+            stat_card("Failed", kpi["failed"] ?? 0, "4xx+ on INVITE") +
+            stat_card("Registrations", kpi["total_registers"] ?? 0, "ok " + ("" + (kpi["reg_ok"] ?? 0))) +
+            stat_card("Reg failures", kpi["reg_fail"] ?? 0, "auth/denied") +
+            "</div></div>"
+
+        // ── Prometheus ──
+        prom_url := h(core_base() + "/metrics")
+        grafana_url := h(core_base() + "/api/grafana/")
+        prom := "<div class=\"section\">" +
+            "<div class=\"section-title\">Integration</div>" +
+            "<div class=\"grid lg:grid-cols-2 gap-4\">" +
+            "<div class=\"" + crd + " p-4 text-sm space-y-3\">" +
+            "<div class=\"font-semibold\">Prometheus</div>" +
+            "<p class=\"text-[#71717a] text-xs\">Scrape the core's <code class=\"mono\">/metrics</code> endpoint for standard text exposition.</p>" +
+            "<code class=\"block mono text-xs bg-[#0a0a0c] border border-[#1e1e22] rounded-lg p-3 break-all\">" + prom_url + "</code>" +
+            "<pre class=\"mono text-[11px] text-[#52525b] bg-[#0a0a0c] border border-[#1e1e22] rounded-lg p-3 overflow-x-auto\">scrape_configs:\n  - job_name: zaman\n    static_configs:\n      - targets: ['" + h(core_base()) + "']</pre></div>" +
+            "<div class=\"" + crd + " p-4 text-sm space-y-3\">" +
+            "<div class=\"font-semibold\">Grafana</div>" +
+            "<p class=\"text-[#71717a] text-xs\">Use the SimpleJSON datasource plugin. Point at the Grafana API endpoint.</p>" +
+            "<code class=\"block mono text-xs bg-[#0a0a0c] border border-[#1e1e22] rounded-lg p-3 break-all\">" + grafana_url + "</code>" +
+            "<div class=\"text-[11px] text-[#52525b]\">Available metrics: messages_total, requests, responses, echoes, hep_total, asr, ner, active_calls, err_rate</div></div>" +
+            "</div></div>"
+
+        body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+            "<h1 class=\"text-xl font-semibold\">Metrics</h1>" +
+            "<div class=\"flex gap-2\">" +
+            "<a href=\"" + prom_url + "\" target=\"_blank\" class=\"text-[11px] text-[#52525b] hover:text-[#a1a1aa] transition-colors\">Prometheus →</a>" +
+            "<a href=\"" + h(core_base() + "/api/metrics") + "\" target=\"_blank\" class=\"text-[11px] text-[#52525b] hover:text-[#a1a1aa] transition-colors\">JSON →</a></div></div>" +
+            health + captures + hep + realtime + kpi_section + method_section + prom
         web.html(layout("Metrics", body, user))
     })
 
@@ -2232,7 +2458,7 @@ fn main {
         agents := fetch_agents()
         rcodes := fetch_response_codes()
         daily := fetch_daily()
-        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        crd := "card"
         th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
 
         // ── Section 1: Telecom KPIs with visual gauges ──
@@ -2616,7 +2842,7 @@ fn main {
         history := load_alert_history()
         channels := config["channels"] ?? []
         rules := config["rules"] ?? []
-        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        crd := "card"
         inp := "w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
 
         // Channels list
@@ -2867,46 +3093,66 @@ fn main {
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
         tokens := load_api_tokens()
-        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
-        inp := "w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
-        // Check for flash (newly created token)
+        inp := "w-full rounded-md bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm"
+        lbl := "block text-[10px] text-[#52525b] uppercase tracking-wider mb-1.5"
+
         new_tok := req.query_map["new_token"] ?? ""
         mut flash := ""
         if new_tok != "" {
-            flash = "<div class=\"rounded-xl border border-[#34d399]/30 bg-[#34d399]/5 p-4 mb-4\">" +
-                "<div class=\"text-sm text-[#34d399] font-semibold mb-1\">Token created — copy it now (shown once)</div>" +
-                "<code class=\"block mono text-xs bg-[#0a0a0c] rounded-lg p-3 break-all select-all\">" + h(new_tok) + "</code></div>"
+            flash = "<div class=\"card border-[#34d399]/20 bg-[#34d399]/5 p-4 mb-5\">" +
+                "<div class=\"text-xs text-[#34d399] font-semibold mb-2\">Token created — copy it now, it won't be shown again</div>" +
+                "<div class=\"flex gap-2\">" +
+                "<code class=\"flex-1 mono text-xs bg-[#0a0a0c] rounded-md p-2.5 break-all select-all border border-[#1e1e22]\">" + h(new_tok) + "</code>" +
+                "<button onclick=\"navigator.clipboard.writeText('" + h(new_tok) + "').then(()=>this.textContent='Copied')\" class=\"shrink-0 rounded-md px-3 py-1.5 text-xs bg-[#1e1e22] text-[#a1a1aa] hover:text-[#e4e4e7]\">Copy</button></div></div>"
         }
-        mut rows := ""
+
+        // Token list as rows
+        mut token_list := ""
         for t in tokens {
-            rows = rows + "<tr>" +
-                "<td class=\"py-2 px-4 mono text-xs\">" + h(t["prefix"] ?? "") + "…</td>" +
-                "<td class=\"py-2 px-4 text-sm\">" + h(t["label"] ?? "") + "</td>" +
-                "<td class=\"py-2 px-4 text-sm\">" + h(t["username"] ?? "") + "</td>" +
-                "<td class=\"py-2 px-4\">" + role_badge(t["role"] ?? "viewer") + "</td>" +
-                "<td class=\"py-2 px-4\"><form method=\"post\" action=\"/admin/tokens/delete\">" +
-                "<input type=\"hidden\" name=\"prefix\" value=\"" + h(t["prefix"] ?? "") + "\"/>" +
-                "<button class=\"text-[11px] text-[#52525b] hover:text-[#f87171]\">revoke</button></form></td></tr>"
+            tprefix := h(t["prefix"] ?? "")
+            tlabel := h(t["label"] ?? "")
+            tuser := h(t["username"] ?? "")
+            trole := t["role"] ?? "viewer"
+            tcreated := t["created"] ?? 0
+            token_list = token_list +
+                "<div class=\"flex items-center justify-between py-3 px-4 border-b border-[#1e1e22]/50 last:border-0\">" +
+                "<div class=\"flex items-center gap-3\">" +
+                "<div class=\"w-8 h-8 rounded-full bg-[#1e1e22] flex items-center justify-center\">" +
+                "<svg class=\"w-3.5 h-3.5 text-[#52525b]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z\"/></svg></div>" +
+                "<div><div class=\"text-sm font-medium\">" + tlabel + "</div>" +
+                "<div class=\"text-[10px] text-[#3f3f46] mono\">" + tprefix + "… · " + tuser + " · " + time_ago(tcreated) + "</div></div>" +
+                "<div class=\"ml-3\">" + role_badge(trole) + "</div></div>" +
+                "<form method=\"post\" action=\"/admin/tokens/delete\">" +
+                "<input type=\"hidden\" name=\"prefix\" value=\"" + tprefix + "\"/>" +
+                "<button class=\"text-[11px] text-[#52525b] hover:text-[#f87171]\">revoke</button></form></div>"
         }
-        if rows == "" { rows = "<tr><td colspan=\"5\" class=\"py-6 text-center text-[#52525b] text-sm\">No API tokens created.</td></tr>" }
-        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold border-b border-[#1e1e22]"
-        body := "<h1 class=\"text-2xl font-bold mb-1\">API Tokens</h1>" +
-            "<p class=\"text-sm text-[#71717a] mb-6\">Long-lived tokens for automation and integration. Use as <code class=\"mono text-xs\">Authorization: Bearer &lt;token&gt;</code></p>" +
-            flash +
-            "<div class=\"grid lg:grid-cols-3 gap-4\">" +
-            "<div class=\"lg:col-span-2 " + crd + " overflow-x-auto\">" +
-            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + "\">" +
-            "<th class=\"py-2 px-4\">Prefix</th><th class=\"py-2 px-4\">Label</th><th class=\"py-2 px-4\">User</th><th class=\"py-2 px-4\">Role</th><th class=\"py-2 px-4\"></th></tr></thead>" +
-            "<tbody class=\"divide-y divide-[#27272a]/40\">" + rows + "</tbody></table></div>" +
-            "<div class=\"" + crd + " p-5\">" +
-            "<h2 class=\"text-sm font-semibold mb-4\">Create token</h2>" +
-            "<form method=\"post\" action=\"/admin/tokens\" class=\"space-y-3\">" +
-            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">Label</label>" +
+        if token_list == "" {
+            token_list = "<div class=\"py-8 text-center text-[#3f3f46] text-sm\">No API tokens created yet.</div>"
+        }
+
+        // Usage hint
+        usage := "<div class=\"card p-4 mb-5\">" +
+            "<div class=\"text-xs text-[#52525b] space-y-1\">" +
+            "<div>Use tokens as HTTP headers:</div>" +
+            "<code class=\"block mono text-[11px] text-[#71717a] bg-[#0a0a0c] rounded-md p-2 mt-1\">curl -H \"Authorization: Bearer &lt;token&gt;\" " + h(core_base()) + "/api/messages</code></div></div>"
+
+        body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+            "<h1 class=\"text-xl font-semibold\">API Tokens</h1>" +
+            "<span class=\"text-[10px] text-[#3f3f46] mono\">" + ("" + (len(tokens))) + " active</span></div>" +
+            flash + usage +
+            // Token list
+            "<div class=\"card overflow-hidden mb-5\">" + token_list + "</div>" +
+            // Create form — single row
+            "<div class=\"card p-4\">" +
+            "<div class=\"section-title\">Generate token</div>" +
+            "<form method=\"post\" action=\"/admin/tokens\" class=\"grid grid-cols-3 gap-3 items-end\">" +
+            "<div><label class=\"" + lbl + "\">Label</label>" +
             "<input name=\"label\" required placeholder=\"CI pipeline\" class=\"" + inp + "\"/></div>" +
-            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">Role</label>" +
+            "<div><label class=\"" + lbl + "\">Role</label>" +
             "<select name=\"role\" class=\"" + inp + "\">" +
             "<option value=\"viewer\">viewer</option><option value=\"operator\">operator</option><option value=\"admin\">admin</option></select></div>" +
-            "<button class=\"w-full rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46]\">Generate token</button></form></div></div>"
+            "<button type=\"submit\" class=\"rounded-md px-4 py-2 text-sm bg-[#a78bfa] text-[#0a0a0c] font-medium hover:bg-[#c4b5fd] transition-colors\">Generate</button>" +
+            "</form></div>"
         web.html(layout("API Tokens", body, user))
     })
 
@@ -2939,25 +3185,48 @@ fn main {
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
         entries := load_audit(100)
-        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
-        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold border-b border-[#1e1e22]"
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
+
+        // Group by action type for summary
+        mut login_ok := 0
+        mut login_fail := 0
+        mut creates := 0
+        mut other := 0
+        for e in entries {
+            action := e["action"] ?? ""
+            if action == "login" { login_ok = login_ok + 1 }
+            else if str.contains(action, "fail") { login_fail = login_fail + 1 }
+            else if str.contains(action, "create") { creates = creates + 1 }
+            else { other = other + 1 }
+        }
+
+        summary := "<div class=\"flex items-center gap-6 text-xs mb-5\">" +
+            "<span class=\"text-[#34d399] mono\">" + ("" + (login_ok)) + " logins</span>" +
+            "<span class=\"text-[#f87171] mono\">" + ("" + (login_fail)) + " failed</span>" +
+            "<span class=\"text-[#a78bfa] mono\">" + ("" + (creates)) + " creates</span>" +
+            "<span class=\"text-[#52525b] mono\">" + ("" + (other)) + " other</span>" +
+            "<span class=\"text-[#3f3f46]\">·</span>" +
+            "<span class=\"text-[#3f3f46]\">" + ("" + (len(entries))) + " entries</span></div>"
+
         mut rows := ""
         for e in entries {
             action := e["action"] ?? ""
-            acls := if str.contains(action, "fail") || str.contains(action, "revoke") || str.contains(action, "delete") { "text-[#f87171]" } else if str.contains(action, "create") || str.contains(action, "login") { "text-[#34d399]" } else { "text-[#a1a1aa]" }
+            ets := e["ts"] ?? 0
+            acls := if str.contains(action, "fail") || str.contains(action, "revoke") || str.contains(action, "delete") { "text-[#f87171]" } else if action == "login" || str.contains(action, "create") { "text-[#34d399]" } else { "text-[#71717a]" }
             rows = rows + "<tr>" +
-                "<td class=\"py-2 px-4 mono text-xs text-[#52525b]\">" + ("" + (e["ts"] ?? 0)) + "</td>" +
-                "<td class=\"py-2 px-4 text-sm font-medium\">" + h(e["user"] ?? "") + "</td>" +
-                "<td class=\"py-2 px-4 text-sm " + acls + "\">" + h(action) + "</td>" +
-                "<td class=\"py-2 px-4 text-xs text-[#71717a] truncate max-w-[30rem]\">" + h(e["detail"] ?? "") + "</td></tr>"
+                "<td class=\"py-2 px-3 text-xs text-[#52525b]\">" + time_ago(ets) + "</td>" +
+                "<td class=\"py-2 px-3 text-sm\">" + h(e["user"] ?? "") + "</td>" +
+                "<td class=\"py-2 px-3 text-xs " + acls + " font-medium\">" + h(action) + "</td>" +
+                "<td class=\"py-2 px-3 text-xs text-[#3f3f46] truncate max-w-[30rem]\">" + h(e["detail"] ?? "") + "</td></tr>"
         }
-        if rows == "" { rows = "<tr><td colspan=\"4\" class=\"py-8 text-center text-[#52525b] text-sm\">No audit entries yet.</td></tr>" }
-        body := "<h1 class=\"text-2xl font-bold mb-1\">Audit Log</h1>" +
-            "<p class=\"text-sm text-[#71717a] mb-6\">All authentication and administrative actions.</p>" +
-            "<div class=\"" + crd + " overflow-x-auto\">" +
-            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + "\">" +
-            "<th class=\"py-2 px-4\">Timestamp</th><th class=\"py-2 px-4\">User</th><th class=\"py-2 px-4\">Action</th><th class=\"py-2 px-4\">Detail</th></tr></thead>" +
-            "<tbody class=\"divide-y divide-[#27272a]/40\">" + rows + "</tbody></table></div>"
+        if rows == "" { rows = "<tr><td colspan=\"4\" class=\"py-8 text-center text-[#3f3f46] text-sm\">No audit entries yet.</td></tr>" }
+        body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+            "<h1 class=\"text-xl font-semibold\">Audit Log</h1></div>" +
+            summary +
+            "<div class=\"card overflow-x-auto\">" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-2 px-3\">When</th><th class=\"py-2 px-3\">User</th><th class=\"py-2 px-3\">Action</th><th class=\"py-2 px-3\">Detail</th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e1e22]/50\">" + rows + "</tbody></table></div>"
         web.html(layout("Audit Log", body, user))
     })
 
@@ -2966,51 +3235,165 @@ fn main {
     app.get("/sla", fn(req) {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
-        sla := fetch_sla()
         kpi := fetch_kpi()
-        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
-        status := sla["status"] ?? "unknown"
-        status_color := if status == "healthy" { "#34d399" } else if status == "degraded" { "#fbbf24" } else { "#f87171" }
-        status_label := if status == "healthy" { "Operational" } else if status == "degraded" { "Degraded" } else { "Critical" }
-        asr := sla["asr"] ?? 0
-        ner := kpi["ner"] ?? 0
-        total_inv := sla["total_invites"] ?? 0
-        answered := sla["answered"] ?? 0
-        failed := sla["failed"] ?? 0
+        targets := load_sla_targets()
+        sla_agents := fetch_sla_agents()
+        sla_dests := fetch_sla_destinations()
+        rt := fetch_realtime(5)
+        crd := "card"
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
+        inp := "w-full rounded-md bg-[#0a0a0c] border border-[#1e1e22] px-2 py-1.5 text-xs mono text-center"
 
-        body := "<h1 class=\"text-2xl font-bold mb-1\">SLA Report</h1>" +
-            "<p class=\"text-sm text-[#71717a] mb-6\">Service level indicators for network availability and call quality.</p>" +
-            // Status hero
-            "<div class=\"" + crd + " p-8 mb-6 text-center\">" +
-            "<div class=\"w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center\" style=\"background:" + status_color + "20;border:3px solid " + status_color + "\">" +
-            "<span class=\"text-2xl font-black mono\" style=\"color:" + status_color + "\">" + ("" + (asr)) + "%</span></div>" +
-            "<div class=\"text-xl font-bold mb-1\" style=\"color:" + status_color + "\">" + status_label + "</div>" +
-            "<div class=\"text-sm text-[#71717a]\">Answer-Seizure Ratio · target &ge; 45%</div></div>" +
-            // KPI grid
-            "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
-            gauge_card("ASR", asr, "%", status_color, "answer-seizure ratio") +
-            gauge_card("NER", ner, "%", (if ner >= 80 { "#34d399" } else { "#fbbf24" }), "network effectiveness") +
-            stat_card("Total INVITEs", total_inv, "call attempts") +
-            stat_card("Answered", answered, "failed " + ("" + (failed))) +
-            "</div>" +
-            // Thresholds reference
-            "<div class=\"" + crd + " p-5\">" +
-            "<h2 class=\"text-sm font-semibold mb-4\">SLA Thresholds</h2>" +
-            "<div class=\"grid md:grid-cols-3 gap-4 text-sm\">" +
-            "<div class=\"space-y-2\">" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">ASR target</span><span class=\"mono text-[#34d399]\">&ge; 45%</span></div>" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">ASR warning</span><span class=\"mono text-[#fbbf24]\">&lt; 45%</span></div>" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">ASR critical</span><span class=\"mono text-[#f87171]\">&lt; 35%</span></div></div>" +
-            "<div class=\"space-y-2\">" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">NER target</span><span class=\"mono text-[#34d399]\">&ge; 98%</span></div>" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">5xx rate max</span><span class=\"mono text-[#fbbf24]\">&lt; 2%</span></div>" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">PDD target</span><span class=\"mono text-[#34d399]\">&lt; 3s</span></div></div>" +
-            "<div class=\"space-y-2\">" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">Reg failure rate</span><span class=\"mono text-[#fbbf24]\">&lt; 3%</span></div>" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">Packet loss</span><span class=\"mono text-[#fbbf24]\">&lt; 0.5%</span></div>" +
-            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">Jitter</span><span class=\"mono text-[#fbbf24]\">&lt; 20ms</span></div></div>" +
+        // Targets
+        asr_t := targets["asr_target"] ?? 45
+        asr_w := targets["asr_warning"] ?? 40
+        asr_cr := targets["asr_critical"] ?? 35
+        ner_t := targets["ner_target"] ?? 98
+        err_max := targets["err_rate_max"] ?? 5
+
+        // Overall KPIs
+        asr := kpi["asr"] ?? 0
+        ner := kpi["ner"] ?? 0
+        asr_st := sla_status_for(asr, asr_t, asr_w, asr_cr)
+        ner_st := if ner >= ner_t { "pass" } else if ner >= 80 { "warning" } else { "fail" }
+
+        win_asr := rt["asr"] ?? 0
+        win_err := rt["err_rate"] ?? 0
+        win_asr_st := sla_status_for(win_asr, asr_t, asr_w, asr_cr)
+        win_err_st := if win_err <= err_max { "pass" } else if win_err <= 15 { "warning" } else { "fail" }
+
+        // Count violations
+        mut agent_violations := 0
+        for a in sla_agents {
+            a_asr := a["asr"] ?? 0
+            if a_asr < asr_cr && (a["invites"] ?? 0) > 0 { agent_violations = agent_violations + 1 }
+        }
+
+        // ── Overall status ──
+        overall_st := if asr_st == "fail" || win_err_st == "fail" { "fail" } else if asr_st == "warning" || win_err_st == "warning" { "warning" } else { "pass" }
+        overall_label := if overall_st == "pass" { "All SLAs met" } else if overall_st == "warning" { "Degraded" } else { "SLA breach" }
+        overall_color := sla_color(overall_st)
+
+        hero := "<div class=\"flex items-center gap-4 card p-5 mb-5\">" +
+            "<div class=\"w-14 h-14 rounded-full flex items-center justify-center shrink-0\" style=\"background:" + overall_color + "15;border:2px solid " + overall_color + "\">" +
+            "<span class=\"text-lg font-black mono\" style=\"color:" + overall_color + "\">" + ("" + (asr)) + "%</span></div>" +
+            "<div class=\"flex-1\">" +
+            "<div class=\"text-lg font-semibold\" style=\"color:" + overall_color + "\">" + overall_label + "</div>" +
+            "<div class=\"text-xs text-[#52525b] mt-0.5\">ASR " + ("" + (asr)) + "% · NER " + ("" + (ner)) + "% · " + ("" + (agent_violations)) + " agent violations · error rate " + ("" + (win_err)) + "%</div></div>" +
+            "<div class=\"text-right text-xs text-[#3f3f46]\">targets: ASR &ge;" + ("" + (asr_t)) + "% · NER &ge;" + ("" + (ner_t)) + "% · err &le;" + ("" + (err_max)) + "%</div></div>"
+
+        // ── KPI gauges ──
+        gauges := "<div class=\"section\">" +
+            "<div class=\"section-title\">Service indicators</div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3\">" +
+            "<div class=\"card p-4\">" + sla_dot(asr_st) + " <span class=\"text-[10px] text-[#52525b] uppercase ml-1\">ASR (all)</span>" +
+            "<div class=\"text-2xl font-bold mono mt-1\" style=\"color:" + sla_color(asr_st) + "\">" + ("" + (asr)) + "%</div></div>" +
+            "<div class=\"card p-4\">" + sla_dot(win_asr_st) + " <span class=\"text-[10px] text-[#52525b] uppercase ml-1\">ASR (5m)</span>" +
+            "<div class=\"text-2xl font-bold mono mt-1\" style=\"color:" + sla_color(win_asr_st) + "\">" + ("" + (win_asr)) + "%</div></div>" +
+            "<div class=\"card p-4\">" + sla_dot(ner_st) + " <span class=\"text-[10px] text-[#52525b] uppercase ml-1\">NER</span>" +
+            "<div class=\"text-2xl font-bold mono mt-1\" style=\"color:" + sla_color(ner_st) + "\">" + ("" + (ner)) + "%</div></div>" +
+            "<div class=\"card p-4\">" + sla_dot(win_err_st) + " <span class=\"text-[10px] text-[#52525b] uppercase ml-1\">Error rate</span>" +
+            "<div class=\"text-2xl font-bold mono mt-1\" style=\"color:" + sla_color(win_err_st) + "\">" + ("" + (win_err)) + "%</div></div>" +
+            stat_card("INVITEs", kpi["total_invites"] ?? 0, "answered " + ("" + (kpi["answered"] ?? 0))) +
+            stat_card("Reg failures", kpi["reg_fail"] ?? 0, "of " + ("" + (kpi["total_registers"] ?? 0))) +
             "</div></div>"
+
+        // ── Per-agent SLA table ──
+        mut agent_rows := ""
+        for a in sla_agents {
+            aname := h(a["agent"] ?? "")
+            ainv := a["invites"] ?? 0
+            a_asr := a["asr"] ?? 0
+            aerr := a["err_rate"] ?? 0
+            atotal := a["total"] ?? 0
+            a_st := if ainv == 0 { "pass" } else { sla_status_for(a_asr, asr_t, asr_w, asr_cr) }
+            a_err_st := if aerr <= err_max { "pass" } else { "fail" }
+            agent_rows = agent_rows + "<tr>" +
+                "<td class=\"py-2 px-3\"><div class=\"flex items-center gap-2\">" + sla_dot(a_st) +
+                "<span class=\"text-sm\">" + aname + "</span></div></td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (atotal)) + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (ainv)) + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right font-medium\" style=\"color:" + sla_color(a_st) + "\">" + ("" + (a_asr)) + "%</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\" style=\"color:" + sla_color(a_err_st) + "\">" + ("" + (aerr)) + "%</td>" +
+                "<td class=\"py-2 px-3\"><a class=\"text-[11px] text-[#a78bfa] hover:underline\" href=\"/messages?agent=" + aname + "\">messages</a></td></tr>"
+        }
+        if agent_rows == "" { agent_rows = "<tr><td colspan=\"6\" class=\"py-6 text-center text-[#3f3f46] text-sm\">No agents</td></tr>" }
+
+        agent_section := "<div class=\"section\">" +
+            "<div class=\"section-title\">SLA by agent</div>" +
+            "<div class=\"card overflow-x-auto\">" +
+            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-2 px-3\">Agent</th><th class=\"py-2 px-3 text-right\">Msgs</th><th class=\"py-2 px-3 text-right\">INVITEs</th>" +
+            "<th class=\"py-2 px-3 text-right\">ASR</th><th class=\"py-2 px-3 text-right\">Err %</th><th class=\"py-2 px-3\"></th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e1e22]/50\">" + agent_rows + "</tbody></table></div></div>"
+
+        // ── Per-destination SLA table ──
+        mut dest_rows := ""
+        for d in sla_dests {
+            dname := h(d["dst"] ?? "")
+            dinv := d["invites"] ?? 0
+            d_asr := d["asr"] ?? 0
+            derr := d["err_rate"] ?? 0
+            dtotal := d["total"] ?? 0
+            d_st := if dinv == 0 { "pass" } else { sla_status_for(d_asr, asr_t, asr_w, asr_cr) }
+            dest_rows = dest_rows + "<tr>" +
+                "<td class=\"py-2 px-3\"><div class=\"flex items-center gap-2\">" + sla_dot(d_st) +
+                "<span class=\"mono text-xs\">" + dname + "</span></div></td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (dtotal)) + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (dinv)) + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right font-medium\" style=\"color:" + sla_color(d_st) + "\">" + ("" + (d_asr)) + "%</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (derr)) + "%</td>" +
+                "<td class=\"py-2 px-3\"><a class=\"text-[11px] text-[#a78bfa] hover:underline\" href=\"/messages?src=" + dname + "\">messages</a></td></tr>"
+        }
+        if dest_rows == "" { dest_rows = "<tr><td colspan=\"6\" class=\"py-6 text-center text-[#3f3f46] text-sm\">No destinations</td></tr>" }
+
+        dest_section := "<div class=\"section\">" +
+            "<div class=\"section-title\">SLA by destination</div>" +
+            "<div class=\"card overflow-x-auto\">" +
+            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-2 px-3\">Destination</th><th class=\"py-2 px-3 text-right\">Msgs</th><th class=\"py-2 px-3 text-right\">INVITEs</th>" +
+            "<th class=\"py-2 px-3 text-right\">ASR</th><th class=\"py-2 px-3 text-right\">Err %</th><th class=\"py-2 px-3\"></th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e1e22]/50\">" + dest_rows + "</tbody></table></div></div>"
+
+        // ── Configurable targets ──
+        targets_form := "<div class=\"section\">" +
+            "<div class=\"section-title\">SLA targets</div>" +
+            "<form method=\"post\" action=\"/sla/targets\" class=\"card p-4\">" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3\">" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">ASR target %</label>" +
+            "<input name=\"asr_target\" type=\"number\" value=\"" + ("" + (asr_t)) + "\" class=\"" + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">ASR warning %</label>" +
+            "<input name=\"asr_warning\" type=\"number\" value=\"" + ("" + (asr_w)) + "\" class=\"" + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">ASR critical %</label>" +
+            "<input name=\"asr_critical\" type=\"number\" value=\"" + ("" + (asr_cr)) + "\" class=\"" + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">NER target %</label>" +
+            "<input name=\"ner_target\" type=\"number\" value=\"" + ("" + (ner_t)) + "\" class=\"" + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">Max error rate %</label>" +
+            "<input name=\"err_rate_max\" type=\"number\" value=\"" + ("" + (err_max)) + "\" class=\"" + inp + "\"/></div>" +
+            "</div>" +
+            "<button type=\"submit\" class=\"rounded-md px-3 py-1.5 text-xs bg-[#1e1e22] text-[#a1a1aa] hover:text-[#e4e4e7] transition-colors\">Save targets</button></form></div>"
+
+        body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+            "<h1 class=\"text-xl font-semibold\">SLA</h1></div>" +
+            hero + gauges + agent_section + dest_section + targets_form
         web.html(layout("SLA", body, user))
+    })
+
+    // SLA targets save
+    app.post("/sla/targets", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") { return web.status(403) }
+        targets := {
+            "asr_target": int.parse(web.form_get(req, "asr_target", "45")).unwrap_or(45),
+            "asr_warning": int.parse(web.form_get(req, "asr_warning", "40")).unwrap_or(40),
+            "asr_critical": int.parse(web.form_get(req, "asr_critical", "35")).unwrap_or(35),
+            "ner_target": int.parse(web.form_get(req, "ner_target", "98")).unwrap_or(98),
+            "err_rate_max": int.parse(web.form_get(req, "err_rate_max", "5")).unwrap_or(5)
+        }
+        save_sla_targets(targets)
+        audit(user["username"] ?? "", "sla_targets", "updated")
+        {"status": 302, "headers": {"Location": "/sla"}, "body": ""}
     })
 
     // ---- admin routes ----
