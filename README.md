@@ -2,9 +2,6 @@
 
 Enterprise SIP monitoring — capture, ladder, metrics, alerting, and dashboards in one platform.
 
-![Call Ladder](docs/call-ladder.png)
-![Reports](docs/reports.png)
-
 ## Why this exists
 
 A friend pointed out something obvious: there are plenty of tools to monitor VoIP networks, but they're all separate. You need one for SIP capture, another for metrics, another for dashboards, another for alerting, and then you spend a weekend wiring them together. Installation is never easy. Training new engineers means teaching four different UIs. And when something breaks at 3am, you're jumping between tabs trying to correlate what happened.
