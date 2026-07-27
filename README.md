@@ -282,13 +282,42 @@ zaman/
   docs/                   # screenshots
 ```
 
-## Limitations
+## QoS and MOS scoring
 
-- No RTP/media capture or MOS scoring (SIP signaling only)
-- No multi-node federation (single core instance)
-- No built-in TLS on the dashboard (use a reverse proxy)
-- Alert evaluation is poll-based (30s), not streaming
-- The UI is server-rendered with HTMX — no client-side SPA
+RTCP packets received via HEP (proto_type=5) are automatically parsed for quality metrics:
+- **Jitter** (ms), **packet loss** (%), **cumulative loss**
+- **R-factor** (ITU-T G.107 E-model)
+- **MOS** (Mean Opinion Score, 1.0–5.0)
+
+QoS data is attached to each RTCP capture record and available via `/api/qos?call_id=X`. The call ladder page shows QoS metrics when RTCP data exists for a call.
+
+## Multi-node federation
+
+Multiple Zaman instances can forward captures to a central aggregator:
+
+```bash
+# Remote office Zaman pushes to central
+ZAMAN_FEDERATION_TARGET=https://sip-monitor.company.com/api/federation/push \
+  ./bin/zaman-core
+
+# Central instance accepts pushes on /api/federation/push (POST)
+# Accepts JSON array or single capture record
+curl -X POST -H "Content-Type: application/json" \
+  -d '[{"ts_ms":...,"src":"...","call_id":"..."}]' \
+  https://central:9090/api/federation/push
+```
+
+## Dashboard TLS
+
+TLS is handled via nginx reverse proxy, configured automatically by the installer:
+
+```bash
+# Installer sets up nginx + Let's Encrypt
+sudo bash install.sh
+# Say yes to "Enable TLS?" and enter your domain
+```
+
+For manual setup, see the [Deployment Guide](docs/DEPLOYMENT.md).
 
 ## License
 

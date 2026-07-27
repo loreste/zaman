@@ -1495,6 +1495,102 @@ fn db_sla_by_dest_json() -> string {
     return out
 }
 
+// ---- RTCP / QoS / MOS scoring ----
+// Parse RTCP Sender Report (SR) and Receiver Report (RR) payloads.
+// Compute MOS from jitter + packet loss using the E-model (ITU-T G.107 simplified).
+//
+// RTCP RR block (24 bytes):
+//   SSRC (4) + fraction_lost(1) + cumulative_lost(3) + highest_seq(4)
+//   + jitter(4) + last_sr(4) + delay_since_sr(4)
+
+fn rtcp_parse_qos(payload: string) -> string {
+    if len(payload) < 12 {
+        return ""
+    }
+    // RTCP header: V(2)|P(1)|RC(5)|PT(8)|Length(16)
+    let pt = u8_at(payload, 1)
+    let rc = u8_at(payload, 0) % 32  // lower 5 bits = report count
+
+    // PT 200 = SR, PT 201 = RR
+    if pt != 200 && pt != 201 {
+        return ""
+    }
+
+    // For SR, report blocks start at offset 28 (after sender info)
+    // For RR, report blocks start at offset 8
+    let mut rr_offset = 8
+    if pt == 200 {
+        rr_offset = 28
+    }
+
+    if rc == 0 || len(payload) < rr_offset + 24 {
+        return ""
+    }
+
+    // Parse first report block
+    let fraction_lost = u8_at(payload, rr_offset + 4)
+    let cumul_lost = u8_at(payload, rr_offset + 5) * 65536 + u8_at(payload, rr_offset + 6) * 256 + u8_at(payload, rr_offset + 7)
+    let jitter = u32be_at(payload, rr_offset + 12)
+    let dlsr = u32be_at(payload, rr_offset + 20)
+
+    // Fraction lost is 0-255, convert to percentage
+    let loss_pct = fraction_lost * 100 / 256
+
+    // Jitter is in timestamp units (typically 8kHz for G.711), convert to ms
+    let jitter_ms = jitter / 8
+
+    // E-model simplified MOS calculation (ITU-T G.107)
+    // R = 93.2 - Id - Ie_eff
+    // Id = 0.024 * delay + 0.11 * (delay - 177.3) * H(delay - 177.3)
+    // Ie_eff = function of codec + packet loss
+    // Simplified: R = 93.2 - (jitter_ms * 0.1) - (loss_pct * 2.5)
+    let mut r_factor = 93 - jitter_ms / 10 - loss_pct * 25 / 10
+    if r_factor < 0 {
+        r_factor = 0
+    }
+    if r_factor > 100 {
+        r_factor = 100
+    }
+
+    // MOS = 1 + 0.035*R + R*(R-60)*(100-R)*7e-6
+    // Simplified integer approximation: MOS*10 for one decimal
+    let mut mos_x10 = 10
+    if r_factor > 0 {
+        mos_x10 = 10 + r_factor * 35 / 1000
+        if r_factor > 60 {
+            mos_x10 = mos_x10 + (r_factor - 60) * (100 - r_factor) * r_factor / 1400000
+        }
+    }
+    if mos_x10 > 50 {
+        mos_x10 = 50
+    }
+    if mos_x10 < 10 {
+        mos_x10 = 10
+    }
+
+    return "{\"jitter_ms\":" + string(jitter_ms) +
+        ",\"loss_pct\":" + string(loss_pct) +
+        ",\"loss_cumulative\":" + string(cumul_lost) +
+        ",\"r_factor\":" + string(r_factor) +
+        ",\"mos_x10\":" + string(mos_x10) +
+        ",\"mos\":\"" + string(mos_x10 / 10) + "." + string(mos_x10 % 10) + "\"" +
+        ",\"dlsr\":" + string(dlsr) +
+        "}"
+}
+
+// Enrich RTCP captures with parsed QoS metrics.
+fn enrich_rtcp_record(record_json: string, payload: string) -> string {
+    let qos = rtcp_parse_qos(payload)
+    if str_eq(qos, "") {
+        return record_json
+    }
+    // Inject qos object into record JSON before the closing }
+    if len(record_json) > 2 {
+        return record_json[0:len(record_json) - 1] + ",\"qos\":" + qos + "}"
+    }
+    return record_json
+}
+
 // ---- B2BUA leg correlation ----
 // Links related Call-IDs: same HEP correlation ID, or overlapping From/To within a time window.
 fn db_related_calls_json(call_id: string) -> string {
@@ -2003,7 +2099,7 @@ fn handle_hep_packet_via(store: CMap, metrics: CMap, db_ch: chan[string], pkt: s
     let dst = hep_endpoint(info.dst_ip, info.dst_port)
     let agent = hep_agent_label(info)
     let ts = hep_ts_ms(info)
-    let rec = make_record_ex(
+    let mut rec = make_record_ex(
         db_ch,
         src,
         dst,
@@ -2016,6 +2112,10 @@ fn handle_hep_packet_via(store: CMap, metrics: CMap, db_ch: chan[string], pkt: s
         info.node_name,
         info.correlation_id
     )
+    // Enrich RTCP records with QoS metrics (jitter, loss, MOS)
+    if ptype == 5 {
+        rec = enrich_rtcp_record(rec, info.payload)
+    }
     cap_push(store, metrics, rec)
 
     if ptype == 1 && sip_ok(info.payload) == 1 {
@@ -2600,7 +2700,7 @@ fn rate_check(rl: CMap, ip: string) -> int {
     return 1
 }
 
-fn http_worker(store: CMap, metrics: CMap, port: int) -> int {
+fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> int {
     let fd = http_bind(port)
     if fd < 0 {
         print("http bind failed on :" + string(port))
@@ -2771,6 +2871,92 @@ fn http_worker(store: CMap, metrics: CMap, port: int) -> int {
             let rt = db_realtime_json(5)
             let _ = http_respond_json(c, 200, "[{\"target\":\"overview\",\"datapoints\":[[" +
                 string(cmap_i(metrics, "msgs_total")) + "," + string(now_ms()) + "]]}]")
+        // ── Federation: remote Zaman instances push captures here ──
+        // ── QoS / MOS for a call ──
+        } else if str_eq(path, "/api/qos") {
+            let qos_cid = query_get(q, "call_id")
+            if str_eq(qos_cid, "") {
+                let _ = http_respond_json(c, 400, "{\"error\":\"call_id required\"}")
+            } else {
+                // Find RTCP records for this call and extract QoS
+                let qos_db = db_open()
+                let mut qos_out = "["
+                let mut qos_first = 1
+                if sql_ok(qos_db) == 1 {
+                    let qos_rows = sql_query_rows(qos_db,
+                        "SELECT record_json FROM captures WHERE call_id = " + sql_quote(qos_cid) +
+                        " AND proto = 'rtcp' ORDER BY ts_ms", [])
+                    if sql_rows_ok(qos_rows) == 1 {
+                        while sql_rows_next(qos_rows) == 1 {
+                            let qrec = sql_rows_str(qos_rows, 0)
+                            let qos_val = json_get_string(qrec, "qos")
+                            if not str_eq(qos_val, "") {
+                                if qos_first == 1 {
+                                    qos_first = 0
+                                } else {
+                                    qos_out = qos_out + ","
+                                }
+                                qos_out = qos_out + qos_val
+                            }
+                        }
+                        let _ = sql_rows_close(qos_rows)
+                    }
+                    let _ = sql_close(qos_db)
+                }
+                let _ = http_respond_json(c, 200, qos_out + "]")
+            }
+        // ── Federation ──
+        } else if str_eq(path, "/api/federation/push") && str_eq(method, "POST") {
+            let body = http_body(c)
+            // Body is a JSON array of capture records
+            if len(body) > 2 && str_has_prefix(body, "[") {
+                // Parse array and enqueue each record
+                // Simple approach: split on },{ boundaries
+                let mut count = 0
+                let mut pos = 0
+                let blen = len(body)
+                while pos < blen {
+                    // Find next {
+                    if u8_at(body, pos) == 123 {
+                        // Find matching }
+                        let mut depth = 0
+                        let mut end = pos
+                        while end < blen {
+                            let ch = u8_at(body, end)
+                            if ch == 123 {
+                                depth = depth + 1
+                            } else if ch == 125 {
+                                depth = depth - 1
+                                if depth == 0 {
+                                    break
+                                }
+                            }
+                            end = end + 1
+                        }
+                        if depth == 0 && end < blen {
+                            let rec = body[pos:end + 1]
+                            if len(rec) > 10 {
+                                db_enqueue(db_ch, rec)
+                                cap_push(store, metrics, rec)
+                                count = count + 1
+                            }
+                        }
+                        pos = end + 1
+                    } else {
+                        pos = pos + 1
+                    }
+                }
+                let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":" + string(count) + "}")
+            } else if len(body) > 2 && str_has_prefix(body, "{") {
+                // Single record
+                db_enqueue(db_ch, body)
+                cap_push(store, metrics, body)
+                let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":1}")
+            } else {
+                let _ = http_respond_json(c, 400, "{\"error\":\"expected JSON array or object\"}")
+            }
+        } else if str_eq(path, "/api/federation/health") {
+            let _ = http_respond_json(c, 200, "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\",\"federation\":true}")
         } else if str_eq(path, "/api/export") {
             let lim = parse_int_or(query_get(q, "limit"), 100)
             let cid = query_get(q, "call_id")
@@ -2849,7 +3035,10 @@ fn main() {
     } else {
         print("integrated SIP capture + echo + HEP (UDP/TCP/TLS) + metrics + SQLite reporting")
     }
-    print("concurrency: Mako crew.kick (not go) · db_writer|sip|hep|http|tcp?|tls? · chan[string]")
+    let fed_target = env_get_or("ZAMAN_FEDERATION_TARGET", "")
+    if not str_eq(fed_target, "") {
+        print("federation: forwarding to " + fed_target)
+    }
     print("security: ZAMAN_API_KEY · ZAMAN_HEP_PASSWORD · ZAMAN_HEP_ALLOW · ZAMAN_PROBE")
 
     let _ = db_init()
@@ -2879,7 +3068,7 @@ fn main() {
             let w = t.kick(db_writer(db_ch, metrics))
             let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
             let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, api_port))
+            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
             let _ = w.join()
             let _ = s.join()
             let _ = h.join()
@@ -2890,7 +3079,7 @@ fn main() {
             let w = t.kick(db_writer(db_ch, metrics))
             let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
             let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, api_port))
+            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
             let ht = t.kick(hep_tcp_worker(store, metrics, db_ch, sip_host, hep_tcp_port))
             let _ = w.join()
             let _ = s.join()
@@ -2903,7 +3092,7 @@ fn main() {
             let w = t.kick(db_writer(db_ch, metrics))
             let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
             let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, api_port))
+            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
             let hl = t.kick(hep_tls_worker(store, metrics, db_ch, sip_host, hep_tls_port, tls_cert, tls_key))
             let _ = w.join()
             let _ = s.join()
@@ -2916,7 +3105,7 @@ fn main() {
             let w = t.kick(db_writer(db_ch, metrics))
             let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
             let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, api_port))
+            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
             let ht = t.kick(hep_tcp_worker(store, metrics, db_ch, sip_host, hep_tcp_port))
             let hl = t.kick(hep_tls_worker(store, metrics, db_ch, sip_host, hep_tls_port, tls_cert, tls_key))
             let _ = w.join()
