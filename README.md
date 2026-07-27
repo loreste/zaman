@@ -1,17 +1,17 @@
 # Zaman
 
-SIP monitoring for people who are tired of running five systems to answer one question.
+Enterprise SIP monitoring — capture, ladder, metrics, alerting, and dashboards in one platform.
 
 ![Call Ladder](docs/call-ladder.png)
 ![Reports](docs/reports.png)
 
 ## Why this exists
 
-If you run a VoIP network, you probably have one tool for SIP capture, another for metrics, another for dashboards, some scripts for keepalive checks, and maybe a wiki page explaining how they all connect. Each tool is fine on its own. The problem is gluing them together, keeping them running, and training new engineers on four different UIs.
+A friend pointed out something obvious: there are plenty of tools to monitor VoIP networks, but they're all separate. You need one for SIP capture, another for metrics, another for dashboards, another for alerting, and then you spend a weekend wiring them together. Installation is never easy. Training new engineers means teaching four different UIs. And when something breaks at 3am, you're jumping between tabs trying to correlate what happened.
 
-Zaman started as a question: what if one process did all of that? Not better than each tool individually — just simpler to deploy and operate as a whole.
+Zaman was built to fix that. Named after that friend, it puts SIP capture, call flow visualization, telecom KPIs, real-time alerting, and a live dashboard into a single platform that installs in one command.
 
-It captures SIP and HEP traffic, stores it, shows a live dashboard with call ladders, and exposes Prometheus-compatible metrics. One binary for the core, one process for the dashboard. No external databases required unless you want them.
+It runs on SQLite out of the box — no external databases, no infrastructure prerequisites. When you outgrow that, switch to PostgreSQL or ClickHouse with one environment variable. Same binary, same dashboard, same API.
 
 ## Install
 
