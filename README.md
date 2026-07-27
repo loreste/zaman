@@ -121,6 +121,8 @@ sudo systemctl enable --now zaman-core zaman-web
 
 Config: `/etc/zaman/core.env` and `/etc/zaman/web.env`. Logs: `journalctl -u zaman-core`.
 
+For detailed sizing, architecture diagrams, cloud instance recommendations, and post-install checklists, see the **[Deployment Guide](docs/DEPLOYMENT.md)**.
+
 ## What it does
 
 ```
