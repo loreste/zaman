@@ -1,5 +1,9 @@
 // Zaman dashboard — HTMX + Tailwind 4 over zaman-core.
 //   ZAMAN_CORE=http://127.0.0.1:9090 weft run web/main.weft
+//
+// RBAC: admin / operator / viewer.  Disable with ZAMAN_AUTH=0 for lab use.
+// On first run with auth enabled, a default admin account is created and
+// the password is printed to stdout once.
 
 fn core_base() {
     env.get("ZAMAN_CORE") ?? "http://127.0.0.1:9090"
@@ -18,70 +22,400 @@ fn h(s) {
     html.escape(("" + (s ?? "")))
 }
 
-fn layout(title, body) {
-    cdn := web.htmx_cdn()
-    base := h(core_base())
-    "<!doctype html><html lang=\"en\" class=\"h-full\"><head><meta charset=\"utf-8\"/>" +
-    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>" +
-    "<title>" + h(title) + " · Zaman</title>" + cdn +
-    "<script src=\"https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4\"></script>" +
-    "<style type=\"text/tailwindcss\">" +
-    "@theme{--color-ink:#e8eefc;--color-muted:#8fa3c1;--color-panel:#0f1628;--color-line:#1e2d44;--color-bg:#070b14;--color-accent:#6ea8fe;--color-ok:#3ddc97;--color-warn:#ffc857;--color-bad:#ff6b6b;}" +
-    ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}" +
-    ".ladder-line{border-left:2px dashed #1e2d44;margin-left:1rem;padding-left:1rem}" +
-    "</style></head>" +
-    "<body class=\"min-h-full bg-[#070b14] text-[#e8eefc] font-sans\">" +
-    "<div class=\"min-h-screen grid grid-cols-1 lg:grid-cols-[240px_1fr]\">" +
-    "<aside class=\"border-b lg:border-b-0 lg:border-r border-[#1e2d44] bg-[rgba(10,14,26,.95)] p-4 lg:sticky lg:top-0 lg:h-screen\">" +
-    "<div class=\"flex items-center gap-3 mb-6 px-1\">" +
-    "<div class=\"w-10 h-10 rounded-xl bg-gradient-to-br from-[#6ea8fe] to-[#3ddc97] grid place-items-center font-extrabold text-[#041018]\">Z</div>" +
-    "<div><div class=\"font-bold leading-tight\">Zaman</div>" +
-    "<div class=\"text-xs text-[#8fa3c1]\">SIP monitor · echo · metrics</div></div></div>" +
-    "<nav class=\"flex flex-col gap-1 text-sm\">" +
-    nav_link("/", "Overview") +
-    nav_link("/messages", "Messages") +
-    nav_link("/calls", "Call ladder") +
-    nav_link("/probe", "Echo probe") +
-    nav_link("/metrics", "Metrics") +
-    nav_link("/report", "Reports") +
-    "</nav>" +
-    "<div class=\"mt-8 pt-4 border-t border-[#1e2d44] text-xs text-[#8fa3c1] space-y-1\">" +
-    "<div>Core: <span class=\"mono text-[#e8eefc]\">" + base + "</span></div>" +
-    "<div id=\"core-status\" hx-get=\"/partials/status\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\">checking…</div>" +
-    "</div></aside>" +
-    "<main class=\"p-5 md:p-8 max-w-6xl w-full\">" + body + "</main></div></body></html>"
+// ---- RBAC (JSON file + signed cookie tokens) ----
+// Users: data/zaman-users.json   Sessions: stateless HMAC-signed cookies
+// ponytail: Weft closures can't mutate captured state; signed tokens avoid server-side sessions entirely.
+
+fn auth_enabled() {
+    e := env.get("ZAMAN_AUTH") ?? ""
+    e != "0"
 }
 
-fn nav_link(href, label) {
-    "<a href=\"" + href + "\" class=\"rounded-lg px-3 py-2 hover:bg-[#141e33] text-[#8fa3c1] hover:text-[#e8eefc]\" hx-boost=\"true\">" + label + "</a>"
+fn users_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-users.json"
+}
+
+fn hash_pw(salt, password) {
+    crypto.sha256(salt + ":" + password)
+}
+
+fn load_users() {
+    r := fs.read(users_path())
+    if !r.ok { return [] }
+    p := json.parse(r.value)
+    if !p.ok { return [] }
+    p.value
+}
+
+fn save_users(users) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(users_path(), json.stringify(users))
+}
+
+fn next_user_id(users) {
+    mut max_id := 0
+    for u in users {
+        uid := u["id"] ?? 0
+        if uid > max_id { max_id = uid }
+    }
+    max_id + 1
+}
+
+fn find_user_by_name(users, username) {
+    for u in users {
+        if (u["username"] ?? "") == username { return u }
+    }
+    null
+}
+
+fn find_user_by_id(users, id) {
+    for u in users {
+        if (u["id"] ?? 0) == id { return u }
+    }
+    null
+}
+
+fn list_append(lst, item) {
+    s := json.stringify(lst)
+    item_s := json.stringify(item)
+    if s == "[]" { return json.parse("[" + item_s + "]").value }
+    json.parse(str.slice(s, 0, len(s) - 1) + "," + item_s + "]").value
+}
+
+fn list_remove(lst, pred_key, pred_val) {
+    mut s := "["
+    mut first := true
+    for item in lst {
+        if (item[pred_key] ?? null) != pred_val {
+            if !first { s = s + "," }
+            s = s + json.stringify(item)
+            first = false
+        }
+    }
+    json.parse(s + "]").value
+}
+
+fn auth_init(token_secret) {
+    users := load_users()
+    if len(users) == 0 {
+        pw := secrets.token_hex(8)
+        salt := secrets.token_hex(16)
+        hp := hash_pw(salt, pw)
+        admin := {"id": 1, "username": "admin", "pw_hash": hp, "salt": salt, "role": "admin"}
+        save_users([admin])
+        say("")
+        say("  ┌──────────────────────────────────────────────┐")
+        say("  │  Default admin account created                │")
+        say("  │  username: admin                              │")
+        say("  │  password: " + pw + "                  │")
+        say("  │  Change this immediately.                     │")
+        say("  └──────────────────────────────────────────────┘")
+        say("")
+    }
+}
+
+// Signed token: base64(id:username:role:expires:hmac)
+fn make_token(token_secret, user) {
+    uid := user["id"] ?? 0
+    uname := user["username"] ?? ""
+    role := user["role"] ?? "viewer"
+    expires := time.unix() + 86400
+    payload := ("" + (uid)) + ":" + uname + ":" + role + ":" + ("" + (expires))
+    sig := crypto.hmac_sha256(token_secret, payload)
+    base64.encode(payload + ":" + sig)
+}
+
+fn verify_token(token_secret, token) {
+    dec := base64.decode(token)
+    if !dec.ok { return null }
+    raw := dec.value
+    // Signature is last 64 hex chars after final ':'
+    if len(raw) < 66 { return null }
+    sig_start := len(raw) - 64
+    sep := str.slice(raw, sig_start - 1, sig_start)
+    if sep != ":" { return null }
+    payload := str.slice(raw, 0, sig_start - 1)
+    got_sig := str.slice(raw, sig_start, len(raw))
+    expected := crypto.hmac_sha256(token_secret, payload)
+    if got_sig != expected { return null }
+    // Parse payload: id:username:role:expires
+    parts := str.split(payload, ":")
+    if len(parts) < 4 { return null }
+    expires := int.parse(parts[len(parts) - 1]).unwrap_or(0)
+    if expires < time.unix() { return null }
+    role := parts[len(parts) - 2]
+    uid := int.parse(parts[0]).unwrap_or(0)
+    // Username may contain colons (unlikely but safe): rejoin middle parts
+    mut uname := parts[1]
+    mut i := 2
+    while i < len(parts) - 2 {
+        uname = uname + ":" + parts[i]
+        i = i + 1
+    }
+    {"id": uid, "username": uname, "role": role}
+}
+
+fn get_user(req, token_secret) {
+    if !auth_enabled() { return {"id": 0, "username": "anonymous", "role": "admin"} }
+    // Check API token in Authorization header first (for automation)
+    auth_hdr := req.headers["Authorization"] ?? ""
+    if str.starts_with(auth_hdr, "Bearer ") {
+        api_tok := str.slice(auth_hdr, 7, len(auth_hdr))
+        api_user := verify_api_token(api_tok)
+        if api_user != null { return api_user }
+    }
+    // Fall back to session cookie
+    cookie := web.cookie_get(req, "zaman_sid")
+    if cookie == null || cookie == "" { return null }
+    verify_token(token_secret, cookie)
+}
+
+fn login_redirect() {
+    {"status": 302, "headers": {"Location": "/login"}, "body": ""}
+}
+
+fn set_session_cookie(token) {
+    {"status": 302, "headers": {"Location": "/", "Set-Cookie": "zaman_sid=" + token + "; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax"}, "body": ""}
+}
+
+fn clear_session_cookie() {
+    {"status": 302, "headers": {"Location": "/login", "Set-Cookie": "zaman_sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"}, "body": ""}
+}
+
+fn has_role(user, min_role) {
+    role := user["role"] ?? "viewer"
+    if min_role == "viewer" { return true }
+    if min_role == "operator" { return role == "operator" || role == "admin" }
+    if min_role == "admin" { return role == "admin" }
+    false
+}
+
+fn role_badge(role) {
+    if role == "admin" {
+        "<span class=\"px-2 py-0.5 rounded-full text-[11px] font-semibold border bg-[rgba(248,113,113,.12)] text-[#f87171] border-[rgba(248,113,113,.3)]\">admin</span>"
+    } else if role == "operator" {
+        "<span class=\"px-2 py-0.5 rounded-full text-[11px] font-semibold border bg-[rgba(167,139,250,.15)] text-[#a78bfa] border-[rgba(167,139,250,.3)]\">operator</span>"
+    } else {
+        "<span class=\"px-2 py-0.5 rounded-full text-[11px] font-semibold border bg-[rgba(161,161,170,.15)] text-[#a1a1aa] border-[rgba(161,161,170,.3)]\">viewer</span>"
+    }
+}
+
+fn login_page(error_msg) {
+    mut err := ""
+    if error_msg != "" {
+        err = "<div class=\"flex items-center gap-2 rounded-xl border border-[rgba(248,113,113,.3)] bg-[rgba(248,113,113,.06)] px-4 py-3 text-sm text-[#f87171] mb-5\">" +
+            "<svg class=\"w-4 h-4 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z\"/></svg>" +
+            h(error_msg) + "</div>"
+    }
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"/>" +
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>" +
+    "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\"/>" +
+    "<title>Login · Zaman</title>" +
+    "<script src=\"https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4\"></script>" +
+    "<style type=\"text/tailwindcss\">" +
+    "@theme{--color-ink:#fafafa;--color-bg:#09090b;--color-panel:#18181b;--color-line:#27272a;--color-accent:#a78bfa;}" +
+    "input:focus{border-color:#a78bfa!important;box-shadow:0 0 0 3px rgba(167,139,250,.15)!important}" +
+    ".login-card{background:rgba(24,24,27,.85);backdrop-filter:blur(20px)}" +
+    "@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}" +
+    ".fade-in{animation:fadein .4s ease-out}" +
+    "</style></head>" +
+    "<body class=\"min-h-screen bg-[#0a0a0c] text-[#e4e4e7] flex items-center justify-center\" style=\"background:radial-gradient(ellipse at 50% 0%,rgba(167,139,250,.06) 0%,transparent 60%),#09090b\">" +
+    "<div class=\"w-full max-w-[380px] px-5 fade-in\">" +
+    "<div class=\"flex flex-col items-center mb-10\">" +
+    "<div class=\"w-14 h-14 rounded-2xl bg-gradient-to-br from-[#a78bfa] to-[#6d28d9] grid place-items-center font-black text-xl text-[#09090b] mb-4 shadow-lg shadow-[rgba(167,139,250,.2)]\">Z</div>" +
+    "<h1 class=\"text-2xl font-bold tracking-tight\">Zaman</h1>" +
+    "<p class=\"text-sm text-[#71717a] mt-1\">SIP monitoring · echo · metrics</p></div>" +
+    err +
+    "<form method=\"post\" action=\"/login\" class=\"login-card rounded-2xl border border-[#1e1e22] p-7 space-y-5 shadow-2xl shadow-black/30\">" +
+    "<div><label class=\"block text-[11px] font-medium text-[#71717a] uppercase tracking-wider mb-2\">Username</label>" +
+    "<input name=\"username\" required autofocus autocomplete=\"username\" class=\"w-full rounded-xl bg-[#111114] border border-[#1e1e22] px-4 py-2.5 text-sm transition-all duration-200 outline-none placeholder:text-[#3f3f46]\" placeholder=\"admin\"/></div>" +
+    "<div><label class=\"block text-[11px] font-medium text-[#71717a] uppercase tracking-wider mb-2\">Password</label>" +
+    "<input name=\"password\" type=\"password\" required autocomplete=\"current-password\" class=\"w-full rounded-xl bg-[#111114] border border-[#1e1e22] px-4 py-2.5 text-sm transition-all duration-200 outline-none placeholder:text-[#3f3f46]\" placeholder=\"········\"/></div>" +
+    "<button type=\"submit\" class=\"w-full rounded-xl px-4 py-3 text-sm font-semibold bg-gradient-to-r from-[#a78bfa] to-[#7c3aed] text-white shadow-lg shadow-[rgba(124,58,237,.25)] hover:shadow-[rgba(124,58,237,.4)] hover:brightness-110 transition-all duration-200 cursor-pointer\">Sign in</button></form>" +
+    "<p class=\"text-center text-xs text-[#52525b] mt-6\">Integrated SIP monitoring + echo system</p>" +
+    "</div></body></html>"
+}
+
+// LDAP/HTTP auth: ZAMAN_LDAP_URL + ZAMAN_LDAP_BIND_DN
+// If set, authenticates against LDAP via HTTP bind proxy (e.g. ldap-http-proxy, GLAuth HTTP).
+// Falls back to local users if LDAP is not configured or bind fails.
+fn ldap_auth(username, password) {
+    ldap_url := env.get("ZAMAN_LDAP_URL") ?? ""
+    if ldap_url == "" { return null }
+    // POST to LDAP HTTP proxy: {"username":"...","password":"..."}
+    payload := json.stringify({"username": username, "password": password})
+    r := http.post(ldap_url, payload, {"headers": {"Content-Type": "application/json"}})
+    if !r.ok { return null }
+    p := json.parse(r.value.body)
+    if !p.ok { return null }
+    result := p.value
+    if (result["ok"] ?? false) != true && (result["authenticated"] ?? false) != true { return null }
+    // Map LDAP groups to Zaman roles
+    ldap_role := result["role"] ?? result["group"] ?? "viewer"
+    mut role := "viewer"
+    if ldap_role == "admin" || str.contains(ldap_role, "admin") { role = "admin" }
+    else if ldap_role == "operator" || str.contains(ldap_role, "operator") { role = "operator" }
+    {"id": 0, "username": username, "role": role}
+}
+
+fn do_login(token_secret, username, password) {
+    // Try LDAP first if configured
+    ldap_user := ldap_auth(username, password)
+    if ldap_user != null {
+        return make_token(token_secret, ldap_user)
+    }
+    // Fall back to local users
+    users := load_users()
+    user := find_user_by_name(users, username)
+    if user == null { return null }
+    expected := hash_pw(user["salt"], password)
+    if expected != (user["pw_hash"] ?? "") { return null }
+    make_token(token_secret, user)
+}
+
+fn list_users() {
+    load_users()
+}
+
+fn create_user(username, password, role) {
+    if username == "" { return "username required" }
+    if password == "" { return "password required" }
+    pw_err := validate_password(password)
+    if pw_err != "" { return pw_err }
+    if role != "admin" && role != "operator" && role != "viewer" { return "invalid role" }
+    users := load_users()
+    if find_user_by_name(users, username) != null { return "username already exists" }
+    salt := secrets.token_hex(16)
+    hp := hash_pw(salt, password)
+    new_user := {"id": next_user_id(users), "username": username, "pw_hash": hp, "salt": salt, "role": role}
+    save_users(list_append(users, new_user))
+    ""
+}
+
+fn delete_user_by_id(id) {
+    users := load_users()
+    save_users(list_remove(users, "id", id))
+}
+
+fn change_password(user_id, new_password) {
+    if new_password == "" { return "password required" }
+    pw_err := validate_password(new_password)
+    if pw_err != "" { return pw_err }
+    users := load_users()
+    salt := secrets.token_hex(16)
+    hp := hash_pw(salt, new_password)
+    // Remove old, add updated
+    old := find_user_by_id(users, user_id)
+    if old == null { return "user not found" }
+    without := list_remove(users, "id", user_id)
+    updated_user := {"id": user_id, "username": old["username"], "pw_hash": hp, "salt": salt, "role": old["role"]}
+    save_users(list_append(without, updated_user))
+    ""
+}
+
+// ---- layout ----
+
+fn layout(title, body, user) {
+    cdn := web.htmx_cdn()
+    base := h(core_base())
+    mut user_info := ""
+    if user != null && auth_enabled() {
+        uname := h(user["username"] ?? "")
+        urole := user["role"] ?? "viewer"
+        user_info = "<div class=\"mt-auto pt-4 border-t border-[#1e1e22] text-xs space-y-2\">" +
+            "<div class=\"flex items-center gap-2\">" + role_badge(urole) + " <span class=\"text-[#e4e4e7]\">" + uname + "</span></div>" +
+            "<a href=\"/logout\" class=\"block text-[#a1a1aa] hover:text-[#f87171]\">Sign out</a></div>"
+    }
+    mut admin_link := ""
+    if user != null && has_role(user, "admin") && auth_enabled() {
+        admin_link = nav_link("/admin/users", "Users", "M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z") +
+            nav_link("/admin/tokens", "API Tokens", "M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z") +
+            nav_link("/admin/audit", "Audit Log", "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2") +
+            nav_link("/sla", "SLA Report", "M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z")
+    }
+    "<!doctype html><html lang=\"en\" class=\"h-full\"><head><meta charset=\"utf-8\"/>" +
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>" +
+    "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\"/>" +
+    "<title>" + h(title) + " · " + brand_name() + "</title>" + cdn +
+    "<script src=\"https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4\"></script>" +
+    "<style type=\"text/tailwindcss\">" +
+    "@theme{--color-ink:#e4e4e7;--color-muted:#a1a1aa;--color-panel:#131316;--color-line:#1e1e22;--color-bg:#0a0a0c;--color-accent:#a78bfa;--color-ok:#34d399;--color-warn:#fbbf24;--color-bad:#f87171;}" +
+    ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.8125rem}" +
+    "@media(max-width:768px){table{font-size:0.75rem}th,td{padding:0.375rem 0.5rem!important}.hide-mobile{display:none}}" +
+    ".ladder-line{border-left:2px dashed #1e1e22;margin-left:1rem;padding-left:1rem}" +
+    ".card{background:#131316;border:1px solid #1e1e22;border-radius:0.75rem}" +
+    "input:focus,select:focus{border-color:#a78bfa!important;box-shadow:0 0 0 2px rgba(167,139,250,.1)!important;outline:none}" +
+    "tr:hover td{background:rgba(255,255,255,.015)}" +
+    ".section{margin-bottom:1.75rem}" +
+    ".section-title{font-size:0.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#52525b;margin-bottom:0.75rem}" +
+    "</style></head>" +
+    "<body class=\"min-h-full bg-[#0a0a0c] text-[#e4e4e7] font-sans antialiased\">" +
+    "<div class=\"min-h-screen grid grid-cols-1 lg:grid-cols-[220px_1fr]\">" +
+    // Sidebar — slim, grouped
+    "<aside class=\"border-b lg:border-b-0 lg:border-r border-[#1e1e22] bg-[#0e0e11] px-3 py-4 lg:sticky lg:top-0 lg:h-screen flex flex-col overflow-y-auto\">" +
+    "<div class=\"flex items-center gap-2.5 mb-6 px-2\">" +
+    "<div class=\"w-8 h-8 rounded-lg bg-gradient-to-br from-[#a78bfa] to-[#6d28d9] grid place-items-center font-bold text-sm text-white\">" + str.slice(brand_name(), 0, 1) + "</div>" +
+    "<span class=\"font-semibold text-sm\">" + h(brand_name()) + "</span></div>" +
+    // Nav — grouped with labels
+    "<div class=\"section-title px-2\">Monitor</div>" +
+    "<nav class=\"flex flex-col gap-px text-[13px] mb-4\">" +
+    nav_link("/", "Overview", "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0h4") +
+    nav_link("/noc", "NOC", "M5.636 18.364a9 9 0 010-12.728m12.728 0a9 9 0 010 12.728m-9.9-2.829a5 5 0 010-7.07m7.072 0a5 5 0 010 7.07M13 12a1 1 0 11-2 0 1 1 0 012 0z") +
+    nav_link("/messages", "Messages", "M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4") +
+    nav_link("/calls", "Calls", "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01") +
+    nav_link("/probe", "Probe", "M13 10V3L4 14h7v7l9-11h-7z") +
+    "</nav>" +
+    "<div class=\"section-title px-2\">Analyze</div>" +
+    "<nav class=\"flex flex-col gap-px text-[13px] mb-4\">" +
+    nav_link("/metrics", "Metrics", "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z") +
+    nav_link("/report", "Reports", "M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z") +
+    nav_link("/sla", "SLA", "M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z") +
+    nav_link("/alerts", "Alerts", "M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9") +
+    "</nav>" +
+    (if admin_link != "" { "<div class=\"section-title px-2\">Admin</div><nav class=\"flex flex-col gap-px text-[13px] mb-4\">" + admin_link + "</nav>" } else { "" }) +
+    // Footer
+    "<div class=\"mt-auto pt-3 border-t border-[#1e1e22] px-2 text-[10px] text-[#3f3f46] space-y-1\">" +
+    "<div id=\"core-status\" hx-get=\"/partials/status\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\">…</div>" +
+    "</div>" +
+    (if user_info != "" { user_info } else { "" }) +
+    "</aside>" +
+    "<main class=\"p-5 md:p-7 lg:p-8 w-full\">" + body + "</main></div></body></html>"
+}
+
+fn nav_link(href, label, icon) {
+    "<a href=\"" + href + "\" class=\"flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[#71717a] hover:bg-[#131316] hover:text-[#e4e4e7] transition-colors\" hx-boost=\"true\">" +
+    "<svg class=\"w-3.5 h-3.5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"" + icon + "\"/></svg>" +
+    label + "</a>"
 }
 
 fn stat_card(label, value, sub) {
-    "<div class=\"rounded-2xl border border-[#1e2d44] bg-gradient-to-b from-[rgba(20,30,51,.9)] to-[#0f1628] p-4 shadow-lg\">" +
-    "<div class=\"text-xs text-[#8fa3c1] mb-1\">" + h(label) + "</div>" +
-    "<div class=\"text-2xl font-bold tracking-tight mono\">" + h(value) + "</div>" +
-    "<div class=\"text-[11px] text-[#8fa3c1] mt-1\">" + h(sub) + "</div></div>"
+    "<div class=\"card p-4\">" +
+    "<div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">" + h(label) + "</div>" +
+    "<div class=\"text-xl font-bold mono mt-1\">" + h(value) + "</div>" +
+    "<div class=\"text-[10px] text-[#3f3f46] mt-1\">" + h(sub) + "</div></div>"
 }
 
 fn method_badge(method, status, kind) {
     mut label := ("" + (method ?? ""))
-    mut cls := "bg-[rgba(110,168,254,.15)] text-[#6ea8fe] border-[rgba(110,168,254,.3)]"
+    mut cls := "bg-[rgba(167,139,250,.15)] text-[#a78bfa] border-[rgba(167,139,250,.3)]"
     if kind == "response" {
         label = ("" + (status ?? 0))
         st := int.parse(status ?? 0).unwrap_or(0)
         if st >= 200 && st < 300 {
-            cls = "bg-[rgba(61,220,151,.12)] text-[#3ddc97] border-[rgba(61,220,151,.3)]"
+            cls = "bg-[rgba(52,211,153,.12)] text-[#34d399] border-[rgba(52,211,153,.3)]"
         } else if st >= 400 {
-            cls = "bg-[rgba(255,107,107,.12)] text-[#ff6b6b] border-[rgba(255,107,107,.3)]"
+            cls = "bg-[rgba(248,113,113,.12)] text-[#f87171] border-[rgba(248,113,113,.3)]"
         } else {
-            cls = "bg-[rgba(255,200,87,.12)] text-[#ffc857] border-[rgba(255,200,87,.3)]"
+            cls = "bg-[rgba(251,191,36,.12)] text-[#fbbf24] border-[rgba(251,191,36,.3)]"
         }
     } else if method == "INVITE" {
-        cls = "bg-[rgba(167,139,250,.15)] text-[#c4b5fd] border-[rgba(167,139,250,.3)]"
+        cls = "bg-[rgba(167,139,250,.15)] text-[#c084fc] border-[rgba(167,139,250,.3)]"
     } else if method == "BYE" || method == "CANCEL" {
-        cls = "bg-[rgba(255,107,107,.12)] text-[#ff6b6b] border-[rgba(255,107,107,.3)]"
+        cls = "bg-[rgba(248,113,113,.12)] text-[#f87171] border-[rgba(248,113,113,.3)]"
     } else if method == "OPTIONS" || method == "REGISTER" {
-        cls = "bg-[rgba(61,220,151,.12)] text-[#3ddc97] border-[rgba(61,220,151,.3)]"
+        cls = "bg-[rgba(52,211,153,.12)] text-[#34d399] border-[rgba(52,211,153,.3)]"
     }
     "<span class=\"inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border " + cls + " mono\">" + h(label) + "</span>"
 }
@@ -109,17 +443,17 @@ fn msg_row(m) {
         src_s = src_s + " → " + h(dst)
     }
     "<tr class=\"hover:bg-white/[0.02]\">" +
-    "<td class=\"py-2 px-3 mono text-xs text-[#8fa3c1]\">" + ("" + (id)) + "</td>" +
+    "<td class=\"py-2 px-3 mono text-xs text-[#a1a1aa]\">" + ("" + (id)) + "</td>" +
     "<td class=\"py-2 px-3\">" + badge + "</td>" +
     "<td class=\"py-2 px-3 mono text-xs max-w-[14rem] truncate\" title=\"" + cid + "\">" + cid + "</td>" +
-    "<td class=\"py-2 px-3 mono text-xs text-[#8fa3c1] max-w-[12rem] truncate\" title=\"" + src_s + "\">" + src_s + "</td>" +
-    "<td class=\"py-2 px-3 text-xs\"><span class=\"px-1.5 py-0.5 rounded border border-[#1e2d44] text-[#8fa3c1]\">" + xport + "</span>" +
-    (if agent != "" { " <span class=\"text-[10px] text-[#8fa3c1]\">" + h(agent) + "</span>" } else { "" }) +
+    "<td class=\"py-2 px-3 mono text-xs text-[#a1a1aa] max-w-[12rem] truncate\" title=\"" + src_s + "\">" + src_s + "</td>" +
+    "<td class=\"py-2 px-3 text-xs\"><span class=\"px-1.5 py-0.5 rounded border border-[#1e1e22] text-[#a1a1aa]\">" + xport + "</span>" +
+    (if agent != "" { " <span class=\"text-[10px] text-[#a1a1aa]\">" + h(agent) + "</span>" } else { "" }) +
     "</td>" +
-    "<td class=\"py-2 px-3 text-xs max-w-[12rem] truncate text-[#8fa3c1]\">" + h(from) + "</td>" +
+    "<td class=\"py-2 px-3 text-xs max-w-[12rem] truncate text-[#a1a1aa]\">" + h(from) + "</td>" +
     "<td class=\"py-2 px-3 text-xs\">" +
-    "<a class=\"text-[#6ea8fe] hover:underline\" href=\"/messages/" + ("" + (id)) + "\" hx-boost=\"true\">view</a> · " +
-    "<a class=\"text-[#6ea8fe] hover:underline\" href=\"/calls?call_id=" + cid + "\" hx-boost=\"true\">ladder</a>" +
+    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/messages/" + ("" + (id)) + "\" hx-boost=\"true\">view</a> · " +
+    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/calls?call_id=" + cid + "\" hx-boost=\"true\">ladder</a>" +
     "</td></tr>"
 }
 
@@ -131,15 +465,15 @@ fn messages_table(items) {
         }
     }
     if rows == "" {
-        rows = "<tr><td colspan=\"7\" class=\"py-8 text-center text-[#8fa3c1] text-sm\">No messages yet — send SIP to the core or run a probe.</td></tr>"
+        rows = "<tr><td colspan=\"7\" class=\"py-8 text-center text-[#a1a1aa] text-sm\">No messages yet — send SIP to the core or run a probe.</td></tr>"
     }
-    "<div class=\"overflow-x-auto rounded-2xl border border-[#1e2d44] bg-[#0f1628]\">" +
-    "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#8fa3c1] border-b border-[#1e2d44]\">" +
-    "<th class=\"py-2 px-3 font-semibold\">ID</th><th class=\"py-2 px-3 font-semibold\">Method</th>" +
-    "<th class=\"py-2 px-3 font-semibold\">Call-ID</th><th class=\"py-2 px-3 font-semibold\">Src</th>" +
-    "<th class=\"py-2 px-3 font-semibold\">Transport</th><th class=\"py-2 px-3 font-semibold\">From</th>" +
+    "<div class=\"overflow-x-auto rounded-2xl border border-[#1e1e22] bg-[#131316]\">" +
+    "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#a1a1aa] border-b border-[#1e1e22]\">" +
+    "<th class=\"py-2 px-3 font-semibold hide-mobile\">ID</th><th class=\"py-2 px-3 font-semibold\">Method</th>" +
+    "<th class=\"py-2 px-3 font-semibold\">Call-ID</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Src</th>" +
+    "<th class=\"py-2 px-3 font-semibold hide-mobile\">Transport</th><th class=\"py-2 px-3 font-semibold hide-mobile\">From</th>" +
     "<th class=\"py-2 px-3 font-semibold\"></th></tr></thead>" +
-    "<tbody class=\"divide-y divide-[#1e2d44]\">" + rows + "</tbody></table></div>"
+    "<tbody class=\"divide-y divide-[#27272a]\">" + rows + "</tbody></table></div>"
 }
 
 fn empty_metrics() {
@@ -158,10 +492,16 @@ fn fetch_metrics() {
 }
 
 fn fetch_messages(limit, call_id) {
+    fetch_messages_ex(limit, call_id, "", "", "", "")
+}
+
+fn fetch_messages_ex(limit, call_id, transport, agent, method, src) {
     mut path := core_base() + "/api/messages?limit=" + ("" + (limit))
-    if call_id != "" {
-        path = path + "&call_id=" + call_id
-    }
+    if call_id != "" { path = path + "&call_id=" + call_id }
+    if transport != "" { path = path + "&transport=" + transport }
+    if agent != "" { path = path + "&agent=" + agent }
+    if method != "" { path = path + "&method=" + method }
+    if src != "" { path = path + "&src=" + src }
     r := http.get(path, api_headers())
     if !r.ok { return [] }
     p := json.parse(r.value.body)
@@ -194,8 +534,71 @@ fn fetch_top_calls() {
     if p.ok { p.value } else { [] }
 }
 
+fn fetch_kpi() {
+    r := http.get(core_base() + "/api/report/kpi", api_headers())
+    if !r.ok { return {} }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { {} }
+}
+
+fn fetch_response_codes() {
+    r := http.get(core_base() + "/api/report/response-codes", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_top_talkers() {
+    r := http.get(core_base() + "/api/report/top-talkers?limit=15", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_agents() {
+    r := http.get(core_base() + "/api/report/agents", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_cps(minutes) {
+    r := http.get(core_base() + "/api/report/cps?minutes=" + ("" + (minutes)), api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
 fn fetch_daily() {
     r := http.get(core_base() + "/api/report/daily?limit=40", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_realtime(window) {
+    r := http.get(core_base() + "/api/realtime?window=" + ("" + (window)), api_headers())
+    if !r.ok { return {} }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { {} }
+}
+
+fn fetch_nodes() {
+    r := http.get(core_base() + "/api/nodes", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_related(call_id) {
+    r := http.get(core_base() + "/api/related?call_id=" + call_id, api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_anomalies() {
+    r := http.get(core_base() + "/api/anomalies", api_headers())
     if !r.ok { return [] }
     p := json.parse(r.value.body)
     if p.ok { p.value } else { [] }
@@ -206,135 +609,1442 @@ fn n(m, key) {
     if v == null { 0 } else { v }
 }
 
-fn overview_body() {
-    m := fetch_metrics()
-    items := fetch_messages(12, "")
-    up_s := n(m, "uptime_ms") / 1000
-    mut methods := m["methods"]
-    if methods == null {
-        methods = {"INVITE": 0, "OPTIONS": 0, "REGISTER": 0, "BYE": 0, "ACK": 0, "INFO": 0, "MESSAGE": 0}
-    }
-    bar := viz.bar({
-        "INVITE": methods["INVITE"] ?? 0,
-        "OPTIONS": methods["OPTIONS"] ?? 0,
-        "REGISTER": methods["REGISTER"] ?? 0,
-        "BYE": methods["BYE"] ?? 0,
-        "ACK": methods["ACK"] ?? 0,
-        "INFO": methods["INFO"] ?? 0,
-        "MESSAGE": methods["MESSAGE"] ?? 0,
-    }, {"title": "SIP methods", "width": 560, "height": 220, "colors": ["#6ea8fe", "#3ddc97", "#c4b5fd", "#ff6b6b", "#ffc857", "#94a3b8", "#38bdf8"]})
+fn build_traffic_charts(minutes) {
+    cps := fetch_cps(minutes)
+    rt := fetch_realtime(minutes)
+    crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
 
-    cards := "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
-        stat_card("Messages", n(m, "msgs_total"), "ring idx " + ("" + (n(m, "ring_idx")))) +
-        stat_card("Requests", n(m, "requests"), "echoes " + ("" + (n(m, "echoes")))) +
-        stat_card("HEP", n(m, "hep_total"), "sip " + ("" + (n(m, "hep_sip"))) + " · auth_fail " + ("" + (n(m, "hep_auth_fail")))) +
-        stat_card("Probe RTT", ("" + (n(m, "probe_rtt_ms"))) + " ms", "ok " + ("" + (n(m, "probes_ok"))) + " · fail " + ("" + (n(m, "probes_fail")))) +
+    // Build line chart data from CPS buckets
+    mut line_data := {}
+    mut area_data := {}
+    for bucket in cps {
+        ts := bucket["ts"] ?? 0
+        total := bucket["total"] ?? 0
+        invites := bucket["invites"] ?? 0
+        // Label as relative minutes ago
+        mins_ago := (time.unix() * 1000 - ts) / 60000
+        label := if mins_ago <= 1 { "now" } else { ("" + (mins_ago)) + "m" }
+        line_data[label] = total
+        area_data[label] = invites
+    }
+
+    mut line_html := "<div class=\"text-sm text-[#52525b] py-8 text-center\">No traffic in this window.</div>"
+    mut area_html := ""
+    if len(line_data) > 0 {
+        line_chart := viz.line(line_data, {"title": "Messages / minute", "width": 700, "height": 200, "colors": ["#a78bfa"]})
+        line_html = line_chart.html
+        if len(area_data) > 0 {
+            area_chart := viz.area(area_data, {"title": "INVITEs / minute", "width": 700, "height": 160, "colors": ["#34d399"]})
+            area_html = "<div class=\"mt-4\">" + area_chart.html + "</div>"
+        }
+    }
+
+    // Response breakdown for this window
+    r2xx := rt["resp_2xx"] ?? 0
+    r4xx := rt["resp_4xx"] ?? 0
+    r5xx := rt["resp_5xx"] ?? 0
+    total_resp := r2xx + r4xx + r5xx
+    mut resp_pie_html := ""
+    if total_resp > 0 {
+        resp_pie := viz.pie({"2xx": r2xx, "4xx": r4xx, "5xx": r5xx}, {"title": "Responses", "width": 280, "height": 200, "colors": ["#34d399", "#fb923c", "#f87171"]})
+        resp_pie_html = resp_pie.html
+    }
+
+    // Method mix for this window
+    inv := rt["invites"] ?? 0
+    bye := rt["byes"] ?? 0
+    reg := rt["registers"] ?? 0
+    opts := rt["options"] ?? 0
+    mut method_bar_html := ""
+    if inv + bye + reg + opts > 0 {
+        method_bar := viz.bar({"INVITE": inv, "BYE": bye, "REGISTER": reg, "OPTIONS": opts}, {"title": "Methods", "width": 280, "height": 200, "colors": ["#a78bfa", "#f87171", "#f472b6", "#34d399"]})
+        method_bar_html = method_bar.html
+    }
+
+    // Summary stats
+    summary := "<div class=\"grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4\">" +
+        "<div class=\"text-center\"><div class=\"text-2xl font-bold mono\">" + ("" + (rt["total"] ?? 0)) + "</div><div class=\"text-[10px] text-[#52525b] uppercase\">messages</div></div>" +
+        "<div class=\"text-center\"><div class=\"text-2xl font-bold mono\" style=\"color:" + (if (rt["asr"] ?? 0) >= 70 { "#34d399" } else if (rt["asr"] ?? 0) >= 40 { "#fbbf24" } else { "#f87171" }) + "\">" + ("" + (rt["asr"] ?? 0)) + "%</div><div class=\"text-[10px] text-[#52525b] uppercase\">ASR</div></div>" +
+        "<div class=\"text-center\"><div class=\"text-2xl font-bold mono\">" + ("" + (rt["active_calls"] ?? 0)) + "</div><div class=\"text-[10px] text-[#52525b] uppercase\">active calls</div></div>" +
+        "<div class=\"text-center\"><div class=\"text-2xl font-bold mono\">" + ("" + (rt["agents_active"] ?? 0)) + "</div><div class=\"text-[10px] text-[#52525b] uppercase\">nodes</div></div>" +
         "</div>"
 
-    "<div class=\"flex items-end justify-between gap-3 mb-6\">" +
-    "<div><h1 class=\"text-2xl font-bold tracking-tight\">Overview</h1>" +
-    "<p class=\"text-sm text-[#8fa3c1] mt-1\">Capture · echo · HEP · Prometheus metrics — one stack.</p></div>" +
-    "<div class=\"text-xs text-[#8fa3c1] mono\">uptime " + ("" + (up_s)) + "s</div></div>" +
-    cards +
-    "<div class=\"grid lg:grid-cols-2 gap-4 mb-6\">" +
-    "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4 overflow-x-auto\">" +
-    "<h2 class=\"text-sm font-semibold mb-3\">Method mix</h2><div>" + bar.html + "</div></div>" +
-    "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" +
-    "<h2 class=\"text-sm font-semibold mb-3\">What Zaman integrates</h2>" +
-    "<ul class=\"text-sm text-[#8fa3c1] space-y-2\">" +
-    "<li><span class=\"text-[#3ddc97] font-semibold\">Homer-like</span> SIP/HEP capture + call search</li>" +
-    "<li><span class=\"text-[#6ea8fe] font-semibold\">Prometheus-like</span> <code class=\"mono\">/metrics</code> on the core</li>" +
-    "<li><span class=\"text-[#ffc857] font-semibold\">Grafana-like</span> live HTMX dashboard</li>" +
-    "<li><span class=\"text-[#c4b5fd] font-semibold\">Echo probes</span> active OPTIONS RTT checks</li>" +
-    "</ul>" +
-    "<div class=\"mt-4 flex flex-wrap gap-2\">" +
-    "<a href=\"/probe\" class=\"rounded-lg px-3 py-2 text-sm bg-gradient-to-br from-[#3b82f6] to-[#2563eb] text-white\" hx-boost=\"true\">Run probe</a>" +
-    "<a href=\"/messages\" class=\"rounded-lg px-3 py-2 text-sm border border-[#1e2d44] bg-[#141e33]\" hx-boost=\"true\">Browse messages</a>" +
-    "</div></div></div>" +
-    "<div class=\"flex items-center justify-between mb-3\">" +
-    "<h2 class=\"text-sm font-semibold\">Live messages</h2>" +
-    "<span class=\"text-[11px] text-[#8fa3c1]\">auto-refresh 3s</span></div>" +
-    "<div id=\"live-msgs\" hx-get=\"/partials/messages?limit=12\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
-    messages_table(items) + "</div>"
+    summary +
+    "<div class=\"grid lg:grid-cols-[1fr_300px] gap-4\">" +
+    "<div class=\"" + crd + " p-5 overflow-x-auto\">" + line_html + area_html + "</div>" +
+    "<div class=\"space-y-4\">" +
+    (if resp_pie_html != "" { "<div class=\"" + crd + " p-4 overflow-x-auto\">" + resp_pie_html + "</div>" } else { "" }) +
+    (if method_bar_html != "" { "<div class=\"" + crd + " p-4 overflow-x-auto\">" + method_bar_html + "</div>" } else { "" }) +
+    "</div></div>"
+}
+
+fn overview_body(user) {
+    m := fetch_metrics()
+    rt := fetch_realtime(5)
+    nodes := fetch_nodes()
+    anomalies := fetch_anomalies()
+    items := fetch_messages(8, "")
+    up_s := n(m, "uptime_ms") / 1000
+
+    // ── Alerts (only if problems) ──
+    mut alerts := ""
+    if len(anomalies) > 0 {
+        mut aitems := ""
+        for a in anomalies {
+            sev := a["severity"] ?? "warning"
+            cls := if sev == "critical" { "border-[#f87171]/20 bg-[#f87171]/5 text-[#f87171]" } else { "border-[#fbbf24]/20 bg-[#fbbf24]/5 text-[#fbbf24]" }
+            aitems = aitems + "<div class=\"flex items-center gap-2 rounded-lg border " + cls + " px-3 py-2 text-xs\">" +
+                "<span>&#x26A0;</span> " + h(a["message"] ?? "") + "</div>"
+        }
+        alerts = "<div class=\"space-y-1.5 mb-5\" id=\"alert-bar\" hx-get=\"/partials/alerts\" hx-trigger=\"every 30s\" hx-swap=\"innerHTML\">" + aitems + "</div>"
+    } else {
+        alerts = "<div id=\"alert-bar\" hx-get=\"/partials/alerts\" hx-trigger=\"every 30s\" hx-swap=\"innerHTML\"></div>"
+    }
+
+    // ── Hero KPIs: 4 metrics that matter at a glance ──
+    win_asr := rt["asr"] ?? 0
+    err_rate := rt["err_rate"] ?? 0
+    active := rt["active_calls"] ?? 0
+    asr_c := if win_asr >= 70 { "#34d399" } else if win_asr >= 40 { "#fbbf24" } else { "#f87171" }
+    err_c := if err_rate <= 5 { "#34d399" } else if err_rate <= 15 { "#fbbf24" } else { "#f87171" }
+    total_5m := rt["total"] ?? 0
+
+    hero := "<div class=\"grid grid-cols-4 gap-3 mb-5\">" +
+        "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Active calls</div>" +
+        "<div class=\"text-3xl font-bold mono mt-1 text-[#a78bfa]\">" + ("" + (active)) + "</div></div>" +
+        "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">ASR</div>" +
+        "<div class=\"text-3xl font-bold mono mt-1\" style=\"color:" + asr_c + "\">" + ("" + (win_asr)) + "<span class=\"text-lg\">%</span></div></div>" +
+        "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Errors</div>" +
+        "<div class=\"text-3xl font-bold mono mt-1\" style=\"color:" + err_c + "\">" + ("" + (err_rate)) + "<span class=\"text-lg\">%</span></div></div>" +
+        "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Messages (5m)</div>" +
+        "<div class=\"text-3xl font-bold mono mt-1\">" + ("" + (total_5m)) + "</div></div>" +
+        "</div>"
+
+    // ── Node status: compact summary bar, not a grid ──
+    mut green := 0
+    mut yellow := 0
+    mut red := 0
+    for nd in nodes {
+        st := nd["status"] ?? "red"
+        if st == "green" { green = green + 1 }
+        else if st == "yellow" { yellow = yellow + 1 }
+        else { red = red + 1 }
+    }
+    node_bar := "<div class=\"flex items-center justify-between card px-4 py-2.5 mb-5\">" +
+        "<div class=\"flex items-center gap-4 text-xs\">" +
+        "<span class=\"flex items-center gap-1.5\"><span class=\"w-2 h-2 rounded-full bg-[#34d399]\"></span><span class=\"mono\">" + ("" + (green)) + "</span> healthy</span>" +
+        (if yellow > 0 { "<span class=\"flex items-center gap-1.5\"><span class=\"w-2 h-2 rounded-full bg-[#fbbf24]\"></span><span class=\"mono\">" + ("" + (yellow)) + "</span> degraded</span>" } else { "" }) +
+        (if red > 0 { "<span class=\"flex items-center gap-1.5\"><span class=\"w-2 h-2 rounded-full bg-[#f87171]\"></span><span class=\"mono\">" + ("" + (red)) + "</span> offline</span>" } else { "" }) +
+        "<span class=\"text-[#3f3f46]\">·</span>" +
+        "<span class=\"text-[#52525b]\">" + ("" + (len(nodes))) + " nodes</span></div>" +
+        "<a href=\"/noc\" class=\"text-[11px] text-[#a78bfa] hover:underline\" hx-boost=\"true\">View all →</a></div>"
+
+    // ── Traffic charts ──
+    btn := "rounded-md px-2.5 py-1 text-[11px] transition-colors cursor-pointer"
+    btn_on := btn + " bg-[#1e1e22] text-[#e4e4e7]"
+    btn_off := btn + " text-[#52525b] hover:text-[#a1a1aa]"
+    traffic := "<div class=\"section\">" +
+        "<div class=\"flex items-center justify-between mb-3\">" +
+        "<div class=\"section-title mb-0\">Traffic</div>" +
+        "<div class=\"flex items-center gap-0.5 rounded-md border border-[#1e1e22] p-0.5\">" +
+        "<button class=\"" + btn_on + "\" hx-get=\"/partials/charts?window=5\" hx-target=\"#traffic-charts\" hx-swap=\"innerHTML\">5m</button>" +
+        "<button class=\"" + btn_off + "\" hx-get=\"/partials/charts?window=15\" hx-target=\"#traffic-charts\" hx-swap=\"innerHTML\">15m</button>" +
+        "<button class=\"" + btn_off + "\" hx-get=\"/partials/charts?window=60\" hx-target=\"#traffic-charts\" hx-swap=\"innerHTML\">1h</button>" +
+        "<button class=\"" + btn_off + "\" hx-get=\"/partials/charts?window=360\" hx-target=\"#traffic-charts\" hx-swap=\"innerHTML\">6h</button>" +
+        "<button class=\"" + btn_off + "\" hx-get=\"/partials/charts?window=1440\" hx-target=\"#traffic-charts\" hx-swap=\"innerHTML\">24h</button>" +
+        "</div></div>" +
+        "<div id=\"traffic-charts\" hx-get=\"/partials/charts?window=5\" hx-trigger=\"every 15s\" hx-swap=\"innerHTML\">" +
+        build_traffic_charts(5) + "</div></div>"
+
+    // ── Live feed (compact) ──
+    live := "<div class=\"section\">" +
+        "<div class=\"flex items-center justify-between mb-3\">" +
+        "<div class=\"section-title mb-0\">Live feed</div>" +
+        "<span class=\"flex items-center gap-1.5 text-[10px] text-[#34d399]\"><span class=\"w-1.5 h-1.5 rounded-full bg-[#34d399] animate-pulse\"></span>live</span></div>" +
+        "<div id=\"live-msgs\" hx-get=\"/partials/messages?limit=8\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
+        messages_table(items) + "</div></div>"
+
+    // ── Assemble ──
+    "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+    "<h1 class=\"text-xl font-semibold\">Overview</h1>" +
+    "<div class=\"text-[10px] text-[#3f3f46] mono\">uptime " + ("" + (up_s)) + "s</div></div>" +
+    alerts + hero + node_bar + traffic + live
+}
+
+// Collect unique endpoints from messages, return as JSON-encoded list string
+fn ladder_endpoints(items) {
+    // Gather unique src/dst, preserve order of first appearance
+    mut seen := ""
+    mut out := "["
+    mut first := true
+    for m in items {
+        src := m["src"] ?? ""
+        dst := m["dst"] ?? ""
+        if src != "" && !str.contains(seen, "|" + src + "|") {
+            seen = seen + "|" + src + "|"
+            if !first { out = out + "," }
+            out = out + "\"" + src + "\""
+            first = false
+        }
+        if dst != "" && !str.contains(seen, "|" + dst + "|") {
+            seen = seen + "|" + dst + "|"
+            if !first { out = out + "," }
+            out = out + "\"" + dst + "\""
+            first = false
+        }
+    }
+    r := json.parse(out + "]")
+    if r.ok { r.value } else { [] }
+}
+
+fn endpoint_index(endpoints, addr) {
+    mut i := 0
+    while i < len(endpoints) {
+        if endpoints[i] == addr { return i }
+        i = i + 1
+    }
+    0
 }
 
 fn ladder_html(call_id) {
-    items := fetch_messages(100, call_id)
+    items := fetch_messages(200, call_id)
+    // Reverse to chronological
     mut ordered := []
     mut i := len(items) - 1
     while i >= 0 {
-        ordered = ordered + [items[i]]
+        ordered = list_append(ordered, items[i])
         i = i - 1
     }
-    mut steps := ""
+    if len(ordered) == 0 {
+        return "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-6\">" +
+            "<p class=\"text-sm text-[#71717a]\">No messages for this Call-ID.</p></div>"
+    }
+
+    endpoints := ladder_endpoints(ordered)
+    ncols := len(endpoints)
+    if ncols == 0 { return "<p class=\"text-sm text-[#71717a]\">No endpoints found.</p>" }
+
+    // Column width as percentage
+    col_pct := if ncols > 0 { 100 / ncols } else { 50 }
+
+    // Header: endpoint columns
+    mut hdr := "<div class=\"flex border-b border-[#1e1e22] pb-3 mb-2\">"
+    mut ci := 0
+    while ci < ncols {
+        ep := endpoints[ci]
+        // Shorten display: just host or last segment
+        hdr = hdr + "<div class=\"flex-1 text-center\">" +
+            "<div class=\"inline-block rounded-lg bg-[#27272a] px-3 py-1.5 text-[11px] mono text-[#e4e4e7] font-medium\">" + h(ep) + "</div>" +
+            "</div>"
+        ci = ci + 1
+    }
+    hdr = hdr + "</div>"
+
+    // Rows: one per message
+    mut rows := ""
     for m in ordered {
-        badge := method_badge(m["method"] ?? "", m["status"] ?? 0, m["kind"] ?? "")
         id := m["id"] ?? 0
-        steps = steps +
-            "<div class=\"relative pl-6 pb-6 ladder-line\">" +
-            "<div class=\"absolute left-[-5px] top-1 w-2.5 h-2.5 rounded-full bg-[#6ea8fe]\"></div>" +
-            "<div class=\"flex flex-wrap items-center gap-2 mb-1\">" + badge +
-            "<span class=\"text-xs text-[#8fa3c1] mono\">#" + ("" + (id)) + "</span>" +
-            "<span class=\"text-xs text-[#8fa3c1]\">" + h(m["transport"] ?? "") + "</span>" +
-            "<span class=\"text-xs mono text-[#8fa3c1]\">" + h(m["src"] ?? "") + "</span></div>" +
-            "<div class=\"text-xs text-[#8fa3c1] truncate\">" + h(m["from"] ?? "") + " → " + h(m["to"] ?? "") + "</div>" +
-            "<a href=\"/messages/" + ("" + (id)) + "\" class=\"text-[11px] text-[#6ea8fe] hover:underline\" hx-boost=\"true\">detail</a></div>"
+        src := m["src"] ?? ""
+        dst := m["dst"] ?? ""
+        kind := m["kind"] ?? ""
+        method := m["method"] ?? ""
+        status := m["status"] ?? 0
+        cseq := m["cseq"] ?? ""
+        transport := m["transport"] ?? ""
+
+        src_i := endpoint_index(endpoints, src)
+        // If dst empty (native SIP capture), point to self
+        dst_i := if dst != "" { endpoint_index(endpoints, dst) } else { src_i }
+
+        left_i := if src_i < dst_i { src_i } else { dst_i }
+        right_i := if src_i < dst_i { dst_i } else { src_i }
+        going_right := src_i <= dst_i
+
+        // Arrow label
+        mut label := method
+        if kind == "response" {
+            label = ("" + (status)) + " " + method
+        }
+
+        // Arrow color
+        mut arrow_cls := "border-[#a78bfa] text-[#a78bfa]"
+        if kind == "response" {
+            st := int.parse(status).unwrap_or(0)
+            if st >= 200 && st < 300 {
+                arrow_cls = "border-[#34d399] text-[#34d399]"
+            } else if st >= 400 {
+                arrow_cls = "border-[#f87171] text-[#f87171]"
+            } else {
+                arrow_cls = "border-[#fbbf24] text-[#fbbf24]"
+            }
+        } else if method == "INVITE" {
+            arrow_cls = "border-[#c084fc] text-[#c084fc]"
+        } else if method == "BYE" || method == "CANCEL" {
+            arrow_cls = "border-[#f87171] text-[#f87171]"
+        } else if method == "ACK" {
+            arrow_cls = "border-[#71717a] text-[#71717a]"
+        }
+
+        // Build the row using CSS grid
+        // Each column gets a cell; the arrow spans from left_i to right_i
+        mut cells := ""
+        mut c := 0
+        while c < ncols {
+            if c == left_i && left_i == right_i {
+                // Self-arrow (src == dst or no dst)
+                cells = cells + "<div class=\"flex items-center justify-center\">" +
+                    "<div class=\"text-[11px] mono font-medium " + arrow_cls + " px-2 py-0.5 rounded border border-current/30 bg-current/5\">" + h(label) + "</div></div>"
+            } else if c == left_i {
+                // Start of arrow span
+                span := right_i - left_i + 1
+                if going_right {
+                    cells = cells + "<div class=\"flex items-center col-span-" + ("" + (span)) + "\">" +
+                        "<div class=\"w-2 h-2 rounded-full bg-current " + arrow_cls + " shrink-0\"></div>" +
+                        "<div class=\"flex-1 border-t-2 border-dashed " + arrow_cls + " relative\">" +
+                        "<span class=\"absolute -top-5 left-1/2 -translate-x-1/2 text-[11px] mono font-medium " + arrow_cls + " whitespace-nowrap\">" + h(label) + "</span></div>" +
+                        "<div class=\"" + arrow_cls + " shrink-0\" style=\"width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:8px solid currentColor\"></div></div>"
+                } else {
+                    cells = cells + "<div class=\"flex items-center col-span-" + ("" + (span)) + "\">" +
+                        "<div class=\"" + arrow_cls + " shrink-0\" style=\"width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-right:8px solid currentColor\"></div>" +
+                        "<div class=\"flex-1 border-t-2 border-dashed " + arrow_cls + " relative\">" +
+                        "<span class=\"absolute -top-5 left-1/2 -translate-x-1/2 text-[11px] mono font-medium " + arrow_cls + " whitespace-nowrap\">" + h(label) + "</span></div>" +
+                        "<div class=\"w-2 h-2 rounded-full bg-current " + arrow_cls + " shrink-0\"></div></div>"
+                }
+                c = right_i // skip spanned columns
+            } else {
+                cells = cells + "<div></div>"
+            }
+            c = c + 1
+        }
+
+        // Vertical lifeline guides
+        mut guides := ""
+        mut g := 0
+        while g < ncols {
+            pct := if ncols > 1 { (g * 100) / (ncols - 1) } else { 50 }
+            guides = guides + "<div class=\"absolute top-0 bottom-0 border-l border-[#1e1e22]\" style=\"left:" + ("" + (((g * 2 + 1) * 50) / ncols)) + "%\"></div>"
+            g = g + 1
+        }
+
+        rows = rows + "<a href=\"/messages/" + ("" + (id)) + "\" class=\"block group relative hover:bg-[#27272a]/30 rounded-lg transition-colors\" hx-boost=\"true\">" +
+            guides +
+            "<div class=\"relative grid gap-0 py-4 px-1\" style=\"grid-template-columns:repeat(" + ("" + (ncols)) + ",1fr)\">" + cells + "</div>" +
+            "<div class=\"text-[10px] text-[#52525b] group-hover:text-[#71717a] px-3 pb-1 mono flex gap-3\">" +
+            "<span>#" + ("" + (id)) + "</span>" +
+            "<span>" + h(cseq) + "</span>" +
+            "<span>" + h(transport) + "</span>" +
+            "</div></a>"
     }
-    if steps == "" {
-        steps = "<p class=\"text-sm text-[#8fa3c1]\">No messages for this Call-ID.</p>"
+
+    // Related calls (B2BUA correlation)
+    related := fetch_related(call_id)
+    mut related_html := ""
+    if len(related) > 0 {
+        mut rlinks := ""
+        for rel in related {
+            rcid := h(rel["call_id"] ?? "")
+            rmsgs := rel["messages"] ?? 0
+            reason := rel["reason"] ?? ""
+            reason_label := if reason == "hep_correlation" { "HEP correlation" } else { "From/To match" }
+            rlinks = rlinks + "<a href=\"/calls?call_id=" + rcid + "\" class=\"flex items-center justify-between rounded-lg px-3 py-2 text-xs hover:bg-[#27272a]/50 transition-colors\" hx-boost=\"true\">" +
+                "<span class=\"mono truncate max-w-[20rem]\">" + rcid + "</span>" +
+                "<span class=\"text-[10px] text-[#52525b] shrink-0 ml-2\">" + reason_label + " · " + ("" + (rmsgs)) + " msgs</span></a>"
+        }
+        related_html = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] mt-4 overflow-hidden\">" +
+            "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center gap-2\">" +
+            "<svg class=\"w-4 h-4 text-[#a78bfa]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1\"/></svg>" +
+            "<span class=\"text-sm font-semibold\">Related calls (B2BUA)</span>" +
+            "<span class=\"text-[10px] text-[#52525b]\">" + ("" + (len(related))) + " legs</span></div>" +
+            "<div class=\"p-2\">" + rlinks + "</div></div>"
     }
-    "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-5\">" +
-    "<div class=\"text-xs text-[#8fa3c1] mb-1\">Call-ID</div>" +
-    "<div class=\"mono text-sm mb-6 break-all\">" + h(call_id) + "</div>" + steps + "</div>"
+
+    // QoS panel — show RTCP data if any exists for this call
+    rtcp_messages := fetch_messages_ex(50, call_id, "", "", "", "")
+    mut qos_html := ""
+    mut has_rtcp := false
+    for rm in rtcp_messages {
+        if (rm["proto"] ?? "") == "rtcp" { has_rtcp = true }
+    }
+    if has_rtcp {
+        qos_html = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5 mt-4\">" +
+            "<div class=\"flex items-center gap-2 mb-3\">" +
+            "<svg class=\"w-4 h-4 text-[#34d399]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z\"/></svg>" +
+            "<span class=\"text-sm font-semibold\">QoS / RTCP</span></div>" +
+            "<p class=\"text-xs text-[#71717a]\">RTCP data captured for this call. Raw RTCP payloads are available in the message detail view.</p></div>"
+    }
+
+    // Recording player + upload
+    player := recording_player(call_id)
+    upload := recording_upload_form(call_id)
+
+    // Assemble
+    "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] overflow-hidden\">" +
+    "<div class=\"p-5 border-b border-[#1e1e22]\">" +
+    "<div class=\"flex items-start justify-between gap-4\">" +
+    "<div><div class=\"text-[11px] text-[#71717a] uppercase tracking-wider font-medium mb-1\">Call-ID</div>" +
+    "<div class=\"mono text-sm break-all text-[#e4e4e7]\">" + h(call_id) + "</div>" +
+    "<div class=\"text-[11px] text-[#52525b] mt-1\">" + ("" + (len(ordered))) + " messages · " + ("" + (ncols)) + " endpoints</div></div>" +
+    "<div class=\"flex gap-2 shrink-0\">" +
+    "<a href=\"/pcap?call_id=" + h(call_id) + "\" class=\"rounded-lg px-3 py-1.5 text-[11px] border border-[#1e1e22] bg-[#131316] text-[#a1a1aa] hover:text-[#e4e4e7] transition-colors\" title=\"Download as Wireshark PCAP\">" +
+    "<svg class=\"w-3.5 h-3.5 inline mr-1\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z\"/></svg>PCAP</a>" +
+    "<button onclick=\"navigator.clipboard.writeText(window.location.href).then(()=>this.textContent='Copied!')\" class=\"rounded-lg px-3 py-1.5 text-[11px] border border-[#1e1e22] bg-[#131316] text-[#a1a1aa] hover:text-[#e4e4e7] transition-colors\">Copy URL</button>" +
+    "<form hx-post=\"/share/create\" hx-target=\"#share-result\" hx-swap=\"innerHTML\" class=\"inline\"><input type=\"hidden\" name=\"call_id\" value=\"" + h(call_id) + "\"/>" +
+    "<button type=\"submit\" class=\"rounded-lg px-3 py-1.5 text-[11px] border border-[#1e1e22] bg-[#131316] text-[#a1a1aa] hover:text-[#e4e4e7] transition-colors\">Public link</button></form>" +
+    "</div></div><div id=\"share-result\"></div></div>" +
+    "<div class=\"p-5\">" + hdr +
+    "<div class=\"divide-y divide-[#27272a]/50\">" + rows + "</div>" +
+    "</div></div>" +
+    related_html + qos_html + player + upload
 }
 
+// ---- recordings ----
+
+fn recordings_dir() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/recordings"
+}
+
+fn sanitize_cid(cid) {
+    // Replace dangerous path chars
+    mut s := str.replace(cid, "/", "_")
+    s = str.replace(s, "\\", "_")
+    s = str.replace(s, "..", "_")
+    s = str.replace(s, "\x00", "")
+    s
+}
+
+fn recording_path(call_id) {
+    recordings_dir() + "/" + sanitize_cid(call_id) + ".wav"
+}
+
+fn has_recording(call_id) {
+    fs.exists(recording_path(call_id))
+}
+
+fn recording_player(call_id) {
+    if !has_recording(call_id) { return "" }
+    "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5 mt-4\">" +
+    "<div class=\"flex items-center gap-3 mb-3\">" +
+    "<svg class=\"w-5 h-5 text-[#34d399]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z\"/></svg>" +
+    "<span class=\"text-sm font-medium\">Call recording</span></div>" +
+    "<audio controls preload=\"metadata\" class=\"w-full rounded-lg\" style=\"height:40px\">" +
+    "<source src=\"/recordings/" + h(sanitize_cid(call_id)) + "\" type=\"audio/wav\"/>" +
+    "Your browser does not support audio playback.</audio></div>"
+}
+
+fn recording_upload_form(call_id) {
+    "<div class=\"rounded-2xl border border-dashed border-[#3f3f46] bg-[#131316] p-5 mt-4\">" +
+    "<form method=\"post\" action=\"/recordings/upload\" enctype=\"multipart/form-data\" class=\"flex flex-wrap items-end gap-3\">" +
+    "<input type=\"hidden\" name=\"call_id\" value=\"" + h(call_id) + "\"/>" +
+    "<div class=\"flex-1 min-w-[200px]\">" +
+    "<label class=\"block text-[11px] text-[#71717a] uppercase tracking-wider font-medium mb-2\">Upload recording</label>" +
+    "<input type=\"file\" name=\"file\" accept=\"audio/*,.wav,.mp3,.ogg\" required " +
+    "class=\"w-full text-sm text-[#a1a1aa] file:mr-3 file:rounded-lg file:border-0 file:bg-[#27272a] file:px-3 file:py-1.5 file:text-sm file:text-[#e4e4e7] file:cursor-pointer hover:file:bg-[#3f3f46]\"/></div>" +
+    "<button type=\"submit\" class=\"rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Upload</button>" +
+    "</form></div>"
+}
+
+// ---- PCAP generation (pure Weft, no Python) ----
+
+fn pack_le32(v) { binstruct.pack("<I", v).value }
+fn pack_le16(v) { binstruct.pack("<H", v).value }
+fn pack_be16(v) { binstruct.pack(">H", v).value }
+fn pack_be32(v) { binstruct.pack(">I", v).value }
+fn pack_u8(v) { binstruct.pack("B", v).value }
+
+fn ip_to_bytes(ip_str) {
+    parts := str.split(ip_str, ".")
+    if len(parts) != 4 { return pack_u8(0) + pack_u8(0) + pack_u8(0) + pack_u8(0) }
+    pack_u8(int.parse(parts[0]).unwrap_or(0)) +
+    pack_u8(int.parse(parts[1]).unwrap_or(0)) +
+    pack_u8(int.parse(parts[2]).unwrap_or(0)) +
+    pack_u8(int.parse(parts[3]).unwrap_or(0))
+}
+
+fn parse_endpoint(s) {
+    if s == null || s == "" { return {"ip": "0.0.0.0", "port": 5060} }
+    // Handle [ipv6]:port
+    parts := str.split(s, ":")
+    if len(parts) >= 2 {
+        port := int.parse(parts[len(parts) - 1]).unwrap_or(5060)
+        mut ip := parts[0]
+        // Rejoin if more than 2 parts (but skip last which is port)
+        if len(parts) > 2 {
+            ip = str.slice(s, 0, len(s) - len(parts[len(parts) - 1]) - 1)
+        }
+        return {"ip": ip, "port": port}
+    }
+    {"ip": s, "port": 5060}
+}
+
+fn build_pcap(messages) {
+    // PCAP global header: magic, v2.4, snaplen=65535, LINKTYPE_RAW(101)
+    mut pcap := pack_le32(0xa1b2c3d4) + pack_le16(2) + pack_le16(4) +
+                pack_le32(0) + pack_le32(0) + pack_le32(65535) + pack_le32(101)
+
+    for m in messages {
+        raw_b64 := m["raw_b64"] ?? ""
+        if raw_b64 == "" { continue }
+        dec := base64.decode(raw_b64)
+        if !dec.ok { continue }
+        payload := dec.value
+        if len(payload) == 0 { continue }
+
+        ts_ms := m["ts_ms"] ?? 0
+        src_ep := parse_endpoint(m["src"] ?? "")
+        dst_ep := parse_endpoint(m["dst"] ?? m["src"] ?? "")
+
+        udp_len := 8 + len(payload)
+        ip_total := 20 + udp_len
+
+        // IPv4 header (20 bytes)
+        ip_hdr := pack_u8(0x45) + pack_u8(0) + pack_be16(ip_total) +
+                  pack_be16(0) + pack_be16(0x4000) +
+                  pack_u8(64) + pack_u8(17) + pack_be16(0) +
+                  ip_to_bytes(src_ep["ip"]) + ip_to_bytes(dst_ep["ip"])
+
+        // UDP header (8 bytes)
+        udp_hdr := pack_be16(src_ep["port"]) + pack_be16(dst_ep["port"]) +
+                   pack_be16(udp_len) + pack_be16(0)
+
+        pkt := ip_hdr + udp_hdr + payload
+        pkt_len := len(pkt)
+
+        // PCAP packet header
+        ts_sec := ts_ms / 1000
+        ts_usec := (ts_ms % 1000) * 1000
+        pkt_hdr := pack_le32(ts_sec) + pack_le32(ts_usec) +
+                   pack_le32(pkt_len) + pack_le32(pkt_len)
+
+        pcap = pcap + pkt_hdr + pkt
+    }
+    pcap
+}
+
+// ---- saved searches ----
+
+fn searches_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-searches.json"
+}
+
+fn load_searches() {
+    r := fs.read(searches_path())
+    if !r.ok { return [] }
+    p := json.parse(r.value)
+    if !p.ok { return [] }
+    p.value
+}
+
+fn save_searches(searches) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(searches_path(), json.stringify(searches))
+}
+
+fn create_search(name, username, params) {
+    searches := load_searches()
+    new_search := {"id": len(searches) + 1, "name": name, "user": username, "params": params}
+    save_searches(list_append(searches, new_search))
+}
+
+fn delete_search(id) {
+    searches := load_searches()
+    save_searches(list_remove(searches, "id", id))
+}
+
+// ---- admin page ----
+
+fn admin_users_page(user, flash) {
+    users := list_users()
+    mut rows := ""
+    for u in users {
+        uid := u["id"] ?? 0
+        uname := h(u["username"] ?? "")
+        urole := u["role"] ?? "viewer"
+        is_self := (uid == (user["id"] ?? -1))
+        mut actions := ""
+        if !is_self {
+            actions = "<form method=\"post\" action=\"/admin/users/" + ("" + (uid)) + "/delete\" class=\"inline\" onsubmit=\"return confirm('Delete " + uname + "?')\">" +
+                "<button class=\"text-[#f87171] hover:underline text-xs\">delete</button></form>"
+        } else {
+            actions = "<span class=\"text-[10px] text-[#a1a1aa]\">you</span>"
+        }
+        rows = rows + "<tr class=\"hover:bg-white/[0.02]\">" +
+            "<td class=\"py-2 px-3 mono text-xs text-[#a1a1aa]\">" + ("" + (uid)) + "</td>" +
+            "<td class=\"py-2 px-3 text-sm font-medium\">" + uname + "</td>" +
+            "<td class=\"py-2 px-3\">" + role_badge(urole) + "</td>" +
+            "<td class=\"py-2 px-3 text-xs\">" + actions + "</td></tr>"
+    }
+    mut flash_html := ""
+    if flash != "" {
+        is_err := str.starts_with(flash, "Error")
+        cls := if is_err { "border-[rgba(248,113,113,.35)] bg-[rgba(248,113,113,.08)] text-[#f87171]" } else { "border-[rgba(52,211,153,.35)] bg-[rgba(52,211,153,.08)] text-[#34d399]" }
+        flash_html = "<div class=\"rounded-xl border " + cls + " p-3 text-sm mb-4\">" + h(flash) + "</div>"
+    }
+    flash_html +
+    "<div class=\"flex items-end justify-between gap-3 mb-6\">" +
+    "<div><h1 class=\"text-2xl font-bold\">Users</h1>" +
+    "<p class=\"text-sm text-[#a1a1aa] mt-1\">Manage dashboard access — admin, operator, viewer.</p></div>" +
+    "<span class=\"text-xs text-[#a1a1aa] mono\">" + ("" + (len(users))) + " users</span></div>" +
+    "<div class=\"grid lg:grid-cols-3 gap-4\">" +
+    "<div class=\"lg:col-span-2 rounded-2xl border border-[#1e1e22] bg-[#131316] overflow-x-auto\">" +
+    "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#a1a1aa] border-b border-[#1e1e22]\">" +
+    "<th class=\"py-2 px-3\">ID</th><th class=\"py-2 px-3\">Username</th><th class=\"py-2 px-3\">Role</th><th class=\"py-2 px-3\"></th></tr></thead>" +
+    "<tbody class=\"divide-y divide-[#27272a]\">" + rows + "</tbody></table></div>" +
+    "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5\">" +
+    "<h2 class=\"text-sm font-semibold mb-4\">Create user</h2>" +
+    "<form method=\"post\" action=\"/admin/users\" class=\"space-y-3\">" +
+    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">Username</label>" +
+    "<input name=\"username\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm focus:border-[#a78bfa] outline-none\"/></div>" +
+    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">Password</label>" +
+    "<input name=\"password\" type=\"password\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm focus:border-[#a78bfa] outline-none\"/></div>" +
+    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">Role</label>" +
+    "<select name=\"role\" class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm\">" +
+    "<option value=\"viewer\">viewer — read-only dashboard</option>" +
+    "<option value=\"operator\">operator — + probe access</option>" +
+    "<option value=\"admin\">admin — + user management</option></select></div>" +
+    "<button type=\"submit\" class=\"w-full rounded-lg px-4 py-2 text-sm font-semibold bg-gradient-to-br from-[#a78bfa] to-[#7c3aed] text-white\">Create</button></form>" +
+    "<h2 class=\"text-sm font-semibold mt-6 mb-3 pt-4 border-t border-[#1e1e22]\">Reset password</h2>" +
+    "<form method=\"post\" action=\"/admin/users/password\" class=\"space-y-3\">" +
+    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">User ID</label>" +
+    "<input name=\"user_id\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono focus:border-[#a78bfa] outline-none\" placeholder=\"1\"/></div>" +
+    "<div><label class=\"block text-xs text-[#a1a1aa] mb-1\">New password</label>" +
+    "<input name=\"new_password\" type=\"password\" required class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm focus:border-[#a78bfa] outline-none\"/></div>" +
+    "<button type=\"submit\" class=\"w-full rounded-lg px-4 py-2 text-sm border border-[#1e1e22] bg-[#27272a]\">Reset password</button></form>" +
+    "</div></div>"
+}
+
+// ---- audit log ----
+// Append-only log: who did what, when. Compliance requirement.
+
+fn audit_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-audit.jsonl"
+}
+
+fn audit(user, action, detail) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    entry := json.stringify({"ts": time.unix(), "user": user, "action": action, "detail": detail})
+    fs.append(audit_path(), entry + "\n")
+    // Rotate: keep last 10000 lines
+    r := fs.read(audit_path())
+    if r.ok {
+        lines := str.split(r.value, "\n")
+        if len(lines) > 10000 {
+            mut kept := ""
+            mut i := len(lines) - 10000
+            while i < len(lines) {
+                if lines[i] != "" { kept = kept + lines[i] + "\n" }
+                i = i + 1
+            }
+            fs.write_atomic(audit_path(), kept)
+        }
+    }
+}
+
+// Syslog forwarding: if ZAMAN_SYSLOG_HOST is set, also ship audit + alerts there
+fn syslog_send(msg) {
+    host := env.get("ZAMAN_SYSLOG_HOST") ?? ""
+    if host == "" { return }
+    port := int.parse(env.get("ZAMAN_SYSLOG_PORT") ?? "514").unwrap_or(514)
+    // UDP syslog: <priority>message
+    // facility=local0 (16), severity=notice (5) → priority = 16*8+5 = 133
+    syslog_msg := "<133>zaman: " + msg
+    // Best-effort UDP send via HTTP — Weft doesn't have raw UDP, use audit file as fallback
+    audit("syslog", "forward", msg)
+}
+
+fn load_audit(limit) {
+    r := fs.read(audit_path())
+    if !r.ok { return [] }
+    lines := str.split(r.value, "\n")
+    mut entries := []
+    // Read from end (most recent first)
+    mut i := len(lines) - 1
+    mut count := 0
+    while i >= 0 && count < limit {
+        line := lines[i]
+        if line != "" {
+            p := json.parse(line)
+            if p.ok { entries = list_append(entries, p.value) }
+            count = count + 1
+        }
+        i = i - 1
+    }
+    entries
+}
+
+// ---- custom branding ----
+// ZAMAN_BRAND_NAME: dashboard title (default "Zaman")
+// ZAMAN_BRAND_LOGO: URL to logo image (replaces the Z icon)
+
+fn brand_name() {
+    env.get("ZAMAN_BRAND_NAME") ?? "Zaman"
+}
+
+fn brand_subtitle() {
+    env.get("ZAMAN_BRAND_SUBTITLE") ?? "SIP monitoring · echo"
+}
+
+// ---- share links ----
+// Generates a time-limited HMAC token for read-only call ladder access without login.
+
+fn make_share_token(token_secret, call_id) {
+    expires := time.unix() + 86400 * 7
+    payload := "share:" + call_id + ":" + ("" + (expires))
+    sig := crypto.hmac_sha256(token_secret, payload)
+    base64.encode(payload + ":" + sig)
+}
+
+fn verify_share_token(token_secret, token) {
+    dec := base64.decode(token)
+    if !dec.ok { return null }
+    raw := dec.value
+    if len(raw) < 66 { return null }
+    sig_start := len(raw) - 64
+    sep := str.slice(raw, sig_start - 1, sig_start)
+    if sep != ":" { return null }
+    payload := str.slice(raw, 0, sig_start - 1)
+    got_sig := str.slice(raw, sig_start, len(raw))
+    expected := crypto.hmac_sha256(token_secret, payload)
+    if got_sig != expected { return null }
+    // Parse: share:call_id:expires
+    if !str.starts_with(payload, "share:") { return null }
+    rest := str.slice(payload, 6, len(payload))
+    // Last segment is expires
+    parts := str.split(rest, ":")
+    if len(parts) < 2 { return null }
+    expires := int.parse(parts[len(parts) - 1]).unwrap_or(0)
+    if expires < time.unix() { return null }
+    // Rejoin call_id (may contain colons)
+    mut cid := parts[0]
+    mut i := 1
+    while i < len(parts) - 1 {
+        cid = cid + ":" + parts[i]
+        i = i + 1
+    }
+    cid
+}
+
+// ---- user preferences ----
+
+fn prefs_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-prefs.json"
+}
+
+fn load_prefs() {
+    r := fs.read(prefs_path())
+    if !r.ok { return {} }
+    p := json.parse(r.value)
+    if p.ok { p.value } else { {} }
+}
+
+fn save_prefs(prefs) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(prefs_path(), json.stringify(prefs))
+}
+
+fn get_user_pref(username, key, default_val) {
+    prefs := load_prefs()
+    uprefs := prefs[username]
+    if uprefs == null { return default_val }
+    uprefs[key] ?? default_val
+}
+
+fn set_user_pref(username, key, value) {
+    mut prefs := load_prefs()
+    if prefs[username] == null {
+        prefs[username] = {}
+    }
+    prefs[username][key] = value
+    save_prefs(prefs)
+}
+
+// ---- API tokens ----
+// Per-user long-lived tokens for automation (separate from session cookies).
+
+fn api_tokens_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-api-tokens.json"
+}
+
+fn load_api_tokens() {
+    r := fs.read(api_tokens_path())
+    if !r.ok { return [] }
+    p := json.parse(r.value)
+    if p.ok { p.value } else { [] }
+}
+
+fn save_api_tokens(tokens) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(api_tokens_path(), json.stringify(tokens))
+}
+
+fn create_api_token(username, role, label) {
+    tokens := load_api_tokens()
+    token := secrets.token_hex(32)
+    hash := crypto.sha256(token)
+    new_tok := {"hash": hash, "prefix": str.slice(token, 0, 8), "username": username, "role": role, "label": label, "created": time.unix()}
+    save_api_tokens(list_append(tokens, new_tok))
+    token
+}
+
+fn verify_api_token(token) {
+    if token == "" { return null }
+    hash := crypto.sha256(token)
+    tokens := load_api_tokens()
+    for t in tokens {
+        if (t["hash"] ?? "") == hash {
+            return {"username": t["username"], "role": t["role"], "id": 0}
+        }
+    }
+    null
+}
+
+fn delete_api_token(prefix) {
+    tokens := load_api_tokens()
+    mut kept := "["
+    mut first := true
+    for t in tokens {
+        if (t["prefix"] ?? "") != prefix {
+            if !first { kept = kept + "," }
+            kept = kept + json.stringify(t)
+            first = false
+        }
+    }
+    save_api_tokens(json.parse(kept + "]").value)
+}
+
+// ---- password policy ----
+
+fn validate_password(pw) {
+    if len(pw) < 8 { return "password must be at least 8 characters" }
+    // Check for at least one digit
+    mut has_digit := false
+    mut i := 0
+    while i < len(pw) {
+        c := str.slice(pw, i, i + 1)
+        if c >= "0" && c <= "9" { has_digit = true }
+        i = i + 1
+    }
+    if !has_digit { return "password must contain at least one digit" }
+    ""
+}
+
+// ---- IP allowlisting ----
+// ZAMAN_DASHBOARD_ALLOW_IPS: comma-separated IPs/prefixes. Empty = allow all.
+
+fn get_client_ip(req) {
+    // Check X-Forwarded-For first (behind reverse proxy)
+    xff := req.headers["X-Forwarded-For"] ?? ""
+    if xff != "" {
+        parts := str.split(xff, ",")
+        return str.trim(parts[0])
+    }
+    xri := req.headers["X-Real-Ip"] ?? ""
+    if xri != "" { return str.trim(xri) }
+    req.headers["Remote-Addr"] ?? "unknown"
+}
+
+fn ip_allowed(req) {
+    allow := env.get("ZAMAN_DASHBOARD_ALLOW_IPS") ?? ""
+    if allow == "" { return true }
+    ip := get_client_ip(req)
+    if ip == "unknown" || ip == "" { return true }
+    parts := str.split(allow, ",")
+    for p in parts {
+        prefix := str.trim(p)
+        if prefix == "" { continue }
+        if ip == prefix { return true }
+        if str.starts_with(ip, prefix) { return true }
+    }
+    false
+}
+
+fn ip_denied_page() {
+    "<!doctype html><html><head><title>Access Denied</title></head>" +
+    "<body style=\"background:#09090b;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh\">" +
+    "<div style=\"text-align:center\"><h1>403 Forbidden</h1><p>Your IP is not in the dashboard allowlist.</p></div></body></html>"
+}
+
+// ---- CSV export ----
+
+fn messages_to_csv(messages) {
+    mut csv := "id,ts_ms,src,dst,transport,proto,agent,kind,method,status,call_id,from,to,cseq,ruri\n"
+    for m in messages {
+        csv = csv +
+            ("" + (m["id"] ?? "")) + "," +
+            ("" + (m["ts_ms"] ?? "")) + "," +
+            csv_field(m["src"] ?? "") + "," +
+            csv_field(m["dst"] ?? "") + "," +
+            csv_field(m["transport"] ?? "") + "," +
+            csv_field(m["proto"] ?? "") + "," +
+            csv_field(m["agent"] ?? "") + "," +
+            csv_field(m["kind"] ?? "") + "," +
+            csv_field(m["method"] ?? "") + "," +
+            ("" + (m["status"] ?? 0)) + "," +
+            csv_field(m["call_id"] ?? "") + "," +
+            csv_field(m["from"] ?? "") + "," +
+            csv_field(m["to"] ?? "") + "," +
+            csv_field(m["cseq"] ?? "") + "," +
+            csv_field(m["ruri"] ?? "") + "\n"
+    }
+    csv
+}
+
+fn csv_field(s) {
+    if str.contains(s, ",") || str.contains(s, "\"") || str.contains(s, "\n") {
+        return "\"" + str.replace(s, "\"", "\"\"") + "\""
+    }
+    s
+}
+
+// ---- config backup/restore ----
+
+fn export_config() {
+    users := load_users()
+    alert_config := load_alert_config()
+    searches := load_searches()
+    api_tokens := load_api_tokens()
+    // Scrub sensitive fields from users
+    mut safe_users := "["
+    mut first := true
+    for u in users {
+        if !first { safe_users = safe_users + "," }
+        safe_users = safe_users + json.stringify({"id": u["id"], "username": u["username"], "role": u["role"]})
+        first = false
+    }
+    safe_users = safe_users + "]"
+    json.stringify({
+        "version": "1.0",
+        "exported_at": time.unix(),
+        "users": json.parse(safe_users).value,
+        "alerts": alert_config,
+        "searches": searches,
+        "api_token_count": len(api_tokens)
+    })
+}
+
+// ---- SLA reporting ----
+
+fn fetch_sla() {
+    // SLA = percentage of time ASR was above threshold (default 45%)
+    // Computed from daily rollups: if any INVITE traffic existed that day, check if failed > 55%
+    r := http.get(core_base() + "/api/report/kpi", api_headers())
+    if !r.ok { return {} }
+    p := json.parse(r.value.body)
+    if !p.ok { return {} }
+    kpi := p.value
+    total_inv := kpi["total_invites"] ?? 0
+    answered := kpi["answered"] ?? 0
+    failed := kpi["failed"] ?? 0
+    asr := kpi["asr"] ?? 0
+    // Simple SLA: asr-based availability
+    mut sla_status := "healthy"
+    if asr < 45 { sla_status = "degraded" }
+    if asr < 35 { sla_status = "critical" }
+    {
+        "asr": asr,
+        "total_invites": total_inv,
+        "answered": answered,
+        "failed": failed,
+        "status": sla_status,
+        "total_messages": kpi["total_messages"] ?? 0
+    }
+}
+
+// ---- alerting engine ----
+// Channels: Slack webhook, generic webhook (PagerDuty/Teams/Opsgenie), email.
+// Rules: JSON file with thresholds. Evaluation runs on HTMX poll.
+// History: last 100 fired alerts kept in memory (JSON file for persistence).
+
+fn alerts_config_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-alerts.json"
+}
+
+fn alerts_history_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-alert-history.json"
+}
+
+fn load_alert_config() {
+    r := fs.read(alerts_config_path())
+    if !r.ok {
+        return {
+            "channels": [],
+            "rules": [
+                {"id": 1, "name": "Low ASR", "metric": "asr", "op": "<", "threshold": 40, "severity": "critical", "enabled": true},
+                {"id": 2, "name": "High error rate", "metric": "err_rate", "op": ">", "threshold": 15, "severity": "critical", "enabled": true},
+                {"id": 3, "name": "5xx spike", "metric": "resp_5xx", "op": ">", "threshold": 5, "severity": "critical", "enabled": true},
+                {"id": 4, "name": "Auth failures", "metric": "err_401", "op": ">", "threshold": 10, "severity": "warning", "enabled": true},
+                {"id": 5, "name": "Service unavailable", "metric": "err_503", "op": ">", "threshold": 3, "severity": "critical", "enabled": true}
+            ]
+        }
+    }
+    p := json.parse(r.value)
+    if p.ok { p.value } else { {"channels": [], "rules": []} }
+}
+
+fn save_alert_config(config) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(alerts_config_path(), json.stringify(config))
+}
+
+fn load_alert_history() {
+    r := fs.read(alerts_history_path())
+    if !r.ok { return [] }
+    p := json.parse(r.value)
+    if p.ok { p.value } else { [] }
+}
+
+fn save_alert_history(history) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(alerts_history_path(), json.stringify(history))
+}
+
+fn add_alert_history(alert) {
+    hist := load_alert_history()
+    // Keep last 100
+    mut trimmed := hist
+    if len(trimmed) >= 100 {
+        // Drop oldest (first element) — rebuild via JSON
+        mut s := "["
+        mut i := len(trimmed) - 99
+        mut first := true
+        while i < len(trimmed) {
+            if !first { s = s + "," }
+            s = s + json.stringify(trimmed[i])
+            first = false
+            i = i + 1
+        }
+        trimmed = json.parse(s + "]").value
+    }
+    save_alert_history(list_append(trimmed, alert))
+}
+
+// Fire alert to all configured channels
+// Webhook with retry (3 attempts, 1s backoff)
+fn post_with_retry(url, body) {
+    mut attempt := 0
+    while attempt < 3 {
+        r := http.post(url, body, {"headers": {"Content-Type": "application/json"}})
+        if r.ok { return }
+        attempt = attempt + 1
+        if attempt < 3 { time.sleep(1) }
+    }
+}
+
+fn fire_alert(config, rule_name, severity, message) {
+    channels := config["channels"] ?? []
+    ts := time.unix()
+    payload := {
+        "rule": rule_name,
+        "severity": severity,
+        "message": message,
+        "timestamp": ts,
+        "source": "zaman"
+    }
+    // Record history
+    add_alert_history(payload)
+
+    for ch in channels {
+        ch_type := ch["type"] ?? ""
+        if ch_type == "slack" {
+            url := ch["webhook_url"] ?? ""
+            if url != "" {
+                icon := if severity == "critical" { ":rotating_light:" } else { ":warning:" }
+                slack_payload := json.stringify({
+                    "text": icon + " *Zaman Alert — " + severity + "*\n" + message,
+                    "username": "Zaman",
+                    "icon_emoji": ":telephone:"
+                })
+                post_with_retry(url, slack_payload)
+            }
+        } else if ch_type == "webhook" {
+            url := ch["url"] ?? ""
+            if url != "" {
+                post_with_retry(url, json.stringify(payload))
+            }
+        } else if ch_type == "email" {
+            to_addr := ch["to"] ?? ""
+            smtp_host := ch["smtp_host"] ?? "localhost"
+            smtp_port := int.parse(ch["smtp_port"] ?? "25").unwrap_or(25)
+            from_addr := ch["from"] ?? "zaman@localhost"
+            if to_addr != "" {
+                email.send({
+                    "to": to_addr,
+                    "from": from_addr,
+                    "subject": "[Zaman " + severity + "] " + rule_name,
+                    "body": message + "\n\nTimestamp: " + ("" + (ts)) + "\nSource: zaman-web",
+                    "host": smtp_host,
+                    "port": smtp_port
+                })
+            }
+        }
+    }
+}
+
+// Evaluate alert rules against real-time data. Called by HTMX poll.
+// Returns HTML for the alerts bar + fires notifications.
+fn evaluate_alerts(rt) {
+    config := load_alert_config()
+    rules := config["rules"] ?? []
+    mut fired := []
+    for rule in rules {
+        enabled := rule["enabled"] ?? false
+        if !enabled { continue }
+        metric_name := rule["metric"] ?? ""
+        op := rule["op"] ?? ">"
+        threshold := rule["threshold"] ?? 0
+        value := rt[metric_name] ?? 0
+        mut triggered := false
+        if op == ">" && value > threshold { triggered = true }
+        if op == "<" && value < threshold && value > 0 { triggered = true }
+        if op == ">=" && value >= threshold { triggered = true }
+        if op == "==" && value == threshold { triggered = true }
+        if triggered {
+            name := rule["name"] ?? metric_name
+            sev := rule["severity"] ?? "warning"
+            msg := name + ": " + metric_name + "=" + ("" + (value)) + " (threshold " + op + " " + ("" + (threshold)) + ")"
+            fire_alert(config, name, sev, msg)
+            fired = list_append(fired, {"name": name, "severity": sev, "message": msg, "value": value})
+        }
+    }
+    fired
+}
+
+// ---- report helpers ----
+
+fn gauge_card(label, value, unit, color, sub) {
+    crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+    "<div class=\"" + crd + " p-5\">" +
+    "<div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold mb-3\">" + label + "</div>" +
+    "<div class=\"flex items-end gap-1 mb-2\">" +
+    "<span class=\"text-3xl font-bold mono\" style=\"color:" + color + "\">" + ("" + (value)) + "</span>" +
+    "<span class=\"text-sm text-[#52525b] mb-0.5\">" + unit + "</span></div>" +
+    "<div class=\"w-full h-1.5 rounded-full bg-[#27272a] overflow-hidden\">" +
+    "<div class=\"h-full rounded-full transition-all duration-500\" style=\"width:" + ("" + (value)) + "%;background:" + color + "\"></div></div>" +
+    "<div class=\"text-[11px] text-[#52525b] mt-2\">" + sub + "</div></div>"
+}
+
+fn rcode_bar(label, count, total, color) {
+    pct := if total > 0 { count * 100 / total } else { 0 }
+    "<div class=\"flex items-center gap-3 py-1.5\">" +
+    "<span class=\"text-xs font-semibold w-8 mono\" style=\"color:" + color + "\">" + label + "</span>" +
+    "<div class=\"flex-1 h-2 rounded-full bg-[#27272a] overflow-hidden\">" +
+    "<div class=\"h-full rounded-full\" style=\"width:" + ("" + (pct)) + "%;background:" + color + "\"></div></div>" +
+    "<span class=\"text-xs mono text-[#a1a1aa] w-12 text-right\">" + ("" + (count)) + "</span>" +
+    "<span class=\"text-[10px] text-[#52525b] w-10 text-right\">" + ("" + (pct)) + "%</span></div>"
+}
+
+// ---- main ----
+
 fn main {
+    // HMAC secret — generated per process start. Restart = all sessions expire (acceptable).
+    token_secret := secrets.token_hex(32)
+
+    if auth_enabled() {
+        auth_init(token_secret)
+    }
+
     app := web.app()
 
+    // ---- auth routes ----
+
+    app.get("/favicon.svg", fn(req) {
+        svg := "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">" +
+            "<defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">" +
+            "<stop offset=\"0%\" stop-color=\"#a78bfa\"/><stop offset=\"100%\" stop-color=\"#6d28d9\"/>" +
+            "</linearGradient></defs>" +
+            "<rect width=\"32\" height=\"32\" rx=\"7\" fill=\"url(#g)\"/>" +
+            "<text x=\"16\" y=\"23\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-weight=\"900\" font-size=\"20\" fill=\"#fff\">Z</text></svg>"
+        {"status": 200, "headers": {"Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400"}, "body": svg}
+    })
+
+    app.get("/login", fn(req) {
+        if !ip_allowed(req) { return web.html(ip_denied_page()) }
+        if !auth_enabled() { return {"status": 302, "headers": {"Location": "/"}, "body": ""} }
+        user := get_user(req, token_secret)
+        if user != null { return {"status": 302, "headers": {"Location": "/"}, "body": ""} }
+        web.html(login_page(""))
+    })
+
+    app.post("/login", fn(req) {
+        if !auth_enabled() { return {"status": 302, "headers": {"Location": "/"}, "body": ""} }
+        username := web.form_get(req, "username", "")
+        password := web.form_get(req, "password", "")
+        token := do_login(token_secret, username, password)
+        if token == null {
+            audit(username, "login_failed", "bad credentials")
+            return web.html(login_page("Invalid username or password."))
+        }
+        audit(username, "login", "success")
+        set_session_cookie(token)
+    })
+
+    app.get("/logout", fn(req) {
+        clear_session_cookie()
+    })
+
+    // ---- dashboard routes (auth-wrapped) ----
+
     app.get("/", fn(req) {
-        web.html(layout("Overview", overview_body()))
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        web.html(layout("Overview", overview_body(user), user))
+    })
+
+    app.get("/noc", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        nodes := fetch_nodes()
+        rt := fetch_realtime(5)
+        anomalies := fetch_anomalies()
+
+        // Alerts
+        mut alerts := ""
+        for a in anomalies {
+            sev := a["severity"] ?? "warning"
+            cls := if sev == "critical" { "border-[#f87171]/20 bg-[#f87171]/5 text-[#f87171]" } else { "border-[#fbbf24]/20 bg-[#fbbf24]/5 text-[#fbbf24]" }
+            alerts = alerts + "<div class=\"flex items-center gap-2 rounded-lg border " + cls + " px-3 py-2 text-xs\">" +
+                "<span>&#x26A0;</span> " + h(a["message"] ?? "") + "</div>"
+        }
+        if alerts != "" { alerts = "<div class=\"space-y-1.5 mb-5\">" + alerts + "</div>" }
+
+        // Summary bar
+        mut green := 0
+        mut yellow := 0
+        mut red := 0
+        for nd in nodes {
+            st := nd["status"] ?? "red"
+            if st == "green" { green = green + 1 }
+            else if st == "yellow" { yellow = yellow + 1 }
+            else { red = red + 1 }
+        }
+        summary := "<div class=\"flex items-center gap-6 mb-5 text-sm\">" +
+            "<span class=\"flex items-center gap-1.5\"><span class=\"w-2.5 h-2.5 rounded-full bg-[#34d399]\"></span><span class=\"mono font-semibold\">" + ("" + (green)) + "</span> healthy</span>" +
+            "<span class=\"flex items-center gap-1.5\"><span class=\"w-2.5 h-2.5 rounded-full bg-[#fbbf24]\"></span><span class=\"mono font-semibold\">" + ("" + (yellow)) + "</span> degraded</span>" +
+            "<span class=\"flex items-center gap-1.5\"><span class=\"w-2.5 h-2.5 rounded-full bg-[#f87171]\"></span><span class=\"mono font-semibold\">" + ("" + (red)) + "</span> offline</span>" +
+            "<span class=\"text-[#3f3f46]\">·</span>" +
+            "<span class=\"text-[#52525b]\">Total: " + ("" + (len(nodes))) + " nodes</span>" +
+            "<span class=\"text-[#52525b]\">·</span>" +
+            "<span class=\"text-[#52525b]\">Active calls: <span class=\"mono text-[#a78bfa]\">" + ("" + (rt["active_calls"] ?? 0)) + "</span></span></div>"
+
+        // Node table — not cards, a proper dense table
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
+        mut rows := ""
+        for nd in nodes {
+            nname := h(nd["agent"] ?? "")
+            nstatus := nd["status"] ?? "red"
+            nrecent := nd["recent"] ?? 0
+            ntotal := nd["total"] ?? 0
+            nerrors := nd["errors"] ?? 0
+            ncalls := nd["calls"] ?? 0
+            nage := nd["age_sec"] ?? 9999
+            dot := if nstatus == "green" { "bg-[#34d399]" } else if nstatus == "yellow" { "bg-[#fbbf24]" } else { "bg-[#f87171]" }
+            age_txt := if nage < 60 { ("" + (nage)) + "s" } else if nage < 3600 { ("" + (nage / 60)) + "m" } else { ("" + (nage / 3600)) + "h" }
+            rows = rows + "<tr>" +
+                "<td class=\"py-2 px-3\"><div class=\"flex items-center gap-2\"><span class=\"w-2 h-2 rounded-full " + dot + "\"></span>" +
+                "<span class=\"text-sm font-medium\">" + nname + "</span></div></td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (nrecent)) + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (ntotal)) + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (ncalls)) + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs text-right " + (if nerrors > 0 { "text-[#f87171] font-semibold" } else { "text-[#3f3f46]" }) + "\">" + ("" + (nerrors)) + "</td>" +
+                "<td class=\"py-2 px-3 text-xs text-right text-[#52525b]\">" + age_txt + " ago</td>" +
+                "<td class=\"py-2 px-3 text-xs\"><a class=\"text-[#a78bfa] hover:underline\" href=\"/messages?agent=" + nname + "\" hx-boost=\"true\">messages</a></td></tr>"
+        }
+        if rows == "" { rows = "<tr><td colspan=\"7\" class=\"py-8 text-center text-[#52525b] text-sm\">No nodes reporting.</td></tr>" }
+
+        body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+            "<div><h1 class=\"text-xl font-semibold\">Network Operations</h1>" +
+            "<p class=\"text-sm text-[#52525b] mt-0.5\">All HEP agents and network nodes · auto-refresh</p></div></div>" +
+            alerts + summary +
+            "<div class=\"card overflow-x-auto\" hx-get=\"/partials/noc-table\" hx-trigger=\"every 5s\" hx-swap=\"innerHTML\">" +
+            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-2 px-3\">Node</th><th class=\"py-2 px-3 text-right\">5m</th><th class=\"py-2 px-3 text-right\">Total</th>" +
+            "<th class=\"py-2 px-3 text-right\">Calls</th><th class=\"py-2 px-3 text-right\">Errors</th><th class=\"py-2 px-3 text-right\">Last seen</th><th class=\"py-2 px-3\"></th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e1e22]/50\">" + rows + "</tbody></table></div>"
+        web.html(layout("NOC", body, user))
     })
 
     app.get("/partials/status", fn(req) {
         m := fetch_health()
         if m["ok"] == true {
-            web.htmx("<span class=\"text-[#3ddc97]\">● core up</span>")
+            web.htmx("<span class=\"text-[#34d399]\">● core up</span>")
         } else {
-            web.htmx("<span class=\"text-[#ff6b6b]\">● core down</span>")
+            web.htmx("<span class=\"text-[#f87171]\">● core down</span>")
         }
+    })
+
+    app.get("/partials/charts", fn(req) {
+        win := int.parse(req.query_map["window"] ?? "5").unwrap_or(5)
+        web.htmx(build_traffic_charts(win))
+    })
+
+    app.get("/partials/nodes", fn(req) {
+        nodes := fetch_nodes()
+        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        mut ncards := ""
+        for nd in nodes {
+            nname := h(nd["agent"] ?? "")
+            nstatus := nd["status"] ?? "red"
+            nrecent := nd["recent"] ?? 0
+            nerrors := nd["errors"] ?? 0
+            ncalls := nd["calls"] ?? 0
+            nage := nd["age_sec"] ?? 9999
+            dot := if nstatus == "green" { "bg-[#34d399]" } else if nstatus == "yellow" { "bg-[#fbbf24]" } else { "bg-[#f87171]" }
+            age_txt := if nage < 60 { ("" + (nage)) + "s ago" } else if nage < 3600 { ("" + (nage / 60)) + "m ago" } else { ("" + (nage / 3600)) + "h ago" }
+            ncards = ncards +
+                "<a href=\"/messages?agent=" + nname + "\" class=\"" + crd + " p-4 hover:border-[#3f3f46] transition-colors block\" hx-boost=\"true\">" +
+                "<div class=\"flex items-center gap-2 mb-2\">" +
+                "<div class=\"w-2 h-2 rounded-full " + dot + " shrink-0\"></div>" +
+                "<span class=\"text-sm font-medium truncate\">" + nname + "</span></div>" +
+                "<div class=\"grid grid-cols-3 gap-2 text-[11px]\">" +
+                "<div><span class=\"text-[#52525b]\">5m</span> <span class=\"mono\">" + ("" + (nrecent)) + "</span></div>" +
+                "<div><span class=\"text-[#52525b]\">calls</span> <span class=\"mono\">" + ("" + (ncalls)) + "</span></div>" +
+                "<div><span class=\"text-[#52525b]\">errs</span> <span class=\"mono " + (if nerrors > 0 { "text-[#f87171]" } else { "" }) + "\">" + ("" + (nerrors)) + "</span></div></div>" +
+                "<div class=\"text-[10px] text-[#52525b] mt-1.5\">" + age_txt + "</div></a>"
+        }
+        if ncards == "" { ncards = "<div class=\"text-sm text-[#52525b] py-4\">No nodes reporting.</div>" }
+        web.htmx("<div class=\"grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3\">" + ncards + "</div>")
     })
 
     app.get("/partials/messages", fn(req) {
         mut lim := int.parse(req.query_map["limit"] ?? "20").unwrap_or(0)
         if lim <= 0 { lim = 20 }
         cid := req.query_map["call_id"] ?? ""
-        web.htmx(messages_table(fetch_messages(lim, cid)))
+        agent := req.query_map["agent"] ?? ""
+        method := req.query_map["method"] ?? ""
+        transport := req.query_map["transport"] ?? ""
+        src := req.query_map["src"] ?? ""
+        web.htmx(messages_table(fetch_messages_ex(lim, cid, transport, agent, method, src)))
     })
 
     app.get("/messages", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
         cid := req.query_map["call_id"] ?? ""
-        items := fetch_messages(50, cid)
+        agent := req.query_map["agent"] ?? ""
+        method := req.query_map["method"] ?? ""
+        transport := req.query_map["transport"] ?? ""
+        src := req.query_map["src"] ?? ""
+        items := fetch_messages_ex(50, cid, transport, agent, method, src)
         cid_h := h(cid)
-        mut filter := ""
-        if cid != "" {
-            filter = "<p class=\"text-sm text-[#8fa3c1] mb-3\">Filtered by Call-ID <span class=\"mono\">" + cid_h + "</span></p>"
+        agent_h := h(agent)
+        method_h := h(method)
+        transport_h := h(transport)
+        src_h := h(src)
+        // Active filter summary
+        mut active := ""
+        if cid != "" || agent != "" || method != "" || transport != "" || src != "" {
+            mut tags := ""
+            if cid != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">call-id: " + cid_h + "</span>" }
+            if agent != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">agent: " + agent_h + "</span>" }
+            if method != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">method: " + method_h + "</span>" }
+            if transport != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">transport: " + transport_h + "</span>" }
+            if src != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">endpoint: " + src_h + "</span>" }
+            active = "<div class=\"flex flex-wrap items-center gap-2 mb-4\">" +
+                "<span class=\"text-xs text-[#71717a]\">Filtering:</span>" + tags +
+                "<a href=\"/messages\" class=\"text-xs text-[#a78bfa] hover:underline\" hx-boost=\"true\">clear all</a></div>"
         }
-        body := "<div class=\"mb-4\"><h1 class=\"text-2xl font-bold\">Messages</h1>" +
-            "<p class=\"text-sm text-[#8fa3c1] mt-1\">Live SIP/HEP capture ring from zaman-core.</p></div>" + filter +
-            "<form class=\"flex flex-wrap gap-2 mb-4\" method=\"get\" action=\"/messages\">" +
-            "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"filter Call-ID\" class=\"rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 text-sm mono min-w-[16rem]\"/>" +
-            "<button class=\"rounded-lg px-3 py-2 text-sm border border-[#1e2d44] bg-[#141e33]\">Filter</button>" +
-            "<a href=\"/messages\" class=\"rounded-lg px-3 py-2 text-sm text-[#8fa3c1]\" hx-boost=\"true\">Clear</a></form>" +
-            "<div id=\"msg-table\" hx-get=\"/partials/messages?limit=50&call_id=" + cid_h + "\" hx-trigger=\"every 4s\" hx-swap=\"innerHTML\">" +
+        // Build query string for HTMX polling
+        mut qs := "limit=50"
+        if cid != "" { qs = qs + "&call_id=" + cid_h }
+        if agent != "" { qs = qs + "&agent=" + agent_h }
+        if method != "" { qs = qs + "&method=" + method_h }
+        if transport != "" { qs = qs + "&transport=" + transport_h }
+        if src != "" { qs = qs + "&src=" + src_h }
+        // Saved searches sidebar
+        searches := load_searches()
+        mut saved_html := ""
+        if len(searches) > 0 {
+            mut slinks := ""
+            for ss in searches {
+                sid := ss["id"] ?? 0
+                sname := h(ss["name"] ?? "")
+                sp := ss["params"] ?? {}
+                mut sq := ""
+                if (sp["call_id"] ?? "") != "" { sq = sq + "&call_id=" + h(sp["call_id"]) }
+                if (sp["agent"] ?? "") != "" { sq = sq + "&agent=" + h(sp["agent"]) }
+                if (sp["method"] ?? "") != "" { sq = sq + "&method=" + h(sp["method"]) }
+                if (sp["transport"] ?? "") != "" { sq = sq + "&transport=" + h(sp["transport"]) }
+                if (sp["src"] ?? "") != "" { sq = sq + "&src=" + h(sp["src"]) }
+                slinks = slinks + "<div class=\"flex items-center justify-between gap-2 py-1.5\">" +
+                    "<a href=\"/messages?" + str.slice(sq, 1, len(sq)) + "\" class=\"text-xs text-[#a1a1aa] hover:text-[#e4e4e7] truncate\" hx-boost=\"true\">" + sname + "</a>" +
+                    "<form method=\"post\" action=\"/searches/" + ("" + (sid)) + "/delete\" class=\"shrink-0\">" +
+                    "<button class=\"text-[10px] text-[#52525b] hover:text-[#f87171]\">&times;</button></form></div>"
+            }
+            saved_html = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4 mb-4\">" +
+                "<div class=\"text-[11px] text-[#71717a] uppercase tracking-wider font-medium mb-2\">Saved searches</div>" +
+                slinks + "</div>"
+        }
+        // Save current search form (only show if filtering)
+        mut save_form := ""
+        if cid != "" || agent != "" || method != "" || transport != "" || src != "" {
+            save_form = "<form method=\"post\" action=\"/searches/save\" class=\"flex gap-2 items-center mt-3\">" +
+                "<input type=\"hidden\" name=\"call_id\" value=\"" + cid_h + "\"/>" +
+                "<input type=\"hidden\" name=\"agent\" value=\"" + agent_h + "\"/>" +
+                "<input type=\"hidden\" name=\"method\" value=\"" + method_h + "\"/>" +
+                "<input type=\"hidden\" name=\"transport\" value=\"" + transport_h + "\"/>" +
+                "<input type=\"hidden\" name=\"src\" value=\"" + src_h + "\"/>" +
+                "<input name=\"name\" placeholder=\"Save this search as…\" required class=\"flex-1 rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-1.5 text-xs mono\"/>" +
+                "<button class=\"rounded-lg px-3 py-1.5 text-xs border border-[#1e1e22] text-[#a1a1aa] hover:text-[#e4e4e7]\">Save</button></form>"
+        }
+        // Export buttons
+        mut export_qs := ""
+        if cid != "" { export_qs = export_qs + "&call_id=" + cid_h }
+        if agent != "" { export_qs = export_qs + "&agent=" + agent_h }
+        if method != "" { export_qs = export_qs + "&method=" + method_h }
+        if transport != "" { export_qs = export_qs + "&transport=" + transport_h }
+        if src != "" { export_qs = export_qs + "&src=" + src_h }
+        export_btns := "<div class=\"flex gap-2\">" +
+            "<a href=\"/export/json?" + str.slice("x" + export_qs, 2, len("x" + export_qs)) + "\" class=\"rounded-lg px-2.5 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">JSON</a>" +
+            "<a href=\"/export/csv?" + str.slice("x" + export_qs, 2, len("x" + export_qs)) + "\" class=\"rounded-lg px-2.5 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">CSV</a>" +
+            (if cid != "" { "<a href=\"/pcap?call_id=" + cid_h + "\" class=\"rounded-lg px-2.5 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">PCAP</a>" } else { "" }) +
+            "</div>"
+
+        inp := "rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
+        body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+            "<div><h1 class=\"text-2xl font-bold\">Messages</h1>" +
+            "<p class=\"text-sm text-[#71717a] mt-1\">SIP/HEP captures with full search across all fields.</p></div>" +
+            export_btns + "</div>" +
+            saved_html +
+            "<form class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4 mb-5\" method=\"get\" action=\"/messages\">" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3\">" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
+            "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"any\" class=\"w-full " + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Agent / Server</label>" +
+            "<input name=\"agent\" value=\"" + agent_h + "\" placeholder=\"kamailio\" class=\"w-full " + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Method</label>" +
+            "<input name=\"method\" value=\"" + method_h + "\" placeholder=\"INVITE\" class=\"w-full " + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Transport</label>" +
+            "<input name=\"transport\" value=\"" + transport_h + "\" placeholder=\"UDP\" class=\"w-full " + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Endpoint IP</label>" +
+            "<input name=\"src\" value=\"" + src_h + "\" placeholder=\"10.0.1\" class=\"w-full " + inp + "\"/></div>" +
+            "<div class=\"flex items-end gap-2\">" +
+            "<button class=\"flex-1 rounded-lg px-3 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Search</button></div>" +
+            "</div>" + save_form + "</form>" +
+            active +
+            "<div id=\"msg-table\" hx-get=\"/partials/messages?" + qs + "\" hx-trigger=\"every 4s\" hx-swap=\"innerHTML\">" +
             messages_table(items) + "</div>"
-        web.html(layout("Messages", body))
+        web.html(layout("Messages", body, user))
     })
 
     app.get("/messages/:id", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
         id := req.params["id"]
         m := fetch_message(id)
         if m == null {
-            web.html(layout("Not found", "<h1 class=\"text-xl font-bold\">Message not found</h1><p class=\"text-[#8fa3c1] mt-2\">id=" + h(id) + "</p>"))
+            web.html(layout("Not found", "<h1 class=\"text-xl font-bold\">Message not found</h1><p class=\"text-[#a1a1aa] mt-2\">id=" + h(id) + "</p>", user))
         } else {
             badge := method_badge(m["method"] ?? "", m["status"] ?? 0, m["kind"] ?? "")
             mut raw_txt := ""
@@ -345,84 +2055,116 @@ fn main {
                 raw_txt = h(m["raw_b64"] ?? "")
             }
             cid_h := h(m["call_id"] ?? "")
-            body := "<a href=\"/messages\" class=\"text-sm text-[#6ea8fe] hover:underline\" hx-boost=\"true\">← messages</a>" +
+            body := "<a href=\"/messages\" class=\"text-sm text-[#a78bfa] hover:underline\" hx-boost=\"true\">← messages</a>" +
                 "<div class=\"flex items-center gap-3 mt-3 mb-6\"><h1 class=\"text-2xl font-bold\">Message #" + h(id) + "</h1>" + badge + "</div>" +
                 "<div class=\"grid md:grid-cols-2 gap-3 mb-4 text-sm\">" +
-                "<div class=\"rounded-xl border border-[#1e2d44] bg-[#0f1628] p-4 space-y-1\">" +
-                "<div><span class=\"text-[#8fa3c1]\">Call-ID</span> <span class=\"mono\">" + cid_h + "</span></div>" +
-                "<div><span class=\"text-[#8fa3c1]\">Src</span> <span class=\"mono\">" + h(m["src"] ?? "") + "</span></div>" +
-                "<div><span class=\"text-[#8fa3c1]\">Dst</span> <span class=\"mono\">" + h(m["dst"] ?? "") + "</span></div>" +
-                "<div><span class=\"text-[#8fa3c1]\">Transport</span> " + h(m["transport"] ?? "") +
+                "<div class=\"rounded-xl border border-[#1e1e22] bg-[#131316] p-4 space-y-1\">" +
+                "<div><span class=\"text-[#a1a1aa]\">Call-ID</span> <span class=\"mono\">" + cid_h + "</span></div>" +
+                "<div><span class=\"text-[#a1a1aa]\">Src</span> <span class=\"mono\">" + h(m["src"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#a1a1aa]\">Dst</span> <span class=\"mono\">" + h(m["dst"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#a1a1aa]\">Transport</span> " + h(m["transport"] ?? "") +
                 " · " + h(m["proto"] ?? "sip") + "</div>" +
-                "<div><span class=\"text-[#8fa3c1]\">Agent</span> " + h(m["agent"] ?? "") +
-                " <span class=\"mono text-[10px] text-[#8fa3c1]\">#" + ("" + (m["hep_node_id"] ?? 0)) + "</span></div></div>" +
-                "<div class=\"rounded-xl border border-[#1e2d44] bg-[#0f1628] p-4 space-y-1\">" +
-                "<div><span class=\"text-[#8fa3c1]\">From</span> <span class=\"mono text-xs\">" + h(m["from"] ?? "") + "</span></div>" +
-                "<div><span class=\"text-[#8fa3c1]\">To</span> <span class=\"mono text-xs\">" + h(m["to"] ?? "") + "</span></div>" +
-                "<div><span class=\"text-[#8fa3c1]\">CSeq</span> <span class=\"mono\">" + h(m["cseq"] ?? "") + "</span></div>" +
-                "<div><span class=\"text-[#8fa3c1]\">R-URI</span> <span class=\"mono text-xs\">" + h(m["ruri"] ?? "") + "</span></div></div></div>" +
-                "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0a1020] p-4\">" +
-                "<div class=\"text-xs text-[#8fa3c1] mb-2\">Raw SIP</div>" +
-                "<pre class=\"mono text-xs whitespace-pre-wrap break-all text-[#c7d2fe]\">" + raw_txt + "</pre></div>" +
-                "<div class=\"mt-4\"><a class=\"text-[#6ea8fe] text-sm hover:underline\" href=\"/calls?call_id=" + cid_h + "\" hx-boost=\"true\">Open call ladder →</a></div>"
-            web.html(layout("Message " + ("" + (id)), body))
+                "<div><span class=\"text-[#a1a1aa]\">Agent</span> " + h(m["agent"] ?? "") +
+                " <span class=\"mono text-[10px] text-[#a1a1aa]\">#" + ("" + (m["hep_node_id"] ?? 0)) + "</span></div></div>" +
+                "<div class=\"rounded-xl border border-[#1e1e22] bg-[#131316] p-4 space-y-1\">" +
+                "<div><span class=\"text-[#a1a1aa]\">From</span> <span class=\"mono text-xs\">" + h(m["from"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#a1a1aa]\">To</span> <span class=\"mono text-xs\">" + h(m["to"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#a1a1aa]\">CSeq</span> <span class=\"mono\">" + h(m["cseq"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#a1a1aa]\">R-URI</span> <span class=\"mono text-xs\">" + h(m["ruri"] ?? "") + "</span></div></div></div>" +
+                "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#111114] p-4\">" +
+                "<div class=\"text-xs text-[#a1a1aa] mb-2\">Raw SIP</div>" +
+                "<pre class=\"mono text-xs whitespace-pre-wrap break-all text-[#d4d4d8]\">" + raw_txt + "</pre></div>" +
+                "<div class=\"mt-4\"><a class=\"text-[#a78bfa] text-sm hover:underline\" href=\"/calls?call_id=" + cid_h + "\" hx-boost=\"true\">Open call ladder →</a></div>"
+            web.html(layout("Message " + ("" + (id)), body, user))
         }
     })
 
     app.get("/calls", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
         cid := req.query_map["call_id"] ?? ""
-        mut ladder := "<p class=\"text-sm text-[#8fa3c1]\">Enter a Call-ID to render the signaling ladder.</p>"
+        mut ladder := ""
         if cid != "" {
             ladder = ladder_html(cid)
         }
+        // Show recent call-IDs for quick access
+        tops := fetch_top_calls()
+        mut recent := ""
+        if len(tops) > 0 {
+            mut links := ""
+            for row in tops {
+                rc := row["call_id"] ?? ""
+                rc_h := h(rc)
+                cnt := row["messages"] ?? 0
+                sel := if rc == cid { " bg-[#27272a] text-[#e4e4e7]" } else { " text-[#a1a1aa] hover:bg-[#27272a]/50 hover:text-[#e4e4e7]" }
+                links = links + "<a href=\"/calls?call_id=" + rc_h + "\" class=\"flex items-center justify-between rounded-lg px-3 py-2 text-xs mono transition-colors" + sel + "\" hx-boost=\"true\">" +
+                    "<span class=\"truncate max-w-[20rem]\">" + rc_h + "</span>" +
+                    "<span class=\"text-[#52525b] shrink-0 ml-2\">" + ("" + (cnt)) + "</span></a>"
+            }
+            recent = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] overflow-hidden mb-6\">" +
+                "<div class=\"px-4 py-3 border-b border-[#1e1e22] text-xs font-medium text-[#71717a] uppercase tracking-wider\">Recent calls</div>" +
+                "<div class=\"p-2 max-h-[280px] overflow-y-auto space-y-0.5\">" + links + "</div></div>"
+        }
         cid_h := h(cid)
+        mut empty_hint := ""
+        if cid == "" {
+            empty_hint = "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-8 text-center\">" +
+                "<div class=\"text-[#52525b] mb-2\"><svg class=\"w-10 h-10 mx-auto\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1\" d=\"M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2\"/></svg></div>" +
+                "<p class=\"text-sm text-[#71717a]\">Select a Call-ID from the list or search above to view the signaling ladder.</p></div>"
+        }
         body := "<h1 class=\"text-2xl font-bold mb-1\">Call ladder</h1>" +
-            "<p class=\"text-sm text-[#8fa3c1] mb-4\">Group captured SIP by Call-ID — Homer-style flow without a separate stack.</p>" +
+            "<p class=\"text-sm text-[#71717a] mb-5\">SIP signaling flow grouped by Call-ID — arrows show request/response direction between endpoints.</p>" +
             "<form class=\"flex flex-wrap gap-2 mb-6\" method=\"get\" action=\"/calls\">" +
-            "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Call-ID\" required class=\"rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 text-sm mono min-w-[20rem]\"/>" +
-            "<button class=\"rounded-lg px-4 py-2 text-sm bg-gradient-to-br from-[#3b82f6] to-[#2563eb] text-white\">Show ladder</button></form>" +
-            ladder
-        web.html(layout("Calls", body))
+            "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Search Call-ID…\" class=\"flex-1 rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono min-w-[16rem]\"/>" +
+            "<button class=\"rounded-lg px-4 py-2 text-sm bg-gradient-to-br from-[#a78bfa] to-[#7c3aed] text-white\">Show</button></form>" +
+            "<div class=\"grid lg:grid-cols-[280px_1fr] gap-6\">" +
+            "<div>" + recent + "</div>" +
+            "<div>" + (if cid != "" { ladder } else { empty_hint }) + "</div></div>"
+        web.html(layout("Calls", body, user))
     })
 
     app.get("/probe", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") {
+            body := "<h1 class=\"text-2xl font-bold mb-2\">Echo probe</h1>" +
+                "<div class=\"rounded-2xl border border-[rgba(251,191,36,.35)] bg-[rgba(251,191,36,.08)] p-4 text-sm text-[#fbbf24]\">" +
+                "Probe requires <strong>operator</strong> or <strong>admin</strong> role. Your role: " + role_badge(user["role"] ?? "viewer") + "</div>"
+            return web.html(layout("Probe", body, user))
+        }
         body := "<h1 class=\"text-2xl font-bold mb-1\">Echo probe</h1>" +
-            "<p class=\"text-sm text-[#8fa3c1] mb-6\">Active OPTIONS RTT. Core must set <code class=\"mono\">ZAMAN_PROBE=1</code> (off by default). Still unauthenticated — lab only.</p>" +
-            "<form hx-post=\"/probe\" hx-target=\"#probe-result\" hx-swap=\"innerHTML\" class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-5 grid md:grid-cols-3 gap-3 max-w-3xl\">" +
-            "<label class=\"text-sm block\"><span class=\"text-[#8fa3c1] text-xs\">Host</span>" +
-            "<input name=\"host\" value=\"127.0.0.1\" class=\"mt-1 w-full rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 mono text-sm\"/></label>" +
-            "<label class=\"text-sm block\"><span class=\"text-[#8fa3c1] text-xs\">Port</span>" +
-            "<input name=\"port\" value=\"5060\" class=\"mt-1 w-full rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 mono text-sm\"/></label>" +
-            "<label class=\"text-sm block\"><span class=\"text-[#8fa3c1] text-xs\">Timeout (ms)</span>" +
-            "<input name=\"timeout_ms\" value=\"2000\" class=\"mt-1 w-full rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 mono text-sm\"/></label>" +
-            "<div class=\"md:col-span-3\"><button type=\"submit\" class=\"rounded-lg px-4 py-2 text-sm bg-gradient-to-br from-[#3b82f6] to-[#2563eb] text-white\">Probe OPTIONS</button></div></form>" +
+            "<p class=\"text-sm text-[#a1a1aa] mb-6\">Active OPTIONS RTT. Core must set <code class=\"mono\">ZAMAN_PROBE=1</code> (off by default).</p>" +
+            "<form hx-post=\"/probe\" hx-target=\"#probe-result\" hx-swap=\"innerHTML\" class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-5 grid md:grid-cols-3 gap-3 max-w-3xl\">" +
+            "<label class=\"text-sm block\"><span class=\"text-[#a1a1aa] text-xs\">Host</span>" +
+            "<input name=\"host\" value=\"127.0.0.1\" class=\"mt-1 w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 mono text-sm\"/></label>" +
+            "<label class=\"text-sm block\"><span class=\"text-[#a1a1aa] text-xs\">Port</span>" +
+            "<input name=\"port\" value=\"5060\" class=\"mt-1 w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 mono text-sm\"/></label>" +
+            "<label class=\"text-sm block\"><span class=\"text-[#a1a1aa] text-xs\">Timeout (ms)</span>" +
+            "<input name=\"timeout_ms\" value=\"2000\" class=\"mt-1 w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 mono text-sm\"/></label>" +
+            "<div class=\"md:col-span-3\"><button type=\"submit\" class=\"rounded-lg px-4 py-2 text-sm bg-gradient-to-br from-[#a78bfa] to-[#7c3aed] text-white\">Probe OPTIONS</button></div></form>" +
             "<div id=\"probe-result\" class=\"mt-4 max-w-3xl\"></div>"
-        web.html(layout("Probe", body))
+        web.html(layout("Probe", body, user))
     })
 
     app.post("/probe", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return web.htmx("<div class=\"text-[#f87171]\">Unauthorized</div>") }
+        if !has_role(user, "operator") { return web.htmx("<div class=\"text-[#f87171]\">Requires operator role</div>") }
         host := web.form_get(req, "host", "127.0.0.1")
         port := int.parse(web.form_get(req, "port", "5060")).unwrap_or(0)
         wait_ms := int.parse(web.form_get(req, "timeout_ms", "2000")).unwrap_or(0)
         payload := json.stringify({"host": host, "port": port, "timeout_ms": wait_ms})
         mut hdrs := {"Content-Type": "application/json"}
         key := env.get("ZAMAN_API_KEY") ?? ""
-        if key != "" {
-            hdrs["X-API-Key"] = key
-        }
+        if key != "" { hdrs["X-API-Key"] = key }
         resp := http.post(core_base() + "/api/probe", payload, {"headers": hdrs})
         mut data := {"ok": false, "error": "request failed"}
         if resp.ok {
             parsed := json.parse(resp.value.body)
-            if parsed.ok {
-                data = parsed.value
-            } else {
-                data = {"ok": false, "error": ("" + (resp.value.body))}
-            }
+            if parsed.ok { data = parsed.value } else { data = {"ok": false, "error": ("" + (resp.value.body))} }
         } else {
             data = {"ok": false, "error": ("" + (resp.err.message ?? resp.err))}
         }
-
         if data["ok"] == true {
             st := data["status"] ?? 0
             rtt := data["rtt_ms"] ?? 0
@@ -430,25 +2172,27 @@ fn main {
             prt := data["port"] ?? port
             cid := h(("" + (data["call_id"] ?? "")))
             web.htmx(
-                "<div class=\"rounded-2xl border border-[rgba(61,220,151,.35)] bg-[rgba(61,220,151,.08)] p-4\">" +
-                "<div class=\"text-[#3ddc97] font-semibold mb-2\">Probe OK</div>" +
+                "<div class=\"rounded-2xl border border-[rgba(52,211,153,.35)] bg-[rgba(52,211,153,.08)] p-4\">" +
+                "<div class=\"text-[#34d399] font-semibold mb-2\">Probe OK</div>" +
                 "<div class=\"grid grid-cols-2 gap-2 text-sm mono\">" +
-                "<div>status <span class=\"text-[#e8eefc]\">" + ("" + (st)) + "</span></div>" +
-                "<div>rtt <span class=\"text-[#e8eefc]\">" + ("" + (rtt)) + " ms</span></div>" +
-                "<div class=\"col-span-2 text-xs text-[#8fa3c1]\">" + hp + ":" + ("" + (prt)) + "</div>" +
-                "<div class=\"col-span-2 text-xs break-all text-[#8fa3c1]\">" + cid + "</div></div></div>"
+                "<div>status <span class=\"text-[#e4e4e7]\">" + ("" + (st)) + "</span></div>" +
+                "<div>rtt <span class=\"text-[#e4e4e7]\">" + ("" + (rtt)) + " ms</span></div>" +
+                "<div class=\"col-span-2 text-xs text-[#a1a1aa]\">" + hp + ":" + ("" + (prt)) + "</div>" +
+                "<div class=\"col-span-2 text-xs break-all text-[#a1a1aa]\">" + cid + "</div></div></div>"
             )
         } else {
             err := h(("" + (data["error"] ?? "probe failed")))
             web.htmx(
-                "<div class=\"rounded-2xl border border-[rgba(255,107,107,.35)] bg-[rgba(255,107,107,.08)] p-4\">" +
-                "<div class=\"text-[#ff6b6b] font-semibold mb-1\">Probe failed</div>" +
+                "<div class=\"rounded-2xl border border-[rgba(248,113,113,.35)] bg-[rgba(248,113,113,.08)] p-4\">" +
+                "<div class=\"text-[#f87171] font-semibold mb-1\">Probe failed</div>" +
                 "<div class=\"text-sm mono\">" + err + "</div></div>"
             )
         }
     })
 
     app.get("/metrics", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
         m := fetch_metrics()
         mut methods := m["methods"]
         if methods == null { methods = {} }
@@ -460,7 +2204,7 @@ fn main {
         }, {"title": "Share", "width": 420, "height": 280})
         prom_url := h(core_base() + "/metrics")
         body := "<h1 class=\"text-2xl font-bold mb-1\">Metrics</h1>" +
-            "<p class=\"text-sm text-[#8fa3c1] mb-6\">Integrated counters — also scrape Prometheus text at the core.</p>" +
+            "<p class=\"text-sm text-[#a1a1aa] mb-6\">Integrated counters — also scrape Prometheus text at the core.</p>" +
             "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
             stat_card("msgs", n(m, "msgs_total"), "total captured") +
             stat_card("requests", n(m, "requests"), "SIP requests") +
@@ -468,54 +2212,73 @@ fn main {
             stat_card("HEP", n(m, "hep_total"), "sip " + ("" + (n(m, "hep_sip"))) + " · rtcp " + ("" + (n(m, "hep_rtcp")))) +
             "</div>" +
             "<div class=\"grid lg:grid-cols-2 gap-4\">" +
-            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" + pie.html + "</div>" +
-            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4 text-sm space-y-3\">" +
+            "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4\">" + pie.html + "</div>" +
+            "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#131316] p-4 text-sm space-y-3\">" +
             "<h2 class=\"font-semibold\">Prometheus endpoint</h2>" +
-            "<p class=\"text-[#8fa3c1]\">Point any scraper at:</p>" +
-            "<code class=\"block mono text-xs bg-[#070b14] border border-[#1e2d44] rounded-lg p-3 break-all\">" + prom_url + "</code>" +
-            "<pre class=\"mono text-xs text-[#8fa3c1] bg-[#070b14] border border-[#1e2d44] rounded-lg p-3 overflow-x-auto\">scrape_configs:\n  - job_name: zaman\n    static_configs:\n      - targets: ['127.0.0.1:9090']</pre>" +
+            "<p class=\"text-[#a1a1aa]\">Point any scraper at:</p>" +
+            "<code class=\"block mono text-xs bg-[#0a0a0c] border border-[#1e1e22] rounded-lg p-3 break-all\">" + prom_url + "</code>" +
+            "<pre class=\"mono text-xs text-[#a1a1aa] bg-[#0a0a0c] border border-[#1e1e22] rounded-lg p-3 overflow-x-auto\">scrape_configs:\n  - job_name: zaman\n    static_configs:\n      - targets: ['127.0.0.1:9090']</pre>" +
             "</div></div>"
-        web.html(layout("Metrics", body))
+        web.html(layout("Metrics", body, user))
     })
 
     app.get("/report", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
         rep := fetch_report()
+        kpi := fetch_kpi()
         tops := fetch_top_calls()
+        talkers := fetch_top_talkers()
+        agents := fetch_agents()
+        rcodes := fetch_response_codes()
         daily := fetch_daily()
+        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
+
+        // ── Section 1: Telecom KPIs with visual gauges ──
+        asr := kpi["asr"] ?? 0
+        ner := kpi["ner"] ?? 0
+        asr_color := if asr >= 70 { "#34d399" } else if asr >= 40 { "#fbbf24" } else { "#f87171" }
+        ner_color := if ner >= 80 { "#34d399" } else if ner >= 50 { "#fbbf24" } else { "#f87171" }
+        total_inv := kpi["total_invites"] ?? 0
+        answered := kpi["answered"] ?? 0
+        failed := kpi["failed"] ?? 0
+        reg_ok := kpi["reg_ok"] ?? 0
+        reg_fail := kpi["reg_fail"] ?? 0
+        total_reg := kpi["total_registers"] ?? 0
+
+        sec_kpi := "<div class=\"mb-8\">" +
+            "<div class=\"flex items-center gap-2 mb-4\"><h2 class=\"text-lg font-semibold\">Telecom KPIs</h2>" +
+            "<span class=\"text-[10px] text-[#52525b] bg-[#27272a] rounded px-1.5 py-0.5\">REAL-TIME</span></div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3\">" +
+            gauge_card("ASR", asr, "%", asr_color, "Answer-seizure ratio") +
+            gauge_card("NER", ner, "%", ner_color, "Network effectiveness") +
+            "<div class=\"" + crd + " p-5\">" +
+            "<div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold mb-3\">INVITEs</div>" +
+            "<div class=\"text-3xl font-bold mono text-[#e4e4e7] mb-2\">" + ("" + (total_inv)) + "</div>" +
+            "<div class=\"flex gap-3 text-[11px]\">" +
+            "<span class=\"text-[#34d399]\">&#x2713; " + ("" + (answered)) + " answered</span>" +
+            "<span class=\"text-[#f87171]\">&#x2717; " + ("" + (failed)) + " failed</span></div></div>" +
+            "<div class=\"" + crd + " p-5\">" +
+            "<div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold mb-3\">Registrations</div>" +
+            "<div class=\"text-3xl font-bold mono text-[#e4e4e7] mb-2\">" + ("" + (total_reg)) + "</div>" +
+            "<div class=\"flex gap-3 text-[11px]\">" +
+            "<span class=\"text-[#34d399]\">&#x2713; " + ("" + (reg_ok)) + " ok</span>" +
+            "<span class=\"text-[#f87171]\">&#x2717; " + ("" + (reg_fail)) + " failed</span></div></div>" +
+            stat_card("Messages", kpi["total_messages"] ?? 0, "total captures") +
+            stat_card("Unique calls", kpi["total_calls"] ?? 0, "distinct Call-IDs") +
+            "</div></div>"
+
+        // ── Section 2: Traffic Distribution ──
         mut methods := rep["methods"]
         if methods == null { methods = {} }
         bar := viz.bar({
-            "OPTIONS": methods["OPTIONS"] ?? 0,
             "INVITE": methods["INVITE"] ?? 0,
+            "OPTIONS": methods["OPTIONS"] ?? 0,
             "REGISTER": methods["REGISTER"] ?? 0,
             "BYE": methods["BYE"] ?? 0,
             "ACK": methods["ACK"] ?? 0,
-        }, {"title": "Methods (DB)", "width": 520, "height": 220, "colors": ["#3ddc97", "#c4b5fd", "#6ea8fe", "#ff6b6b", "#ffc857"]})
-
-        mut top_rows := ""
-        for row in tops {
-            cid := h(row["call_id"] ?? "")
-            top_rows = top_rows + "<tr class=\"hover:bg-white/[0.02]\">" +
-                "<td class=\"py-2 px-3 mono text-xs max-w-[18rem] truncate\">" + cid + "</td>" +
-                "<td class=\"py-2 px-3 mono text-sm\">" + ("" + (row["messages"] ?? 0)) + "</td>" +
-                "<td class=\"py-2 px-3 text-xs\"><a class=\"text-[#6ea8fe]\" href=\"/calls?call_id=" + cid + "\" hx-boost=\"true\">ladder</a></td></tr>"
-        }
-        if top_rows == "" {
-            top_rows = "<tr><td colspan=\"3\" class=\"py-6 text-center text-[#8fa3c1] text-sm\">No Call-IDs in database yet.</td></tr>"
-        }
-
-        mut day_rows := ""
-        for row in daily {
-            day_rows = day_rows + "<tr class=\"hover:bg-white/[0.02]\">" +
-                "<td class=\"py-2 px-3 mono text-xs\">" + h(row["day"] ?? "") + "</td>" +
-                "<td class=\"py-2 px-3 mono text-xs\">" + h(row["method"] ?? "") + "</td>" +
-                "<td class=\"py-2 px-3 mono text-xs\">" + h(row["transport"] ?? "") + "</td>" +
-                "<td class=\"py-2 px-3 mono text-sm\">" + ("" + (row["count"] ?? 0)) + "</td></tr>"
-        }
-        if day_rows == "" {
-            day_rows = "<tr><td colspan=\"4\" class=\"py-6 text-center text-[#8fa3c1] text-sm\">No daily rollups yet.</td></tr>"
-        }
-
+        }, {"title": "SIP methods", "width": 520, "height": 220, "colors": ["#a78bfa", "#34d399", "#f472b6", "#fb923c", "#facc15"]})
         mut trs := rep["transports"]
         if trs == null { trs = {} }
         pie := viz.pie({
@@ -523,33 +2286,787 @@ fn main {
             "HEP3": trs["HEP3"] ?? 0,
             "HEP3/TCP": trs["HEP3/TCP"] ?? 0,
             "HEP3/TLS": trs["HEP3/TLS"] ?? 0,
-        }, {"title": "Transport", "width": 420, "height": 260})
+        }, {"title": "Capture transport", "width": 400, "height": 240})
 
-        body := "<h1 class=\"text-2xl font-bold mb-1\">Reports</h1>" +
-            "<p class=\"text-sm text-[#8fa3c1] mb-6\">Durable history from SQLite (" + h(rep["db"] ?? "data/zaman.db") + ").</p>" +
-            "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
-            stat_card("Total", rep["total"] ?? 0, "stored messages") +
-            stat_card("Call-IDs", rep["unique_call_ids"] ?? 0, "distinct dialogs") +
-            stat_card("HEP", rep["hep"] ?? 0, "encapsulated") +
-            stat_card("SIP/UDP", rep["sip_udp"] ?? 0, "native capture") +
-            "</div>" +
-            "<div class=\"grid lg:grid-cols-2 gap-4 mb-6\">" +
-            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" + bar.html + "</div>" +
-            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" + pie.html + "</div></div>" +
+        // Response code groups with color bars
+        mut total_responses := 0
+        mut rcode_1xx := 0
+        mut rcode_2xx := 0
+        mut rcode_3xx := 0
+        mut rcode_4xx := 0
+        mut rcode_5xx := 0
+        for rc in rcodes {
+            st := rc["status"] ?? 0
+            cnt := rc["count"] ?? 0
+            total_responses = total_responses + cnt
+            if st >= 100 && st < 200 { rcode_1xx = rcode_1xx + cnt }
+            else if st >= 200 && st < 300 { rcode_2xx = rcode_2xx + cnt }
+            else if st >= 300 && st < 400 { rcode_3xx = rcode_3xx + cnt }
+            else if st >= 400 && st < 500 { rcode_4xx = rcode_4xx + cnt }
+            else if st >= 500 { rcode_5xx = rcode_5xx + cnt }
+        }
+        mut rcode_bars := "<div class=\"" + crd + " p-5\">" +
+            "<div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold mb-4\">Response codes</div>" +
+            rcode_bar("1xx", rcode_1xx, total_responses, "#a78bfa") +
+            rcode_bar("2xx", rcode_2xx, total_responses, "#34d399") +
+            rcode_bar("3xx", rcode_3xx, total_responses, "#22d3ee") +
+            rcode_bar("4xx", rcode_4xx, total_responses, "#fb923c") +
+            rcode_bar("5xx", rcode_5xx, total_responses, "#f87171") +
+            "<div class=\"border-t border-[#1e1e22] mt-3 pt-3\">"
+        // Individual status codes
+        for rc in rcodes {
+            st := rc["status"] ?? 0
+            cnt := rc["count"] ?? 0
+            sc := if st >= 200 && st < 300 { "text-[#34d399]" } else if st >= 400 { "text-[#f87171]" } else if st >= 300 { "text-[#22d3ee]" } else if st >= 500 { "text-[#f87171]" } else { "text-[#a78bfa]" }
+            rcode_bars = rcode_bars + "<div class=\"flex justify-between py-0.5\">" +
+                "<span class=\"mono text-xs font-medium " + sc + "\">" + ("" + (st)) + "</span>" +
+                "<span class=\"mono text-xs text-[#71717a]\">" + ("" + (cnt)) + "</span></div>"
+        }
+        rcode_bars = rcode_bars + "</div></div>"
+
+        sec_traffic := "<div class=\"mb-8\">" +
+            "<h2 class=\"text-lg font-semibold mb-4\">Traffic distribution</h2>" +
+            "<div class=\"grid lg:grid-cols-3 gap-4\">" +
+            "<div class=\"" + crd + " p-5 overflow-x-auto\">" + bar.html + "</div>" +
+            "<div class=\"" + crd + " p-5 overflow-x-auto\">" + pie.html + "</div>" +
+            rcode_bars +
+            "</div></div>"
+
+        // ── Section 3: Network topology — agents + top talkers side by side ──
+        mut agent_rows := ""
+        mut rank := 1
+        for a in agents {
+            aname := h(a["agent"] ?? "")
+            amsg := a["messages"] ?? 0
+            acall := a["calls"] ?? 0
+            // Bar relative to max
+            max_msg := if len(agents) > 0 { (agents[0]["messages"] ?? 1) } else { 1 }
+            bar_w := if max_msg > 0 { amsg * 100 / max_msg } else { 0 }
+            agent_rows = agent_rows + "<tr>" +
+                "<td class=\"py-2.5 px-4 text-[11px] text-[#52525b] mono\">" + ("" + (rank)) + "</td>" +
+                "<td class=\"py-2.5 px-4\"><div class=\"text-sm font-medium\">" + aname + "</div>" +
+                "<div class=\"w-full h-1 rounded-full bg-[#27272a] mt-1.5\"><div class=\"h-full rounded-full bg-[#a78bfa]/60\" style=\"width:" + ("" + (bar_w)) + "%\"></div></div></td>" +
+                "<td class=\"py-2.5 px-4 mono text-sm text-right\">" + ("" + (amsg)) + "</td>" +
+                "<td class=\"py-2.5 px-4 mono text-sm text-right text-[#71717a]\">" + ("" + (acall)) + "</td>" +
+                "<td class=\"py-2.5 px-4\"><a class=\"text-[11px] text-[#a78bfa] hover:underline\" href=\"/messages?agent=" + aname + "\" hx-boost=\"true\">view</a></td></tr>"
+            rank = rank + 1
+        }
+        if agent_rows == "" { agent_rows = "<tr><td colspan=\"5\" class=\"py-8 text-center text-[#52525b] text-sm\">No HEP agents reporting yet.</td></tr>" }
+
+        mut talker_rows := ""
+        rank = 1
+        for t in talkers {
+            tsrc := h(t["src"] ?? "")
+            tmsg := t["messages"] ?? 0
+            tcall := t["calls"] ?? 0
+            max_t := if len(talkers) > 0 { (talkers[0]["messages"] ?? 1) } else { 1 }
+            tw := if max_t > 0 { tmsg * 100 / max_t } else { 0 }
+            talker_rows = talker_rows + "<tr>" +
+                "<td class=\"py-2.5 px-4 text-[11px] text-[#52525b] mono\">" + ("" + (rank)) + "</td>" +
+                "<td class=\"py-2.5 px-4\"><div class=\"mono text-xs\">" + tsrc + "</div>" +
+                "<div class=\"w-full h-1 rounded-full bg-[#27272a] mt-1.5\"><div class=\"h-full rounded-full bg-[#34d399]/60\" style=\"width:" + ("" + (tw)) + "%\"></div></div></td>" +
+                "<td class=\"py-2.5 px-4 mono text-sm text-right\">" + ("" + (tmsg)) + "</td>" +
+                "<td class=\"py-2.5 px-4 mono text-sm text-right text-[#71717a]\">" + ("" + (tcall)) + "</td>" +
+                "<td class=\"py-2.5 px-4\"><a class=\"text-[11px] text-[#a78bfa] hover:underline\" href=\"/messages?src=" + tsrc + "\" hx-boost=\"true\">view</a></td></tr>"
+            rank = rank + 1
+        }
+        if talker_rows == "" { talker_rows = "<tr><td colspan=\"5\" class=\"py-8 text-center text-[#52525b] text-sm\">No endpoints seen yet.</td></tr>" }
+
+        hdr5 := "<tr class=\"" + th + " border-b border-[#1e1e22]\"><th class=\"py-2 px-4 w-8\">#</th><th class=\"py-2 px-4\">Name</th><th class=\"py-2 px-4 text-right\">Msgs</th><th class=\"py-2 px-4 text-right\">Calls</th><th class=\"py-2 px-4 w-12\"></th></tr>"
+
+        sec_network := "<div class=\"mb-8\">" +
+            "<h2 class=\"text-lg font-semibold mb-4\">Network topology</h2>" +
             "<div class=\"grid lg:grid-cols-2 gap-4\">" +
-            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] overflow-x-auto\">" +
-            "<div class=\"p-4 text-sm font-semibold border-b border-[#1e2d44]\">Top Call-IDs</div>" +
-            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase text-[#8fa3c1]\">" +
-            "<th class=\"py-2 px-3\">Call-ID</th><th class=\"py-2 px-3\">Msgs</th><th class=\"py-2 px-3\"></th></tr></thead>" +
-            "<tbody class=\"divide-y divide-[#1e2d44]\">" + top_rows + "</tbody></table></div>" +
-            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] overflow-x-auto\">" +
-            "<div class=\"p-4 text-sm font-semibold border-b border-[#1e2d44]\">Daily rollup</div>" +
-            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase text-[#8fa3c1]\">" +
-            "<th class=\"py-2 px-3\">Day</th><th class=\"py-2 px-3\">Method</th><th class=\"py-2 px-3\">Transport</th><th class=\"py-2 px-3\">Count</th></tr></thead>" +
-            "<tbody class=\"divide-y divide-[#1e2d44]\">" + day_rows + "</tbody></table></div></div>"
-        web.html(layout("Reports", body))
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center justify-between\">" +
+            "<span class=\"text-sm font-semibold\">HEP agents</span>" +
+            "<span class=\"text-[10px] text-[#52525b] mono\">" + ("" + (len(agents))) + " nodes</span></div>" +
+            "<table class=\"w-full text-left\"><thead>" + hdr5 + "</thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + agent_rows + "</tbody></table></div>" +
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center justify-between\">" +
+            "<span class=\"text-sm font-semibold\">Top endpoints</span>" +
+            "<span class=\"text-[10px] text-[#52525b] mono\">" + ("" + (len(talkers))) + " sources</span></div>" +
+            "<table class=\"w-full text-left\"><thead>" + hdr5 + "</thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + talker_rows + "</tbody></table></div>" +
+            "</div></div>"
+
+        // ── Section 4: Call activity ──
+        mut top_rows := ""
+        for row in tops {
+            cid := h(row["call_id"] ?? "")
+            msgs := row["messages"] ?? 0
+            top_rows = top_rows + "<tr>" +
+                "<td class=\"py-2 px-4 mono text-xs max-w-[22rem] truncate\" title=\"" + cid + "\">" + cid + "</td>" +
+                "<td class=\"py-2 px-4 mono text-sm text-right\">" + ("" + (msgs)) + "</td>" +
+                "<td class=\"py-2 px-4 text-right\">" +
+                "<a class=\"text-[11px] text-[#a78bfa] hover:underline\" href=\"/calls?call_id=" + cid + "\" hx-boost=\"true\">ladder</a>" +
+                " <a class=\"text-[11px] text-[#52525b] hover:text-[#a1a1aa]\" href=\"/pcap?call_id=" + cid + "\">pcap</a></td></tr>"
+        }
+        if top_rows == "" { top_rows = "<tr><td colspan=\"3\" class=\"py-8 text-center text-[#52525b] text-sm\">No calls captured yet.</td></tr>" }
+
+        mut day_rows := ""
+        for row in daily {
+            day_rows = day_rows + "<tr>" +
+                "<td class=\"py-1.5 px-4 mono text-xs\">" + h(row["day"] ?? "") + "</td>" +
+                "<td class=\"py-1.5 px-4 text-xs\">" + h(row["method"] ?? "") + "</td>" +
+                "<td class=\"py-1.5 px-4 text-xs text-[#71717a]\">" + h(row["transport"] ?? "") + "</td>" +
+                "<td class=\"py-1.5 px-4 mono text-sm text-right\">" + ("" + (row["count"] ?? 0)) + "</td></tr>"
+        }
+        if day_rows == "" { day_rows = "<tr><td colspan=\"4\" class=\"py-6 text-center text-[#52525b] text-sm\">No daily rollups yet.</td></tr>" }
+
+        sec_calls := "<div class=\"mb-8\">" +
+            "<h2 class=\"text-lg font-semibold mb-4\">Call activity</h2>" +
+            "<div class=\"grid lg:grid-cols-2 gap-4\">" +
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center justify-between\">" +
+            "<span class=\"text-sm font-semibold\">Busiest Call-IDs</span>" +
+            "<span class=\"text-[10px] text-[#52525b] mono\">" + ("" + (len(tops))) + " calls</span></div>" +
+            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-2 px-4\">Call-ID</th><th class=\"py-2 px-4 text-right\">Msgs</th><th class=\"py-2 px-4 text-right\"></th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + top_rows + "</tbody></table></div>" +
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center justify-between\">" +
+            "<span class=\"text-sm font-semibold\">Daily rollup</span>" +
+            "<span class=\"text-[10px] text-[#52525b]\">method × transport per day</span></div>" +
+            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
+            "<th class=\"py-2 px-4\">Day</th><th class=\"py-2 px-4\">Method</th><th class=\"py-2 px-4\">Transport</th><th class=\"py-2 px-4 text-right\">Count</th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + day_rows + "</tbody></table></div>" +
+            "</div></div>"
+
+        // ── Section 5: Database info ──
+        ts_min := rep["ts_min"] ?? 0
+        ts_max := rep["ts_max"] ?? 0
+        span_h := if ts_max > ts_min { (ts_max - ts_min) / 3600000 } else { 0 }
+        db_info := "<div class=\"" + crd + " p-5\">" +
+            "<div class=\"flex items-center justify-between\">" +
+            "<div class=\"text-sm\">" +
+            "<span class=\"text-[#71717a]\">Storage:</span> <span class=\"mono text-xs\">" + h(rep["db"] ?? "data/zaman.db") + "</span>" +
+            " · <span class=\"text-[#71717a]\">Span:</span> <span class=\"mono text-xs\">" + ("" + (span_h)) + "h</span>" +
+            " · <span class=\"text-[#71717a]\">SIP/UDP:</span> <span class=\"mono text-xs\">" + ("" + (rep["sip_udp"] ?? 0)) + "</span>" +
+            " · <span class=\"text-[#71717a]\">HEP:</span> <span class=\"mono text-xs\">" + ("" + (rep["hep"] ?? 0)) + "</span></div>" +
+            "<a href=\"/export/json\" class=\"rounded-lg px-3 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">Export all JSON</a>" +
+            "</div></div>"
+
+        // Assemble
+        body := "<div class=\"flex items-end justify-between gap-3 mb-6\">" +
+            "<div><h1 class=\"text-2xl font-bold\">Reports</h1>" +
+            "<p class=\"text-sm text-[#71717a] mt-1\">Telecom KPIs, traffic analysis, network topology, and capture history.</p></div></div>" +
+            sec_kpi + sec_traffic + sec_network + sec_calls + db_info
+        web.html(layout("Reports", body, user))
     })
 
-    say("zaman-web → http://127.0.0.1:3000  (core " + core_base() + ")")
+    // ---- share link (public read-only ladder) ----
+
+    app.get("/share", fn(req) {
+        tok := req.query_map["token"] ?? ""
+        if tok == "" { return web.status(400) }
+        call_id := verify_share_token(token_secret, tok)
+        if call_id == null { return web.html("<!doctype html><html><body style='background:#09090b;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh'><div><h1>Link expired or invalid</h1><p>Share links are valid for 7 days.</p></div></body></html>") }
+        // Render ladder without auth (read-only)
+        anon := {"id": 0, "username": "shared", "role": "viewer"}
+        web.html(layout("Shared: " + call_id, ladder_html(call_id), anon))
+    })
+
+    // Generate share link (requires login)
+    app.post("/share/create", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        cid := web.form_get(req, "call_id", "")
+        if cid == "" { return web.status(400) }
+        tok := make_share_token(token_secret, cid)
+        audit(user["username"] ?? "", "share_create", "call_id=" + cid)
+        // Return the share URL as HTMX partial
+        share_url := "/share?token=" + tok
+        web.htmx("<div class=\"rounded-xl border border-[#34d399]/30 bg-[#34d399]/5 p-3 mt-3\">" +
+            "<div class=\"text-xs text-[#34d399] font-semibold mb-1\">Share link created (valid 7 days)</div>" +
+            "<input class=\"w-full mono text-xs bg-[#0a0a0c] border border-[#1e1e22] rounded-lg px-3 py-2 select-all\" value=\"" + h(share_url) + "\" readonly onclick=\"this.select()\"/></div>")
+    })
+
+    // ---- user preferences ----
+
+    app.post("/preferences", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        uname := user["username"] ?? ""
+        default_window := web.form_get(req, "default_window", "5")
+        set_user_pref(uname, "default_window", default_window)
+        {"status": 302, "headers": {"Location": "/"}, "body": ""}
+    })
+
+    // ---- PCAP export route ----
+
+    app.get("/pcap", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        cid := req.query_map["call_id"] ?? ""
+        if cid == "" { return web.status(400) }
+        messages := fetch_messages(500, cid)
+        // Sort chronological
+        mut ordered := []
+        mut i := len(messages) - 1
+        while i >= 0 {
+            ordered = list_append(ordered, messages[i])
+            i = i - 1
+        }
+        if len(ordered) == 0 { return web.status(404) }
+        pcap := build_pcap(ordered)
+        fname := sanitize_cid(cid) + ".pcap"
+        {"status": 200, "headers": {"Content-Type": "application/vnd.tcpdump.pcap", "Content-Disposition": "attachment; filename=\"" + fname + "\""}, "body": pcap}
+    })
+
+    // ---- JSON export route ----
+
+    app.get("/export/json", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        cid := req.query_map["call_id"] ?? ""
+        agent := req.query_map["agent"] ?? ""
+        method := req.query_map["method"] ?? ""
+        transport := req.query_map["transport"] ?? ""
+        src := req.query_map["src"] ?? ""
+        messages := fetch_messages_ex(500, cid, transport, agent, method, src)
+        body := json.stringify(messages)
+        {"status": 200, "headers": {"Content-Type": "application/json", "Content-Disposition": "attachment; filename=\"zaman-export.json\""}, "body": body}
+    })
+
+    // ---- saved search routes ----
+
+    app.post("/searches/save", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        name := web.form_get(req, "name", "")
+        if name == "" { return {"status": 302, "headers": {"Location": "/messages"}, "body": ""} }
+        params := {
+            "call_id": web.form_get(req, "call_id", ""),
+            "agent": web.form_get(req, "agent", ""),
+            "method": web.form_get(req, "method", ""),
+            "transport": web.form_get(req, "transport", ""),
+            "src": web.form_get(req, "src", "")
+        }
+        create_search(name, user["username"] ?? "", params)
+        {"status": 302, "headers": {"Location": "/messages"}, "body": ""}
+    })
+
+    app.post("/searches/:id/delete", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        id := int.parse(req.params["id"]).unwrap_or(0)
+        if id > 0 { delete_search(id) }
+        {"status": 302, "headers": {"Location": "/messages"}, "body": ""}
+    })
+
+    // ---- recording routes ----
+
+    app.get("/recordings/:cid", fn(req) {
+        cid := req.params["cid"]
+        path := recording_path(cid)
+        if !fs.exists(path) { return web.status(404) }
+        data := fs.read_bytes(path)
+        if !data.ok { return web.status(500) }
+        {"status": 200, "headers": {"Content-Type": "audio/wav", "Cache-Control": "public, max-age=3600"}, "body": data.value}
+    })
+
+    app.post("/recordings/upload", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") { return web.status(403) }
+        cid := web.form_get(req, "call_id", "")
+        if cid == "" { return web.html(layout("Error", "<p class=\"text-[#f87171]\">Missing call_id</p>", user)) }
+        f := req.files["file"]
+        if f == null { return web.html(layout("Error", "<p class=\"text-[#f87171]\">No file uploaded</p>", user)) }
+        dir := recordings_dir()
+        if !fs.exists(dir) { fs.mkdir(dir) }
+        path := recording_path(cid)
+        fs.write_bytes(path, f["body"])
+        // Redirect back to ladder
+        {"status": 302, "headers": {"Location": "/calls?call_id=" + cid}, "body": ""}
+    })
+
+    // ---- alert evaluation partial (HTMX polls this) ----
+
+    app.get("/partials/alerts", fn(req) {
+        rt := fetch_realtime(5)
+        fired := evaluate_alerts(rt)
+        if len(fired) == 0 {
+            return web.htmx("")
+        }
+        mut html := ""
+        for a in fired {
+            sev := a["severity"] ?? "warning"
+            msg := h(a["message"] ?? "")
+            bg := if sev == "critical" { "border-[#f87171]/20 bg-[#f87171]/5" } else { "border-[#fbbf24]/20 bg-[#fbbf24]/5" }
+            ic := if sev == "critical" { "text-[#f87171]" } else { "text-[#fbbf24]" }
+            html = html + "<div class=\"flex items-center gap-2 rounded-lg border " + bg + " px-3 py-2 text-sm\">" +
+                "<span class=\"" + ic + "\">&#x26A0;</span>" +
+                "<span class=\"" + ic + " font-medium\">" + msg + "</span></div>"
+        }
+        web.htmx("<div class=\"space-y-2\">" + html + "</div>")
+    })
+
+    // ---- alerts config page ----
+
+    app.get("/alerts", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") {
+            return web.html(layout("Forbidden", "<p class=\"text-[#71717a]\">Operator role required for alerts.</p>", user))
+        }
+        config := load_alert_config()
+        history := load_alert_history()
+        channels := config["channels"] ?? []
+        rules := config["rules"] ?? []
+        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        inp := "w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
+
+        // Channels list
+        mut ch_rows := ""
+        for ch in channels {
+            ct := ch["type"] ?? ""
+            label := if ct == "slack" { "Slack: " + h(ch["webhook_url"] ?? "") } else if ct == "webhook" { "Webhook: " + h(ch["url"] ?? "") } else if ct == "email" { "Email: " + h(ch["to"] ?? "") } else { h(ct) }
+            ch_rows = ch_rows + "<div class=\"flex items-center justify-between py-2 border-b border-[#1e1e22]/50\">" +
+                "<div class=\"flex items-center gap-2\">" +
+                "<span class=\"px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-[#27272a] text-[#a1a1aa]\">" + h(ct) + "</span>" +
+                "<span class=\"text-sm truncate max-w-[300px]\">" + label + "</span></div>" +
+                "<form method=\"post\" action=\"/alerts/channel/delete\" class=\"shrink-0\">" +
+                "<input type=\"hidden\" name=\"type\" value=\"" + h(ct) + "\"/>" +
+                "<input type=\"hidden\" name=\"url\" value=\"" + h(ch["webhook_url"] ?? ch["url"] ?? ch["to"] ?? "") + "\"/>" +
+                "<button class=\"text-[11px] text-[#52525b] hover:text-[#f87171]\">remove</button></form></div>"
+        }
+        if ch_rows == "" { ch_rows = "<p class=\"text-sm text-[#52525b] py-3\">No channels configured. Alerts will only show in the dashboard.</p>" }
+
+        // Rules list
+        mut rule_rows := ""
+        for rule in rules {
+            rid := rule["id"] ?? 0
+            rname := h(rule["name"] ?? "")
+            rmetric := h(rule["metric"] ?? "")
+            rop := h(rule["op"] ?? ">")
+            rthresh := rule["threshold"] ?? 0
+            rsev := rule["severity"] ?? "warning"
+            renabled := rule["enabled"] ?? false
+            sev_cls := if rsev == "critical" { "text-[#f87171]" } else { "text-[#fbbf24]" }
+            en_cls := if renabled { "text-[#34d399]" } else { "text-[#52525b]" }
+            rule_rows = rule_rows + "<tr>" +
+                "<td class=\"py-2 px-4 text-sm font-medium\">" + rname + "</td>" +
+                "<td class=\"py-2 px-4 mono text-xs\">" + rmetric + " " + rop + " " + ("" + (rthresh)) + "</td>" +
+                "<td class=\"py-2 px-4 text-xs " + sev_cls + "\">" + rsev + "</td>" +
+                "<td class=\"py-2 px-4 text-xs " + en_cls + "\">" + (if renabled { "active" } else { "disabled" }) + "</td>" +
+                "<td class=\"py-2 px-4 text-xs\">" +
+                "<form method=\"post\" action=\"/alerts/rule/delete\" class=\"inline\">" +
+                "<input type=\"hidden\" name=\"id\" value=\"" + ("" + (rid)) + "\"/>" +
+                "<button class=\"text-[#52525b] hover:text-[#f87171]\">delete</button></form></td></tr>"
+        }
+        if rule_rows == "" { rule_rows = "<tr><td colspan=\"5\" class=\"py-6 text-center text-[#52525b] text-sm\">No rules configured.</td></tr>" }
+
+        // Recent alert history
+        mut hist_rows := ""
+        mut hi := len(history) - 1
+        mut hcount := 0
+        while hi >= 0 && hcount < 20 {
+            ha := history[hi]
+            hsev := ha["severity"] ?? "warning"
+            hmsg := h(ha["message"] ?? "")
+            hname := h(ha["rule"] ?? "")
+            hcls := if hsev == "critical" { "text-[#f87171]" } else { "text-[#fbbf24]" }
+            hist_rows = hist_rows + "<tr>" +
+                "<td class=\"py-1.5 px-4 text-xs " + hcls + "\">" + hsev + "</td>" +
+                "<td class=\"py-1.5 px-4 text-sm\">" + hname + "</td>" +
+                "<td class=\"py-1.5 px-4 text-xs text-[#71717a] truncate max-w-[24rem]\">" + hmsg + "</td></tr>"
+            hi = hi - 1
+            hcount = hcount + 1
+        }
+        if hist_rows == "" { hist_rows = "<tr><td colspan=\"3\" class=\"py-6 text-center text-[#52525b] text-sm\">No alerts fired yet.</td></tr>" }
+
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold border-b border-[#1e1e22]"
+
+        body := "<h1 class=\"text-2xl font-bold mb-1\">Alerts</h1>" +
+            "<p class=\"text-sm text-[#71717a] mb-6\">Configure notification channels and threshold rules. Alerts evaluate every 30 seconds against the 5-minute traffic window.</p>" +
+            // Channels
+            "<div class=\"grid lg:grid-cols-2 gap-4 mb-6\">" +
+            "<div class=\"" + crd + " p-5\">" +
+            "<h2 class=\"text-sm font-semibold mb-4\">Notification channels</h2>" +
+            ch_rows +
+            "<h3 class=\"text-xs font-semibold text-[#71717a] mt-5 mb-3\">Add channel</h3>" +
+            "<form method=\"post\" action=\"/alerts/channel\" class=\"space-y-3\">" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">Type</label>" +
+            "<select name=\"type\" class=\"" + inp + "\">" +
+            "<option value=\"slack\">Slack webhook</option>" +
+            "<option value=\"webhook\">Generic webhook (PagerDuty/Teams/Opsgenie)</option>" +
+            "<option value=\"email\">Email (SMTP)</option></select></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">Slack webhook URL / Webhook URL / Email address</label>" +
+            "<input name=\"url\" required placeholder=\"https://hooks.slack.com/...\" class=\"" + inp + "\"/></div>" +
+            "<div class=\"grid grid-cols-2 gap-3\">" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">SMTP host (email only)</label>" +
+            "<input name=\"smtp_host\" value=\"localhost\" class=\"" + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">SMTP port</label>" +
+            "<input name=\"smtp_port\" value=\"25\" class=\"" + inp + "\"/></div></div>" +
+            "<button class=\"rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46]\">Add channel</button></form></div>" +
+            // Rules
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<div class=\"px-5 py-3 border-b border-[#1e1e22] text-sm font-semibold\">Alert rules</div>" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + "\">" +
+            "<th class=\"py-2 px-4\">Name</th><th class=\"py-2 px-4\">Condition</th><th class=\"py-2 px-4\">Severity</th><th class=\"py-2 px-4\">Status</th><th class=\"py-2 px-4\"></th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + rule_rows + "</tbody></table>" +
+            "<div class=\"p-4 border-t border-[#1e1e22]\">" +
+            "<h3 class=\"text-xs font-semibold text-[#71717a] mb-3\">Add rule</h3>" +
+            "<form method=\"post\" action=\"/alerts/rule\" class=\"grid grid-cols-5 gap-2 items-end\">" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">Name</label>" +
+            "<input name=\"name\" required placeholder=\"Low ASR\" class=\"" + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">Metric</label>" +
+            "<select name=\"metric\" class=\"" + inp + "\">" +
+            "<option value=\"asr\">ASR %</option>" +
+            "<option value=\"err_rate\">Error rate %</option>" +
+            "<option value=\"resp_5xx\">5xx count</option>" +
+            "<option value=\"resp_4xx\">4xx count</option>" +
+            "<option value=\"err_401\">401 Unauthorized</option>" +
+            "<option value=\"err_403\">403 Forbidden</option>" +
+            "<option value=\"err_503\">503 Unavailable</option>" +
+            "<option value=\"invites\">INVITEs (5m)</option>" +
+            "<option value=\"registers\">REGISTERs (5m)</option>" +
+            "<option value=\"active_calls\">Active calls</option>" +
+            "</select></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">Condition</label>" +
+            "<div class=\"flex gap-1\">" +
+            "<select name=\"op\" class=\"rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-2 py-2 text-sm mono w-16\">" +
+            "<option value=\">\">></option><option value=\"<\"><</option><option value=\">=\">>=</option></select>" +
+            "<input name=\"threshold\" type=\"number\" required value=\"10\" class=\"flex-1 rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-2 py-2 text-sm mono\"/></div></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase mb-1\">Severity</label>" +
+            "<select name=\"severity\" class=\"" + inp + "\">" +
+            "<option value=\"warning\">warning</option><option value=\"critical\">critical</option></select></div>" +
+            "<button class=\"rounded-lg px-3 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46]\">Add</button></form></div></div>" +
+            "</div>" +
+            // History
+            "<div class=\"" + crd + " overflow-x-auto mt-6\">" +
+            "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center justify-between\">" +
+            "<span class=\"text-sm font-semibold\">Recent alerts</span>" +
+            "<span class=\"text-[10px] text-[#52525b]\">last 20</span></div>" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + "\">" +
+            "<th class=\"py-2 px-4\">Severity</th><th class=\"py-2 px-4\">Rule</th><th class=\"py-2 px-4\">Detail</th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + hist_rows + "</tbody></table></div>"
+        web.html(layout("Alerts", body, user))
+    })
+
+    // Alert channel CRUD
+    app.post("/alerts/channel", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") { return web.status(403) }
+        ch_type := web.form_get(req, "type", "webhook")
+        url := web.form_get(req, "url", "")
+        smtp_host := web.form_get(req, "smtp_host", "localhost")
+        smtp_port := web.form_get(req, "smtp_port", "25")
+        config := load_alert_config()
+        channels := config["channels"] ?? []
+        mut new_ch := {}
+        if ch_type == "slack" {
+            new_ch = {"type": "slack", "webhook_url": url}
+        } else if ch_type == "email" {
+            new_ch = {"type": "email", "to": url, "from": "zaman@localhost", "smtp_host": smtp_host, "smtp_port": smtp_port}
+        } else {
+            new_ch = {"type": "webhook", "url": url}
+        }
+        config["channels"] = list_append(channels, new_ch)
+        save_alert_config(config)
+        {"status": 302, "headers": {"Location": "/alerts"}, "body": ""}
+    })
+
+    app.post("/alerts/channel/delete", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") { return web.status(403) }
+        del_type := web.form_get(req, "type", "")
+        del_url := web.form_get(req, "url", "")
+        config := load_alert_config()
+        channels := config["channels"] ?? []
+        // Remove matching channel
+        mut kept := "["
+        mut first := true
+        for ch in channels {
+            ct := ch["type"] ?? ""
+            cu := ch["webhook_url"] ?? ch["url"] ?? ch["to"] ?? ""
+            if ct == del_type && cu == del_url { continue }
+            if !first { kept = kept + "," }
+            kept = kept + json.stringify(ch)
+            first = false
+        }
+        config["channels"] = json.parse(kept + "]").value
+        save_alert_config(config)
+        {"status": 302, "headers": {"Location": "/alerts"}, "body": ""}
+    })
+
+    // Alert rule CRUD
+    app.post("/alerts/rule", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") { return web.status(403) }
+        config := load_alert_config()
+        rules := config["rules"] ?? []
+        // Next ID
+        mut max_id := 0
+        for r in rules {
+            rid := r["id"] ?? 0
+            if rid > max_id { max_id = rid }
+        }
+        new_rule := {
+            "id": max_id + 1,
+            "name": web.form_get(req, "name", ""),
+            "metric": web.form_get(req, "metric", "asr"),
+            "op": web.form_get(req, "op", ">"),
+            "threshold": int.parse(web.form_get(req, "threshold", "10")).unwrap_or(10),
+            "severity": web.form_get(req, "severity", "warning"),
+            "enabled": true
+        }
+        config["rules"] = list_append(rules, new_rule)
+        save_alert_config(config)
+        {"status": 302, "headers": {"Location": "/alerts"}, "body": ""}
+    })
+
+    app.post("/alerts/rule/delete", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "operator") { return web.status(403) }
+        del_id := int.parse(web.form_get(req, "id", "0")).unwrap_or(0)
+        config := load_alert_config()
+        config["rules"] = list_remove(config["rules"] ?? [], "id", del_id)
+        save_alert_config(config)
+        {"status": 302, "headers": {"Location": "/alerts"}, "body": ""}
+    })
+
+    // ---- CSV export ----
+
+    app.get("/export/csv", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        cid := req.query_map["call_id"] ?? ""
+        agent := req.query_map["agent"] ?? ""
+        method := req.query_map["method"] ?? ""
+        transport := req.query_map["transport"] ?? ""
+        src := req.query_map["src"] ?? ""
+        messages := fetch_messages_ex(500, cid, transport, agent, method, src)
+        audit(user["username"] ?? "", "export_csv", ("" + (len(messages))) + " messages")
+        csv := messages_to_csv(messages)
+        {"status": 200, "headers": {"Content-Type": "text/csv", "Content-Disposition": "attachment; filename=\"zaman-export.csv\""}, "body": csv}
+    })
+
+    // ---- config backup/restore ----
+
+    app.get("/admin/backup", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        audit(user["username"] ?? "", "config_export", "backup")
+        cfg := export_config()
+        {"status": 200, "headers": {"Content-Type": "application/json", "Content-Disposition": "attachment; filename=\"zaman-config-backup.json\""}, "body": cfg}
+    })
+
+    // ---- API tokens management ----
+
+    app.get("/admin/tokens", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        tokens := load_api_tokens()
+        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        inp := "w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
+        // Check for flash (newly created token)
+        new_tok := req.query_map["new_token"] ?? ""
+        mut flash := ""
+        if new_tok != "" {
+            flash = "<div class=\"rounded-xl border border-[#34d399]/30 bg-[#34d399]/5 p-4 mb-4\">" +
+                "<div class=\"text-sm text-[#34d399] font-semibold mb-1\">Token created — copy it now (shown once)</div>" +
+                "<code class=\"block mono text-xs bg-[#0a0a0c] rounded-lg p-3 break-all select-all\">" + h(new_tok) + "</code></div>"
+        }
+        mut rows := ""
+        for t in tokens {
+            rows = rows + "<tr>" +
+                "<td class=\"py-2 px-4 mono text-xs\">" + h(t["prefix"] ?? "") + "…</td>" +
+                "<td class=\"py-2 px-4 text-sm\">" + h(t["label"] ?? "") + "</td>" +
+                "<td class=\"py-2 px-4 text-sm\">" + h(t["username"] ?? "") + "</td>" +
+                "<td class=\"py-2 px-4\">" + role_badge(t["role"] ?? "viewer") + "</td>" +
+                "<td class=\"py-2 px-4\"><form method=\"post\" action=\"/admin/tokens/delete\">" +
+                "<input type=\"hidden\" name=\"prefix\" value=\"" + h(t["prefix"] ?? "") + "\"/>" +
+                "<button class=\"text-[11px] text-[#52525b] hover:text-[#f87171]\">revoke</button></form></td></tr>"
+        }
+        if rows == "" { rows = "<tr><td colspan=\"5\" class=\"py-6 text-center text-[#52525b] text-sm\">No API tokens created.</td></tr>" }
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold border-b border-[#1e1e22]"
+        body := "<h1 class=\"text-2xl font-bold mb-1\">API Tokens</h1>" +
+            "<p class=\"text-sm text-[#71717a] mb-6\">Long-lived tokens for automation and integration. Use as <code class=\"mono text-xs\">Authorization: Bearer &lt;token&gt;</code></p>" +
+            flash +
+            "<div class=\"grid lg:grid-cols-3 gap-4\">" +
+            "<div class=\"lg:col-span-2 " + crd + " overflow-x-auto\">" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + "\">" +
+            "<th class=\"py-2 px-4\">Prefix</th><th class=\"py-2 px-4\">Label</th><th class=\"py-2 px-4\">User</th><th class=\"py-2 px-4\">Role</th><th class=\"py-2 px-4\"></th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + rows + "</tbody></table></div>" +
+            "<div class=\"" + crd + " p-5\">" +
+            "<h2 class=\"text-sm font-semibold mb-4\">Create token</h2>" +
+            "<form method=\"post\" action=\"/admin/tokens\" class=\"space-y-3\">" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">Label</label>" +
+            "<input name=\"label\" required placeholder=\"CI pipeline\" class=\"" + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#52525b] uppercase tracking-wider mb-1\">Role</label>" +
+            "<select name=\"role\" class=\"" + inp + "\">" +
+            "<option value=\"viewer\">viewer</option><option value=\"operator\">operator</option><option value=\"admin\">admin</option></select></div>" +
+            "<button class=\"w-full rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46]\">Generate token</button></form></div></div>"
+        web.html(layout("API Tokens", body, user))
+    })
+
+    app.post("/admin/tokens", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        label := web.form_get(req, "label", "")
+        role := web.form_get(req, "role", "viewer")
+        uname := user["username"] ?? "admin"
+        token := create_api_token(uname, role, label)
+        audit(uname, "api_token_create", "label=" + label + " role=" + role)
+        {"status": 302, "headers": {"Location": "/admin/tokens?new_token=" + token}, "body": ""}
+    })
+
+    app.post("/admin/tokens/delete", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        prefix := web.form_get(req, "prefix", "")
+        delete_api_token(prefix)
+        audit(user["username"] ?? "", "api_token_revoke", "prefix=" + prefix)
+        {"status": 302, "headers": {"Location": "/admin/tokens"}, "body": ""}
+    })
+
+    // ---- audit log page ----
+
+    app.get("/admin/audit", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        entries := load_audit(100)
+        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold border-b border-[#1e1e22]"
+        mut rows := ""
+        for e in entries {
+            action := e["action"] ?? ""
+            acls := if str.contains(action, "fail") || str.contains(action, "revoke") || str.contains(action, "delete") { "text-[#f87171]" } else if str.contains(action, "create") || str.contains(action, "login") { "text-[#34d399]" } else { "text-[#a1a1aa]" }
+            rows = rows + "<tr>" +
+                "<td class=\"py-2 px-4 mono text-xs text-[#52525b]\">" + ("" + (e["ts"] ?? 0)) + "</td>" +
+                "<td class=\"py-2 px-4 text-sm font-medium\">" + h(e["user"] ?? "") + "</td>" +
+                "<td class=\"py-2 px-4 text-sm " + acls + "\">" + h(action) + "</td>" +
+                "<td class=\"py-2 px-4 text-xs text-[#71717a] truncate max-w-[30rem]\">" + h(e["detail"] ?? "") + "</td></tr>"
+        }
+        if rows == "" { rows = "<tr><td colspan=\"4\" class=\"py-8 text-center text-[#52525b] text-sm\">No audit entries yet.</td></tr>" }
+        body := "<h1 class=\"text-2xl font-bold mb-1\">Audit Log</h1>" +
+            "<p class=\"text-sm text-[#71717a] mb-6\">All authentication and administrative actions.</p>" +
+            "<div class=\"" + crd + " overflow-x-auto\">" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + "\">" +
+            "<th class=\"py-2 px-4\">Timestamp</th><th class=\"py-2 px-4\">User</th><th class=\"py-2 px-4\">Action</th><th class=\"py-2 px-4\">Detail</th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#27272a]/40\">" + rows + "</tbody></table></div>"
+        web.html(layout("Audit Log", body, user))
+    })
+
+    // ---- SLA report page ----
+
+    app.get("/sla", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        sla := fetch_sla()
+        kpi := fetch_kpi()
+        crd := "rounded-2xl border border-[#1e1e22] bg-[#131316]"
+        status := sla["status"] ?? "unknown"
+        status_color := if status == "healthy" { "#34d399" } else if status == "degraded" { "#fbbf24" } else { "#f87171" }
+        status_label := if status == "healthy" { "Operational" } else if status == "degraded" { "Degraded" } else { "Critical" }
+        asr := sla["asr"] ?? 0
+        ner := kpi["ner"] ?? 0
+        total_inv := sla["total_invites"] ?? 0
+        answered := sla["answered"] ?? 0
+        failed := sla["failed"] ?? 0
+
+        body := "<h1 class=\"text-2xl font-bold mb-1\">SLA Report</h1>" +
+            "<p class=\"text-sm text-[#71717a] mb-6\">Service level indicators for network availability and call quality.</p>" +
+            // Status hero
+            "<div class=\"" + crd + " p-8 mb-6 text-center\">" +
+            "<div class=\"w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center\" style=\"background:" + status_color + "20;border:3px solid " + status_color + "\">" +
+            "<span class=\"text-2xl font-black mono\" style=\"color:" + status_color + "\">" + ("" + (asr)) + "%</span></div>" +
+            "<div class=\"text-xl font-bold mb-1\" style=\"color:" + status_color + "\">" + status_label + "</div>" +
+            "<div class=\"text-sm text-[#71717a]\">Answer-Seizure Ratio · target &ge; 45%</div></div>" +
+            // KPI grid
+            "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
+            gauge_card("ASR", asr, "%", status_color, "answer-seizure ratio") +
+            gauge_card("NER", ner, "%", (if ner >= 80 { "#34d399" } else { "#fbbf24" }), "network effectiveness") +
+            stat_card("Total INVITEs", total_inv, "call attempts") +
+            stat_card("Answered", answered, "failed " + ("" + (failed))) +
+            "</div>" +
+            // Thresholds reference
+            "<div class=\"" + crd + " p-5\">" +
+            "<h2 class=\"text-sm font-semibold mb-4\">SLA Thresholds</h2>" +
+            "<div class=\"grid md:grid-cols-3 gap-4 text-sm\">" +
+            "<div class=\"space-y-2\">" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">ASR target</span><span class=\"mono text-[#34d399]\">&ge; 45%</span></div>" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">ASR warning</span><span class=\"mono text-[#fbbf24]\">&lt; 45%</span></div>" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">ASR critical</span><span class=\"mono text-[#f87171]\">&lt; 35%</span></div></div>" +
+            "<div class=\"space-y-2\">" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">NER target</span><span class=\"mono text-[#34d399]\">&ge; 98%</span></div>" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">5xx rate max</span><span class=\"mono text-[#fbbf24]\">&lt; 2%</span></div>" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">PDD target</span><span class=\"mono text-[#34d399]\">&lt; 3s</span></div></div>" +
+            "<div class=\"space-y-2\">" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">Reg failure rate</span><span class=\"mono text-[#fbbf24]\">&lt; 3%</span></div>" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">Packet loss</span><span class=\"mono text-[#fbbf24]\">&lt; 0.5%</span></div>" +
+            "<div class=\"flex justify-between\"><span class=\"text-[#71717a]\">Jitter</span><span class=\"mono text-[#fbbf24]\">&lt; 20ms</span></div></div>" +
+            "</div></div>"
+        web.html(layout("SLA", body, user))
+    })
+
+    // ---- admin routes ----
+
+    app.get("/admin/users", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") {
+            return web.html(layout("Forbidden", "<h1 class=\"text-xl font-bold\">Forbidden</h1><p class=\"text-[#a1a1aa] mt-2\">Admin role required.</p>", user))
+        }
+        web.html(layout("Users", admin_users_page(user, ""), user))
+    })
+
+    app.post("/admin/users", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        username := web.form_get(req, "username", "")
+        password := web.form_get(req, "password", "")
+        role := web.form_get(req, "role", "viewer")
+        err := create_user(username, password, role)
+        if err != "" {
+            return web.html(layout("Users", admin_users_page(user, "Error: " + err), user))
+        }
+        web.html(layout("Users", admin_users_page(user, "User " + username + " created."), user))
+    })
+
+    app.post("/admin/users/password", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        uid := web.form_get(req, "user_id", "")
+        pw := web.form_get(req, "new_password", "")
+        uid_int := int.parse(uid).unwrap_or(0)
+        if uid_int <= 0 {
+            return web.html(layout("Users", admin_users_page(user, "Error: invalid user ID"), user))
+        }
+        err := change_password(uid_int, pw)
+        if err != "" {
+            return web.html(layout("Users", admin_users_page(user, "Error: " + err), user))
+        }
+        web.html(layout("Users", admin_users_page(user, "Password updated for user #" + uid + "."), user))
+    })
+
+    app.post("/admin/users/:id/delete", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") { return web.status(403) }
+        id := int.parse(req.params["id"]).unwrap_or(0)
+        if id == (user["id"] ?? -1) {
+            return web.html(layout("Users", admin_users_page(user, "Error: cannot delete yourself"), user))
+        }
+        if id > 0 { delete_user_by_id(id) }
+        web.html(layout("Users", admin_users_page(user, "User deleted."), user))
+    })
+
+    say("zaman-web → http://127.0.0.1:3000  (core " + core_base() + ", auth " + (if auth_enabled() { "on" } else { "off (ZAMAN_AUTH=0)" }) + ")")
     app.listen(":3000")
 }

@@ -1,0 +1,32 @@
+[Unit]
+Description=Zaman SIP monitoring core
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zaman
+Group=zaman
+WorkingDirectory=/opt/zaman
+ExecStart=/opt/zaman/bin/zaman-core
+Restart=always
+RestartSec=5
+
+# Environment — override via /etc/zaman/core.env or drop-in
+EnvironmentFile=-/etc/zaman/core.env
+Environment=ZAMAN_SIP_HOST=0.0.0.0
+Environment=ZAMAN_DB=/opt/zaman/data/zaman.db
+Environment=ZAMAN_PROBE=0
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/zaman/data
+PrivateTmp=yes
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

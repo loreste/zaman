@@ -1,0 +1,28 @@
+[Unit]
+Description=Zaman SIP monitoring dashboard
+After=zaman-core.service
+Wants=zaman-core.service
+
+[Service]
+Type=simple
+User=zaman
+Group=zaman
+WorkingDirectory=/opt/zaman
+ExecStart=/usr/local/bin/weft run /opt/zaman/web/main.weft
+Restart=always
+RestartSec=5
+
+# Environment — override via /etc/zaman/web.env or drop-in
+EnvironmentFile=-/etc/zaman/web.env
+Environment=ZAMAN_CORE=http://127.0.0.1:9090
+Environment=ZAMAN_DATA_DIR=/opt/zaman/data
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/zaman/data
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

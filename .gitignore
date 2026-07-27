@@ -1,14 +1,25 @@
+# Build output
 bin/
 .mako/
-.claude/
-.tokensave/
+
+# Runtime data (DB, users, recordings, alerts, audit)
 data/
 *.db
 *.db-wal
 *.db-shm
+
+# TLS certificates
+*.crt
+*.key
+
+# IDE / tools
+.claude/
+.tokensave/
 .DS_Store
 vendor/
 weft.lock
 *.log
-*.crt
-*.key
+
+# Temporary
+/tmp/
+*.pcap
