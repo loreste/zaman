@@ -1,0 +1,555 @@
+// Zaman dashboard — HTMX + Tailwind 4 over zaman-core.
+//   ZAMAN_CORE=http://127.0.0.1:9090 weft run web/main.weft
+
+fn core_base() {
+    env.get("ZAMAN_CORE") ?? "http://127.0.0.1:9090"
+}
+
+fn api_headers() {
+    key := env.get("ZAMAN_API_KEY") ?? ""
+    if key == "" {
+        {}
+    } else {
+        {"headers": {"X-API-Key": key}}
+    }
+}
+
+fn h(s) {
+    html.escape(("" + (s ?? "")))
+}
+
+fn layout(title, body) {
+    cdn := web.htmx_cdn()
+    base := h(core_base())
+    "<!doctype html><html lang=\"en\" class=\"h-full\"><head><meta charset=\"utf-8\"/>" +
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>" +
+    "<title>" + h(title) + " · Zaman</title>" + cdn +
+    "<script src=\"https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4\"></script>" +
+    "<style type=\"text/tailwindcss\">" +
+    "@theme{--color-ink:#e8eefc;--color-muted:#8fa3c1;--color-panel:#0f1628;--color-line:#1e2d44;--color-bg:#070b14;--color-accent:#6ea8fe;--color-ok:#3ddc97;--color-warn:#ffc857;--color-bad:#ff6b6b;}" +
+    ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}" +
+    ".ladder-line{border-left:2px dashed #1e2d44;margin-left:1rem;padding-left:1rem}" +
+    "</style></head>" +
+    "<body class=\"min-h-full bg-[#070b14] text-[#e8eefc] font-sans\">" +
+    "<div class=\"min-h-screen grid grid-cols-1 lg:grid-cols-[240px_1fr]\">" +
+    "<aside class=\"border-b lg:border-b-0 lg:border-r border-[#1e2d44] bg-[rgba(10,14,26,.95)] p-4 lg:sticky lg:top-0 lg:h-screen\">" +
+    "<div class=\"flex items-center gap-3 mb-6 px-1\">" +
+    "<div class=\"w-10 h-10 rounded-xl bg-gradient-to-br from-[#6ea8fe] to-[#3ddc97] grid place-items-center font-extrabold text-[#041018]\">Z</div>" +
+    "<div><div class=\"font-bold leading-tight\">Zaman</div>" +
+    "<div class=\"text-xs text-[#8fa3c1]\">SIP monitor · echo · metrics</div></div></div>" +
+    "<nav class=\"flex flex-col gap-1 text-sm\">" +
+    nav_link("/", "Overview") +
+    nav_link("/messages", "Messages") +
+    nav_link("/calls", "Call ladder") +
+    nav_link("/probe", "Echo probe") +
+    nav_link("/metrics", "Metrics") +
+    nav_link("/report", "Reports") +
+    "</nav>" +
+    "<div class=\"mt-8 pt-4 border-t border-[#1e2d44] text-xs text-[#8fa3c1] space-y-1\">" +
+    "<div>Core: <span class=\"mono text-[#e8eefc]\">" + base + "</span></div>" +
+    "<div id=\"core-status\" hx-get=\"/partials/status\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\">checking…</div>" +
+    "</div></aside>" +
+    "<main class=\"p-5 md:p-8 max-w-6xl w-full\">" + body + "</main></div></body></html>"
+}
+
+fn nav_link(href, label) {
+    "<a href=\"" + href + "\" class=\"rounded-lg px-3 py-2 hover:bg-[#141e33] text-[#8fa3c1] hover:text-[#e8eefc]\" hx-boost=\"true\">" + label + "</a>"
+}
+
+fn stat_card(label, value, sub) {
+    "<div class=\"rounded-2xl border border-[#1e2d44] bg-gradient-to-b from-[rgba(20,30,51,.9)] to-[#0f1628] p-4 shadow-lg\">" +
+    "<div class=\"text-xs text-[#8fa3c1] mb-1\">" + h(label) + "</div>" +
+    "<div class=\"text-2xl font-bold tracking-tight mono\">" + h(value) + "</div>" +
+    "<div class=\"text-[11px] text-[#8fa3c1] mt-1\">" + h(sub) + "</div></div>"
+}
+
+fn method_badge(method, status, kind) {
+    mut label := ("" + (method ?? ""))
+    mut cls := "bg-[rgba(110,168,254,.15)] text-[#6ea8fe] border-[rgba(110,168,254,.3)]"
+    if kind == "response" {
+        label = ("" + (status ?? 0))
+        st := int.parse(status ?? 0).unwrap_or(0)
+        if st >= 200 && st < 300 {
+            cls = "bg-[rgba(61,220,151,.12)] text-[#3ddc97] border-[rgba(61,220,151,.3)]"
+        } else if st >= 400 {
+            cls = "bg-[rgba(255,107,107,.12)] text-[#ff6b6b] border-[rgba(255,107,107,.3)]"
+        } else {
+            cls = "bg-[rgba(255,200,87,.12)] text-[#ffc857] border-[rgba(255,200,87,.3)]"
+        }
+    } else if method == "INVITE" {
+        cls = "bg-[rgba(167,139,250,.15)] text-[#c4b5fd] border-[rgba(167,139,250,.3)]"
+    } else if method == "BYE" || method == "CANCEL" {
+        cls = "bg-[rgba(255,107,107,.12)] text-[#ff6b6b] border-[rgba(255,107,107,.3)]"
+    } else if method == "OPTIONS" || method == "REGISTER" {
+        cls = "bg-[rgba(61,220,151,.12)] text-[#3ddc97] border-[rgba(61,220,151,.3)]"
+    }
+    "<span class=\"inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border " + cls + " mono\">" + h(label) + "</span>"
+}
+
+fn msg_row(m) {
+    id := m["id"] ?? 0
+    method := m["method"] ?? ""
+    status := m["status"] ?? 0
+    kind := m["kind"] ?? ""
+    call_id := m["call_id"] ?? ""
+    src := m["src"] ?? ""
+    dst := m["dst"] ?? ""
+    transport := m["transport"] ?? ""
+    proto := m["proto"] ?? ""
+    agent := m["agent"] ?? ""
+    from := m["from"] ?? ""
+    badge := method_badge(method, status, kind)
+    cid := h(call_id)
+    mut xport := h(transport)
+    if proto != "" && proto != "sip" && proto != "unknown" {
+        xport = xport + "/" + h(proto)
+    }
+    mut src_s := h(src)
+    if dst != "" {
+        src_s = src_s + " → " + h(dst)
+    }
+    "<tr class=\"hover:bg-white/[0.02]\">" +
+    "<td class=\"py-2 px-3 mono text-xs text-[#8fa3c1]\">" + ("" + (id)) + "</td>" +
+    "<td class=\"py-2 px-3\">" + badge + "</td>" +
+    "<td class=\"py-2 px-3 mono text-xs max-w-[14rem] truncate\" title=\"" + cid + "\">" + cid + "</td>" +
+    "<td class=\"py-2 px-3 mono text-xs text-[#8fa3c1] max-w-[12rem] truncate\" title=\"" + src_s + "\">" + src_s + "</td>" +
+    "<td class=\"py-2 px-3 text-xs\"><span class=\"px-1.5 py-0.5 rounded border border-[#1e2d44] text-[#8fa3c1]\">" + xport + "</span>" +
+    (if agent != "" { " <span class=\"text-[10px] text-[#8fa3c1]\">" + h(agent) + "</span>" } else { "" }) +
+    "</td>" +
+    "<td class=\"py-2 px-3 text-xs max-w-[12rem] truncate text-[#8fa3c1]\">" + h(from) + "</td>" +
+    "<td class=\"py-2 px-3 text-xs\">" +
+    "<a class=\"text-[#6ea8fe] hover:underline\" href=\"/messages/" + ("" + (id)) + "\" hx-boost=\"true\">view</a> · " +
+    "<a class=\"text-[#6ea8fe] hover:underline\" href=\"/calls?call_id=" + cid + "\" hx-boost=\"true\">ladder</a>" +
+    "</td></tr>"
+}
+
+fn messages_table(items) {
+    mut rows := ""
+    if items != null {
+        for m in items {
+            rows = rows + msg_row(m)
+        }
+    }
+    if rows == "" {
+        rows = "<tr><td colspan=\"7\" class=\"py-8 text-center text-[#8fa3c1] text-sm\">No messages yet — send SIP to the core or run a probe.</td></tr>"
+    }
+    "<div class=\"overflow-x-auto rounded-2xl border border-[#1e2d44] bg-[#0f1628]\">" +
+    "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#8fa3c1] border-b border-[#1e2d44]\">" +
+    "<th class=\"py-2 px-3 font-semibold\">ID</th><th class=\"py-2 px-3 font-semibold\">Method</th>" +
+    "<th class=\"py-2 px-3 font-semibold\">Call-ID</th><th class=\"py-2 px-3 font-semibold\">Src</th>" +
+    "<th class=\"py-2 px-3 font-semibold\">Transport</th><th class=\"py-2 px-3 font-semibold\">From</th>" +
+    "<th class=\"py-2 px-3 font-semibold\"></th></tr></thead>" +
+    "<tbody class=\"divide-y divide-[#1e2d44]\">" + rows + "</tbody></table></div>"
+}
+
+fn empty_metrics() {
+    {
+        "msgs_total": 0, "requests": 0, "responses": 0, "echoes": 0, "hep_total": 0,
+        "probe_rtt_ms": 0, "probes_ok": 0, "probes_fail": 0, "uptime_ms": 0, "ring_idx": 0,
+        "methods": {"INVITE": 0, "OPTIONS": 0, "REGISTER": 0, "BYE": 0, "ACK": 0, "INFO": 0, "MESSAGE": 0, "UNKNOWN": 0}
+    }
+}
+
+fn fetch_metrics() {
+    r := http.get(core_base() + "/api/metrics", api_headers())
+    if !r.ok { return empty_metrics() }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { empty_metrics() }
+}
+
+fn fetch_messages(limit, call_id) {
+    mut path := core_base() + "/api/messages?limit=" + ("" + (limit))
+    if call_id != "" {
+        path = path + "&call_id=" + call_id
+    }
+    r := http.get(path, api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_message(id) {
+    r := http.get(core_base() + "/api/messages/" + ("" + (id)), api_headers())
+    if !r.ok { return null }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { null }
+}
+
+fn fetch_health() {
+    r := http.get_json(core_base() + "/api/health")
+    if r.ok { r.value } else { {"ok": false} }
+}
+
+fn fetch_report() {
+    r := http.get(core_base() + "/api/report", api_headers())
+    if !r.ok { return {"total": 0, "methods": {}, "transports": {}} }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { {"total": 0, "methods": {}, "transports": {}} }
+}
+
+fn fetch_top_calls() {
+    r := http.get(core_base() + "/api/report/top-calls?limit=15", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_daily() {
+    r := http.get(core_base() + "/api/report/daily?limit=40", api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn n(m, key) {
+    v := m[key]
+    if v == null { 0 } else { v }
+}
+
+fn overview_body() {
+    m := fetch_metrics()
+    items := fetch_messages(12, "")
+    up_s := n(m, "uptime_ms") / 1000
+    mut methods := m["methods"]
+    if methods == null {
+        methods = {"INVITE": 0, "OPTIONS": 0, "REGISTER": 0, "BYE": 0, "ACK": 0, "INFO": 0, "MESSAGE": 0}
+    }
+    bar := viz.bar({
+        "INVITE": methods["INVITE"] ?? 0,
+        "OPTIONS": methods["OPTIONS"] ?? 0,
+        "REGISTER": methods["REGISTER"] ?? 0,
+        "BYE": methods["BYE"] ?? 0,
+        "ACK": methods["ACK"] ?? 0,
+        "INFO": methods["INFO"] ?? 0,
+        "MESSAGE": methods["MESSAGE"] ?? 0,
+    }, {"title": "SIP methods", "width": 560, "height": 220, "colors": ["#6ea8fe", "#3ddc97", "#c4b5fd", "#ff6b6b", "#ffc857", "#94a3b8", "#38bdf8"]})
+
+    cards := "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
+        stat_card("Messages", n(m, "msgs_total"), "ring idx " + ("" + (n(m, "ring_idx")))) +
+        stat_card("Requests", n(m, "requests"), "echoes " + ("" + (n(m, "echoes")))) +
+        stat_card("HEP", n(m, "hep_total"), "sip " + ("" + (n(m, "hep_sip"))) + " · auth_fail " + ("" + (n(m, "hep_auth_fail")))) +
+        stat_card("Probe RTT", ("" + (n(m, "probe_rtt_ms"))) + " ms", "ok " + ("" + (n(m, "probes_ok"))) + " · fail " + ("" + (n(m, "probes_fail")))) +
+        "</div>"
+
+    "<div class=\"flex items-end justify-between gap-3 mb-6\">" +
+    "<div><h1 class=\"text-2xl font-bold tracking-tight\">Overview</h1>" +
+    "<p class=\"text-sm text-[#8fa3c1] mt-1\">Capture · echo · HEP · Prometheus metrics — one stack.</p></div>" +
+    "<div class=\"text-xs text-[#8fa3c1] mono\">uptime " + ("" + (up_s)) + "s</div></div>" +
+    cards +
+    "<div class=\"grid lg:grid-cols-2 gap-4 mb-6\">" +
+    "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4 overflow-x-auto\">" +
+    "<h2 class=\"text-sm font-semibold mb-3\">Method mix</h2><div>" + bar.html + "</div></div>" +
+    "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" +
+    "<h2 class=\"text-sm font-semibold mb-3\">What Zaman integrates</h2>" +
+    "<ul class=\"text-sm text-[#8fa3c1] space-y-2\">" +
+    "<li><span class=\"text-[#3ddc97] font-semibold\">Homer-like</span> SIP/HEP capture + call search</li>" +
+    "<li><span class=\"text-[#6ea8fe] font-semibold\">Prometheus-like</span> <code class=\"mono\">/metrics</code> on the core</li>" +
+    "<li><span class=\"text-[#ffc857] font-semibold\">Grafana-like</span> live HTMX dashboard</li>" +
+    "<li><span class=\"text-[#c4b5fd] font-semibold\">Echo probes</span> active OPTIONS RTT checks</li>" +
+    "</ul>" +
+    "<div class=\"mt-4 flex flex-wrap gap-2\">" +
+    "<a href=\"/probe\" class=\"rounded-lg px-3 py-2 text-sm bg-gradient-to-br from-[#3b82f6] to-[#2563eb] text-white\" hx-boost=\"true\">Run probe</a>" +
+    "<a href=\"/messages\" class=\"rounded-lg px-3 py-2 text-sm border border-[#1e2d44] bg-[#141e33]\" hx-boost=\"true\">Browse messages</a>" +
+    "</div></div></div>" +
+    "<div class=\"flex items-center justify-between mb-3\">" +
+    "<h2 class=\"text-sm font-semibold\">Live messages</h2>" +
+    "<span class=\"text-[11px] text-[#8fa3c1]\">auto-refresh 3s</span></div>" +
+    "<div id=\"live-msgs\" hx-get=\"/partials/messages?limit=12\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
+    messages_table(items) + "</div>"
+}
+
+fn ladder_html(call_id) {
+    items := fetch_messages(100, call_id)
+    mut ordered := []
+    mut i := len(items) - 1
+    while i >= 0 {
+        ordered = ordered + [items[i]]
+        i = i - 1
+    }
+    mut steps := ""
+    for m in ordered {
+        badge := method_badge(m["method"] ?? "", m["status"] ?? 0, m["kind"] ?? "")
+        id := m["id"] ?? 0
+        steps = steps +
+            "<div class=\"relative pl-6 pb-6 ladder-line\">" +
+            "<div class=\"absolute left-[-5px] top-1 w-2.5 h-2.5 rounded-full bg-[#6ea8fe]\"></div>" +
+            "<div class=\"flex flex-wrap items-center gap-2 mb-1\">" + badge +
+            "<span class=\"text-xs text-[#8fa3c1] mono\">#" + ("" + (id)) + "</span>" +
+            "<span class=\"text-xs text-[#8fa3c1]\">" + h(m["transport"] ?? "") + "</span>" +
+            "<span class=\"text-xs mono text-[#8fa3c1]\">" + h(m["src"] ?? "") + "</span></div>" +
+            "<div class=\"text-xs text-[#8fa3c1] truncate\">" + h(m["from"] ?? "") + " → " + h(m["to"] ?? "") + "</div>" +
+            "<a href=\"/messages/" + ("" + (id)) + "\" class=\"text-[11px] text-[#6ea8fe] hover:underline\" hx-boost=\"true\">detail</a></div>"
+    }
+    if steps == "" {
+        steps = "<p class=\"text-sm text-[#8fa3c1]\">No messages for this Call-ID.</p>"
+    }
+    "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-5\">" +
+    "<div class=\"text-xs text-[#8fa3c1] mb-1\">Call-ID</div>" +
+    "<div class=\"mono text-sm mb-6 break-all\">" + h(call_id) + "</div>" + steps + "</div>"
+}
+
+fn main {
+    app := web.app()
+
+    app.get("/", fn(req) {
+        web.html(layout("Overview", overview_body()))
+    })
+
+    app.get("/partials/status", fn(req) {
+        m := fetch_health()
+        if m["ok"] == true {
+            web.htmx("<span class=\"text-[#3ddc97]\">● core up</span>")
+        } else {
+            web.htmx("<span class=\"text-[#ff6b6b]\">● core down</span>")
+        }
+    })
+
+    app.get("/partials/messages", fn(req) {
+        mut lim := int.parse(req.query_map["limit"] ?? "20").unwrap_or(0)
+        if lim <= 0 { lim = 20 }
+        cid := req.query_map["call_id"] ?? ""
+        web.htmx(messages_table(fetch_messages(lim, cid)))
+    })
+
+    app.get("/messages", fn(req) {
+        cid := req.query_map["call_id"] ?? ""
+        items := fetch_messages(50, cid)
+        cid_h := h(cid)
+        mut filter := ""
+        if cid != "" {
+            filter = "<p class=\"text-sm text-[#8fa3c1] mb-3\">Filtered by Call-ID <span class=\"mono\">" + cid_h + "</span></p>"
+        }
+        body := "<div class=\"mb-4\"><h1 class=\"text-2xl font-bold\">Messages</h1>" +
+            "<p class=\"text-sm text-[#8fa3c1] mt-1\">Live SIP/HEP capture ring from zaman-core.</p></div>" + filter +
+            "<form class=\"flex flex-wrap gap-2 mb-4\" method=\"get\" action=\"/messages\">" +
+            "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"filter Call-ID\" class=\"rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 text-sm mono min-w-[16rem]\"/>" +
+            "<button class=\"rounded-lg px-3 py-2 text-sm border border-[#1e2d44] bg-[#141e33]\">Filter</button>" +
+            "<a href=\"/messages\" class=\"rounded-lg px-3 py-2 text-sm text-[#8fa3c1]\" hx-boost=\"true\">Clear</a></form>" +
+            "<div id=\"msg-table\" hx-get=\"/partials/messages?limit=50&call_id=" + cid_h + "\" hx-trigger=\"every 4s\" hx-swap=\"innerHTML\">" +
+            messages_table(items) + "</div>"
+        web.html(layout("Messages", body))
+    })
+
+    app.get("/messages/:id", fn(req) {
+        id := req.params["id"]
+        m := fetch_message(id)
+        if m == null {
+            web.html(layout("Not found", "<h1 class=\"text-xl font-bold\">Message not found</h1><p class=\"text-[#8fa3c1] mt-2\">id=" + h(id) + "</p>"))
+        } else {
+            badge := method_badge(m["method"] ?? "", m["status"] ?? 0, m["kind"] ?? "")
+            mut raw_txt := ""
+            dec := base64.decode(m["raw_b64"] ?? "")
+            if dec.ok {
+                raw_txt = h(dec.value)
+            } else {
+                raw_txt = h(m["raw_b64"] ?? "")
+            }
+            cid_h := h(m["call_id"] ?? "")
+            body := "<a href=\"/messages\" class=\"text-sm text-[#6ea8fe] hover:underline\" hx-boost=\"true\">← messages</a>" +
+                "<div class=\"flex items-center gap-3 mt-3 mb-6\"><h1 class=\"text-2xl font-bold\">Message #" + h(id) + "</h1>" + badge + "</div>" +
+                "<div class=\"grid md:grid-cols-2 gap-3 mb-4 text-sm\">" +
+                "<div class=\"rounded-xl border border-[#1e2d44] bg-[#0f1628] p-4 space-y-1\">" +
+                "<div><span class=\"text-[#8fa3c1]\">Call-ID</span> <span class=\"mono\">" + cid_h + "</span></div>" +
+                "<div><span class=\"text-[#8fa3c1]\">Src</span> <span class=\"mono\">" + h(m["src"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#8fa3c1]\">Dst</span> <span class=\"mono\">" + h(m["dst"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#8fa3c1]\">Transport</span> " + h(m["transport"] ?? "") +
+                " · " + h(m["proto"] ?? "sip") + "</div>" +
+                "<div><span class=\"text-[#8fa3c1]\">Agent</span> " + h(m["agent"] ?? "") +
+                " <span class=\"mono text-[10px] text-[#8fa3c1]\">#" + ("" + (m["hep_node_id"] ?? 0)) + "</span></div></div>" +
+                "<div class=\"rounded-xl border border-[#1e2d44] bg-[#0f1628] p-4 space-y-1\">" +
+                "<div><span class=\"text-[#8fa3c1]\">From</span> <span class=\"mono text-xs\">" + h(m["from"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#8fa3c1]\">To</span> <span class=\"mono text-xs\">" + h(m["to"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#8fa3c1]\">CSeq</span> <span class=\"mono\">" + h(m["cseq"] ?? "") + "</span></div>" +
+                "<div><span class=\"text-[#8fa3c1]\">R-URI</span> <span class=\"mono text-xs\">" + h(m["ruri"] ?? "") + "</span></div></div></div>" +
+                "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0a1020] p-4\">" +
+                "<div class=\"text-xs text-[#8fa3c1] mb-2\">Raw SIP</div>" +
+                "<pre class=\"mono text-xs whitespace-pre-wrap break-all text-[#c7d2fe]\">" + raw_txt + "</pre></div>" +
+                "<div class=\"mt-4\"><a class=\"text-[#6ea8fe] text-sm hover:underline\" href=\"/calls?call_id=" + cid_h + "\" hx-boost=\"true\">Open call ladder →</a></div>"
+            web.html(layout("Message " + ("" + (id)), body))
+        }
+    })
+
+    app.get("/calls", fn(req) {
+        cid := req.query_map["call_id"] ?? ""
+        mut ladder := "<p class=\"text-sm text-[#8fa3c1]\">Enter a Call-ID to render the signaling ladder.</p>"
+        if cid != "" {
+            ladder = ladder_html(cid)
+        }
+        cid_h := h(cid)
+        body := "<h1 class=\"text-2xl font-bold mb-1\">Call ladder</h1>" +
+            "<p class=\"text-sm text-[#8fa3c1] mb-4\">Group captured SIP by Call-ID — Homer-style flow without a separate stack.</p>" +
+            "<form class=\"flex flex-wrap gap-2 mb-6\" method=\"get\" action=\"/calls\">" +
+            "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Call-ID\" required class=\"rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 text-sm mono min-w-[20rem]\"/>" +
+            "<button class=\"rounded-lg px-4 py-2 text-sm bg-gradient-to-br from-[#3b82f6] to-[#2563eb] text-white\">Show ladder</button></form>" +
+            ladder
+        web.html(layout("Calls", body))
+    })
+
+    app.get("/probe", fn(req) {
+        body := "<h1 class=\"text-2xl font-bold mb-1\">Echo probe</h1>" +
+            "<p class=\"text-sm text-[#8fa3c1] mb-6\">Active OPTIONS RTT. Core must set <code class=\"mono\">ZAMAN_PROBE=1</code> (off by default). Still unauthenticated — lab only.</p>" +
+            "<form hx-post=\"/probe\" hx-target=\"#probe-result\" hx-swap=\"innerHTML\" class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-5 grid md:grid-cols-3 gap-3 max-w-3xl\">" +
+            "<label class=\"text-sm block\"><span class=\"text-[#8fa3c1] text-xs\">Host</span>" +
+            "<input name=\"host\" value=\"127.0.0.1\" class=\"mt-1 w-full rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 mono text-sm\"/></label>" +
+            "<label class=\"text-sm block\"><span class=\"text-[#8fa3c1] text-xs\">Port</span>" +
+            "<input name=\"port\" value=\"5060\" class=\"mt-1 w-full rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 mono text-sm\"/></label>" +
+            "<label class=\"text-sm block\"><span class=\"text-[#8fa3c1] text-xs\">Timeout (ms)</span>" +
+            "<input name=\"timeout_ms\" value=\"2000\" class=\"mt-1 w-full rounded-lg bg-[#070b14] border border-[#1e2d44] px-3 py-2 mono text-sm\"/></label>" +
+            "<div class=\"md:col-span-3\"><button type=\"submit\" class=\"rounded-lg px-4 py-2 text-sm bg-gradient-to-br from-[#3b82f6] to-[#2563eb] text-white\">Probe OPTIONS</button></div></form>" +
+            "<div id=\"probe-result\" class=\"mt-4 max-w-3xl\"></div>"
+        web.html(layout("Probe", body))
+    })
+
+    app.post("/probe", fn(req) {
+        host := web.form_get(req, "host", "127.0.0.1")
+        port := int.parse(web.form_get(req, "port", "5060")).unwrap_or(0)
+        wait_ms := int.parse(web.form_get(req, "timeout_ms", "2000")).unwrap_or(0)
+        payload := json.stringify({"host": host, "port": port, "timeout_ms": wait_ms})
+        mut hdrs := {"Content-Type": "application/json"}
+        key := env.get("ZAMAN_API_KEY") ?? ""
+        if key != "" {
+            hdrs["X-API-Key"] = key
+        }
+        resp := http.post(core_base() + "/api/probe", payload, {"headers": hdrs})
+        mut data := {"ok": false, "error": "request failed"}
+        if resp.ok {
+            parsed := json.parse(resp.value.body)
+            if parsed.ok {
+                data = parsed.value
+            } else {
+                data = {"ok": false, "error": ("" + (resp.value.body))}
+            }
+        } else {
+            data = {"ok": false, "error": ("" + (resp.err.message ?? resp.err))}
+        }
+
+        if data["ok"] == true {
+            st := data["status"] ?? 0
+            rtt := data["rtt_ms"] ?? 0
+            hp := h(("" + (data["host"] ?? host)))
+            prt := data["port"] ?? port
+            cid := h(("" + (data["call_id"] ?? "")))
+            web.htmx(
+                "<div class=\"rounded-2xl border border-[rgba(61,220,151,.35)] bg-[rgba(61,220,151,.08)] p-4\">" +
+                "<div class=\"text-[#3ddc97] font-semibold mb-2\">Probe OK</div>" +
+                "<div class=\"grid grid-cols-2 gap-2 text-sm mono\">" +
+                "<div>status <span class=\"text-[#e8eefc]\">" + ("" + (st)) + "</span></div>" +
+                "<div>rtt <span class=\"text-[#e8eefc]\">" + ("" + (rtt)) + " ms</span></div>" +
+                "<div class=\"col-span-2 text-xs text-[#8fa3c1]\">" + hp + ":" + ("" + (prt)) + "</div>" +
+                "<div class=\"col-span-2 text-xs break-all text-[#8fa3c1]\">" + cid + "</div></div></div>"
+            )
+        } else {
+            err := h(("" + (data["error"] ?? "probe failed")))
+            web.htmx(
+                "<div class=\"rounded-2xl border border-[rgba(255,107,107,.35)] bg-[rgba(255,107,107,.08)] p-4\">" +
+                "<div class=\"text-[#ff6b6b] font-semibold mb-1\">Probe failed</div>" +
+                "<div class=\"text-sm mono\">" + err + "</div></div>"
+            )
+        }
+    })
+
+    app.get("/metrics", fn(req) {
+        m := fetch_metrics()
+        mut methods := m["methods"]
+        if methods == null { methods = {} }
+        pie := viz.pie({
+            "INVITE": methods["INVITE"] ?? 0,
+            "OPTIONS": methods["OPTIONS"] ?? 0,
+            "REGISTER": methods["REGISTER"] ?? 0,
+            "other": (methods["BYE"] ?? 0) + (methods["ACK"] ?? 0) + (methods["INFO"] ?? 0) + (methods["MESSAGE"] ?? 0) + (methods["UNKNOWN"] ?? 0),
+        }, {"title": "Share", "width": 420, "height": 280})
+        prom_url := h(core_base() + "/metrics")
+        body := "<h1 class=\"text-2xl font-bold mb-1\">Metrics</h1>" +
+            "<p class=\"text-sm text-[#8fa3c1] mb-6\">Integrated counters — also scrape Prometheus text at the core.</p>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
+            stat_card("msgs", n(m, "msgs_total"), "total captured") +
+            stat_card("requests", n(m, "requests"), "SIP requests") +
+            stat_card("echoes", n(m, "echoes"), "auto replies") +
+            stat_card("HEP", n(m, "hep_total"), "sip " + ("" + (n(m, "hep_sip"))) + " · rtcp " + ("" + (n(m, "hep_rtcp")))) +
+            "</div>" +
+            "<div class=\"grid lg:grid-cols-2 gap-4\">" +
+            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" + pie.html + "</div>" +
+            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4 text-sm space-y-3\">" +
+            "<h2 class=\"font-semibold\">Prometheus endpoint</h2>" +
+            "<p class=\"text-[#8fa3c1]\">Point any scraper at:</p>" +
+            "<code class=\"block mono text-xs bg-[#070b14] border border-[#1e2d44] rounded-lg p-3 break-all\">" + prom_url + "</code>" +
+            "<pre class=\"mono text-xs text-[#8fa3c1] bg-[#070b14] border border-[#1e2d44] rounded-lg p-3 overflow-x-auto\">scrape_configs:\n  - job_name: zaman\n    static_configs:\n      - targets: ['127.0.0.1:9090']</pre>" +
+            "</div></div>"
+        web.html(layout("Metrics", body))
+    })
+
+    app.get("/report", fn(req) {
+        rep := fetch_report()
+        tops := fetch_top_calls()
+        daily := fetch_daily()
+        mut methods := rep["methods"]
+        if methods == null { methods = {} }
+        bar := viz.bar({
+            "OPTIONS": methods["OPTIONS"] ?? 0,
+            "INVITE": methods["INVITE"] ?? 0,
+            "REGISTER": methods["REGISTER"] ?? 0,
+            "BYE": methods["BYE"] ?? 0,
+            "ACK": methods["ACK"] ?? 0,
+        }, {"title": "Methods (DB)", "width": 520, "height": 220, "colors": ["#3ddc97", "#c4b5fd", "#6ea8fe", "#ff6b6b", "#ffc857"]})
+
+        mut top_rows := ""
+        for row in tops {
+            cid := h(row["call_id"] ?? "")
+            top_rows = top_rows + "<tr class=\"hover:bg-white/[0.02]\">" +
+                "<td class=\"py-2 px-3 mono text-xs max-w-[18rem] truncate\">" + cid + "</td>" +
+                "<td class=\"py-2 px-3 mono text-sm\">" + ("" + (row["messages"] ?? 0)) + "</td>" +
+                "<td class=\"py-2 px-3 text-xs\"><a class=\"text-[#6ea8fe]\" href=\"/calls?call_id=" + cid + "\" hx-boost=\"true\">ladder</a></td></tr>"
+        }
+        if top_rows == "" {
+            top_rows = "<tr><td colspan=\"3\" class=\"py-6 text-center text-[#8fa3c1] text-sm\">No Call-IDs in database yet.</td></tr>"
+        }
+
+        mut day_rows := ""
+        for row in daily {
+            day_rows = day_rows + "<tr class=\"hover:bg-white/[0.02]\">" +
+                "<td class=\"py-2 px-3 mono text-xs\">" + h(row["day"] ?? "") + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs\">" + h(row["method"] ?? "") + "</td>" +
+                "<td class=\"py-2 px-3 mono text-xs\">" + h(row["transport"] ?? "") + "</td>" +
+                "<td class=\"py-2 px-3 mono text-sm\">" + ("" + (row["count"] ?? 0)) + "</td></tr>"
+        }
+        if day_rows == "" {
+            day_rows = "<tr><td colspan=\"4\" class=\"py-6 text-center text-[#8fa3c1] text-sm\">No daily rollups yet.</td></tr>"
+        }
+
+        mut trs := rep["transports"]
+        if trs == null { trs = {} }
+        pie := viz.pie({
+            "UDP": trs["UDP"] ?? 0,
+            "HEP3": trs["HEP3"] ?? 0,
+            "HEP3/TCP": trs["HEP3/TCP"] ?? 0,
+            "HEP3/TLS": trs["HEP3/TLS"] ?? 0,
+        }, {"title": "Transport", "width": 420, "height": 260})
+
+        body := "<h1 class=\"text-2xl font-bold mb-1\">Reports</h1>" +
+            "<p class=\"text-sm text-[#8fa3c1] mb-6\">Durable history from SQLite (" + h(rep["db"] ?? "data/zaman.db") + ").</p>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-4 gap-3 mb-6\">" +
+            stat_card("Total", rep["total"] ?? 0, "stored messages") +
+            stat_card("Call-IDs", rep["unique_call_ids"] ?? 0, "distinct dialogs") +
+            stat_card("HEP", rep["hep"] ?? 0, "encapsulated") +
+            stat_card("SIP/UDP", rep["sip_udp"] ?? 0, "native capture") +
+            "</div>" +
+            "<div class=\"grid lg:grid-cols-2 gap-4 mb-6\">" +
+            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" + bar.html + "</div>" +
+            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] p-4\">" + pie.html + "</div></div>" +
+            "<div class=\"grid lg:grid-cols-2 gap-4\">" +
+            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] overflow-x-auto\">" +
+            "<div class=\"p-4 text-sm font-semibold border-b border-[#1e2d44]\">Top Call-IDs</div>" +
+            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase text-[#8fa3c1]\">" +
+            "<th class=\"py-2 px-3\">Call-ID</th><th class=\"py-2 px-3\">Msgs</th><th class=\"py-2 px-3\"></th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e2d44]\">" + top_rows + "</tbody></table></div>" +
+            "<div class=\"rounded-2xl border border-[#1e2d44] bg-[#0f1628] overflow-x-auto\">" +
+            "<div class=\"p-4 text-sm font-semibold border-b border-[#1e2d44]\">Daily rollup</div>" +
+            "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase text-[#8fa3c1]\">" +
+            "<th class=\"py-2 px-3\">Day</th><th class=\"py-2 px-3\">Method</th><th class=\"py-2 px-3\">Transport</th><th class=\"py-2 px-3\">Count</th></tr></thead>" +
+            "<tbody class=\"divide-y divide-[#1e2d44]\">" + day_rows + "</tbody></table></div></div>"
+        web.html(layout("Reports", body))
+    })
+
+    say("zaman-web → http://127.0.0.1:3000  (core " + core_base() + ")")
+    app.listen(":3000")
+}

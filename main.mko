@@ -1,0 +1,11 @@
+// Zaman entry redirect — real binary is core/main.mko
+//   mako run core/main.mko
+//   make build
+
+fn main() {
+    print("Zaman: build the core with:")
+    print("  mako build --release core/main.mko -o bin/zaman-core")
+    print("  ./bin/zaman-core [sip_port] [hep_port] [api_port]")
+    print("Dashboard:")
+    print("  ZAMAN_CORE=http://127.0.0.1:9090 weft run web/main.weft")
+}

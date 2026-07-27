@@ -1,0 +1,6 @@
+# Mako package manifest
+name = "zaman"
+version = "0.1.0"
+
+[dependencies]
+# "helper" = { path = "../helper", version = "0.1.0" }

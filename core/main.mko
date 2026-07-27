@@ -1,0 +1,1917 @@
+// Zaman core — integrated SIP capture, echo, HEP, metrics, and JSON API.
+// Ports (defaults): SIP 5060/udp · HEP 9060/udp · API 9090/tcp
+//
+//   mako run core/main.mko
+//   mako build --release core/main.mko -o bin/zaman-core
+
+const RING = 512
+const VERSION = "0.1.0"
+// Capture enqueue buffer — backpressures SIP/HEP workers when the DB lags.
+const DB_CH_CAP = 1024
+// Shutdown sentinel for the DB writer (records always start with '{').
+const DB_DONE = "__ZAMAN_DB_DONE__"
+
+// ---- small helpers ----
+
+fn jesc(s: string) -> string {
+    // Full-ish JSON string escape (controls → \u00XX). SIP headers are untrusted.
+    let mut o = ""
+    let mut i = 0
+    let n = len(s)
+    while i < n {
+        let b = int(s[i])
+        if b == 34 {
+            o = o + "\\\""
+        } else if b == 92 {
+            o = o + "\\\\"
+        } else if b == 8 {
+            o = o + "\\b"
+        } else if b == 12 {
+            o = o + "\\f"
+        } else if b == 10 {
+            o = o + "\\n"
+        } else if b == 13 {
+            o = o + "\\r"
+        } else if b == 9 {
+            o = o + "\\t"
+        } else if b < 32 {
+            let hi = b / 16
+            let lo = b % 16
+            let hex = "0123456789abcdef"
+            o = o + "\\u00" + hex[hi:hi + 1] + hex[lo:lo + 1]
+        } else {
+            o = o + s[i:i + 1]
+        }
+        i = i + 1
+    }
+    return o
+}
+
+// Strip credential-bearing headers before store/export.
+fn redact_sip(msg: string) -> string {
+    // Line-based pass for Authorization / Proxy-Authorization (case-insensitive).
+    let lines = str_split(msg, "\n")
+    let mut kept = ""
+    let mut i = 0
+    while i < len(lines) {
+        let line = lines[i]
+        let lower = str_to_lower(line)
+        let mut drop = 0
+        if str_has_prefix(lower, "authorization:") {
+            drop = 1
+        }
+        if str_has_prefix(lower, "proxy-authorization:") {
+            drop = 1
+        }
+        if drop == 0 {
+            if i > 0 {
+                // preserve \n joins (CR may still be on lines from \r\n split)
+                kept = kept + "\n" + line
+            } else {
+                kept = line
+            }
+        } else {
+            if i == 0 {
+                kept = "Authorization: [REDACTED]\r"
+            } else {
+                kept = kept + "\nAuthorization: [REDACTED]\r"
+            }
+        }
+        i = i + 1
+    }
+    return kept
+}
+
+fn probe_enabled() -> int {
+    return parse_int_or(env_get_or("ZAMAN_PROBE", "0"), 0)
+}
+
+fn host_is_private_ipv4(host: string) -> int {
+    if str_has_prefix(host, "10.") {
+        return 1
+    }
+    if str_has_prefix(host, "192.168.") {
+        return 1
+    }
+    if str_has_prefix(host, "127.") {
+        return 1
+    }
+    if str_has_prefix(host, "172.") {
+        // 172.16.0.0/12
+        let parts = str_split(host, ".")
+        if len(parts) >= 2 {
+            let second = parse_int_or(parts[1], 0)
+            if second >= 16 && second <= 31 {
+                return 1
+            }
+        }
+    }
+    return 0
+}
+
+fn host_is_blocked_for_probe(host: string) -> int {
+    // Always block cloud metadata / link-local abuse targets.
+    if str_eq(host, "169.254.169.254") {
+        return 1
+    }
+    if str_eq(host, "metadata.google.internal") {
+        return 1
+    }
+    if str_has_prefix(host, "169.254.") {
+        return 1
+    }
+    // Localhost always allowed for loopback self-tests.
+    if str_eq(host, "127.0.0.1") || str_eq(host, "::1") || str_eq(host, "localhost") {
+        return 0
+    }
+    // Other private/RFC1918 blocked unless ZAMAN_PROBE_ALLOW_PRIVATE=1
+    let allow_priv = parse_int_or(env_get_or("ZAMAN_PROBE_ALLOW_PRIVATE", "0"), 0)
+    if allow_priv == 0 && host_is_private_ipv4(host) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// ZAMAN_HEP_ALLOW: empty = any peer; else comma-separated IPs or prefixes (e.g. 10.0.0.,203.0.113.5)
+fn hep_peer_host(peer: string) -> string {
+    // peer may be "1.2.3.4:5060" or "[::1]:5060"
+    if str_has_prefix(peer, "[") {
+        let cut = str_cut(peer, "]")
+        if len(cut) >= 1 {
+            let h = cut[0]
+            if str_has_prefix(h, "[") {
+                return h[1:]
+            }
+            return h
+        }
+    }
+    let cut = str_cut(peer, ":")
+    if len(cut) >= 1 {
+        return cut[0]
+    }
+    return peer
+}
+
+fn hep_peer_allowed(peer: string) -> int {
+    let allow = env_get_or("ZAMAN_HEP_ALLOW", "")
+    if str_eq(allow, "") {
+        return 1
+    }
+    let host = hep_peer_host(peer)
+    let parts = str_split(allow, ",")
+    let mut i = 0
+    while i < len(parts) {
+        let p = str_trim_space(parts[i])
+        if str_eq(p, "") {
+            // skip
+        } else if str_eq(p, host) {
+            return 1
+        } else if str_has_prefix(host, p) {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn api_key_configured() -> string {
+    return env_get_or("ZAMAN_API_KEY", "")
+}
+
+fn api_request_authorized(c: int) -> int {
+    let want = api_key_configured()
+    if str_eq(want, "") {
+        return 1
+    }
+    let h = http_header(c, "X-API-Key")
+    if str_eq(h, want) {
+        return 1
+    }
+    let auth = http_header(c, "Authorization")
+    if str_has_prefix(auth, "Bearer ") {
+        let tok = auth[7:]
+        if str_eq(tok, want) {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn u8_at(s: string, i: int) -> int {
+    if i < 0 || i >= len(s) {
+        return 0
+    }
+    return int(s[i])
+}
+
+fn u16be_at(s: string, i: int) -> int {
+    if i + 2 > len(s) {
+        return 0
+    }
+    return binary_u16be(s[i:i + 2])
+}
+
+fn u32be_at(s: string, i: int) -> int {
+    if i + 4 > len(s) {
+        return 0
+    }
+    return binary_u32be(s[i:i + 4])
+}
+
+fn ipv4_at(s: string, i: int) -> string {
+    if i + 4 > len(s) {
+        return ""
+    }
+    return string(u8_at(s, i)) + "." + string(u8_at(s, i + 1)) + "." + string(u8_at(s, i + 2)) + "." + string(u8_at(s, i + 3))
+}
+
+fn hex_nibble(n: int) -> string {
+    let h = "0123456789abcdef"
+    if n < 0 || n > 15 {
+        return "0"
+    }
+    return h[n:n + 1]
+}
+
+fn ipv6_at(s: string, i: int) -> string {
+    // Compress-free hextet form a:b:c:d:e:f:g:h
+    if i + 16 > len(s) {
+        return ""
+    }
+    let mut out = ""
+    let mut g = 0
+    while g < 8 {
+        let off = i + g * 2
+        let v = u16be_at(s, off)
+        if g > 0 {
+            out = out + ":"
+        }
+        // strip leading zeros per hextet for readability
+        out = out + hex_nibble((v / 4096) % 16) + hex_nibble((v / 256) % 16) + hex_nibble((v / 16) % 16) + hex_nibble(v % 16)
+        g = g + 1
+    }
+    return out
+}
+
+fn proto_type_name(t: int) -> string {
+    if t == 1 {
+        return "sip"
+    }
+    if t == 5 {
+        return "rtcp"
+    }
+    if t == 34 {
+        return "rtpagent"
+    }
+    if t == 35 {
+        return "rtcpxr"
+    }
+    if t == 38 {
+        return "horaclifix"
+    }
+    if t == 53 {
+        return "dns"
+    }
+    if t == 100 {
+        return "log"
+    }
+    if t == 0 {
+        return "unknown"
+    }
+    return "proto-" + string(t)
+}
+
+fn parse_int_or(s: string, fallback: int) -> int {
+    match parse_int(s) {
+        Ok(v) => v,
+        Err(_) => fallback,
+    }
+}
+
+fn cmap_i(m: CMap, key: string) -> int {
+    return parse_int_or(cmap_get(m, key), 0)
+}
+
+fn cmap_set_i(m: CMap, key: string, v: int) {
+    cmap_set(m, key, string(v))
+}
+
+// ---- SQLite persistence + reporting ----
+// Path: ZAMAN_DB (default data/zaman.db). WAL for concurrent SIP/HEP/HTTP writers.
+// Ring stays as a short hot cache; durable queries use SQLite.
+
+fn db_path() -> string {
+    return env_get_or("ZAMAN_DB", "data/zaman.db")
+}
+
+fn sql_quote(s: string) -> string {
+    // SQLite string literal — double single-quotes.
+    return "'" + str_replace(s, "'", "''") + "'"
+}
+
+fn db_ensure_dir() {
+    // best-effort create data/ for default path
+    let p = db_path()
+    let dir = path_dir(p)
+    if not str_eq(dir, "") && not str_eq(dir, ".") {
+        let _ = mkdir(dir)
+    }
+}
+
+fn db_open() -> SqlDB {
+    db_ensure_dir()
+    let db = sql_open_sqlite(db_path())
+    if sql_ok(db) == 1 {
+        let _ = sql_exec_plain(db, "PRAGMA journal_mode=WAL")
+        let _ = sql_exec_plain(db, "PRAGMA busy_timeout=5000")
+        let _ = sql_exec_plain(db, "PRAGMA synchronous=NORMAL")
+    }
+    return db
+}
+
+fn db_init() -> int {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        print("db  open failed: " + db_path())
+        return 0
+    }
+    let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS captures (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+        "ts_ms INTEGER NOT NULL," +
+        "src TEXT," +
+        "dst TEXT," +
+        "transport TEXT," +
+        "proto TEXT," +
+        "agent TEXT," +
+        "kind TEXT," +
+        "method TEXT," +
+        "status INTEGER DEFAULT 0," +
+        "call_id TEXT," +
+        "from_h TEXT," +
+        "to_h TEXT," +
+        "cseq TEXT," +
+        "ruri TEXT," +
+        "hep_node_id INTEGER DEFAULT 0," +
+        "hep_node TEXT," +
+        "hep_cid TEXT," +
+        "size INTEGER DEFAULT 0," +
+        "raw_b64 TEXT," +
+        "record_json TEXT NOT NULL DEFAULT ''" +
+        ")")
+    let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts ON captures(ts_ms DESC)")
+    let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call ON captures(call_id)")
+    let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method ON captures(method)")
+    let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport ON captures(transport)")
+    let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent ON captures(agent)")
+    // daily rollup for reporting dashboards
+    let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
+        "day TEXT NOT NULL," +
+        "method TEXT NOT NULL," +
+        "transport TEXT NOT NULL," +
+        "cnt INTEGER NOT NULL DEFAULT 0," +
+        "PRIMARY KEY(day, method, transport)" +
+        ")")
+    let _ = sql_close(db)
+    print("db   sqlite " + db_path())
+    return 1
+}
+
+fn day_key(ts_ms: int) -> string {
+    // Day bucket as unix-day integer string (stable, no locale).
+    let mut sec = ts_ms / 1000
+    if sec < 0 {
+        sec = 0
+    }
+    return string(sec / 86400)
+}
+
+// Insert one capture from record JSON on an already-open connection.
+// Uses chan[string] (not multi-field struct) — large struct channels have
+// triggered libmalloc free-of-unallocated under multi-worker stress.
+fn db_insert_json(db: SqlDB, record_json: string) -> int {
+    if sql_ok(db) == 0 {
+        return 0
+    }
+    let ts_ms = json_get_int(record_json, "ts_ms")
+    let status = json_get_int(record_json, "status")
+    let hep_node_id = json_get_int(record_json, "hep_node_id")
+    let size = json_get_int(record_json, "size")
+    let src = json_get_string(record_json, "src")
+    let dst = json_get_string(record_json, "dst")
+    let transport = json_get_string(record_json, "transport")
+    let proto = json_get_string(record_json, "proto")
+    let agent = json_get_string(record_json, "agent")
+    let kind = json_get_string(record_json, "kind")
+    let method = json_get_string(record_json, "method")
+    let call_id = json_get_string(record_json, "call_id")
+    let from_h = json_get_string(record_json, "from")
+    let to_h = json_get_string(record_json, "to")
+    let cseq = json_get_string(record_json, "cseq")
+    let ruri = json_get_string(record_json, "ruri")
+    let hep_node = json_get_string(record_json, "hep_node")
+    let hep_cid = json_get_string(record_json, "hep_cid")
+    let raw_b64 = json_get_string(record_json, "raw_b64")
+
+    // Shell row with integers + empty record_json; fill text via bound UPDATEs.
+    let _ = sql_exec_plain(db,
+        "INSERT INTO captures(ts_ms, status, hep_node_id, size, record_json) VALUES (" +
+        string(ts_ms) + "," + string(status) + "," + string(hep_node_id) + "," +
+        string(size) + ",'')")
+    let id = sql_last_insert_id(db)
+    if id <= 0 {
+        return 0
+    }
+    let id_s = string(id)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET src=?, dst=?, transport=?, proto=? WHERE id=" + id_s,
+        src, dst, transport, proto)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET agent=?, kind=?, method=?, call_id=? WHERE id=" + id_s,
+        agent, kind, method, call_id)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET from_h=?, to_h=?, cseq=?, ruri=? WHERE id=" + id_s,
+        from_h, to_h, cseq, ruri)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET hep_node=?, hep_cid=?, raw_b64=?, record_json=? WHERE id=" + id_s,
+        hep_node, hep_cid, raw_b64, record_json)
+    // daily rollup
+    let day = day_key(ts_ms)
+    let mut m = method
+    if str_eq(m, "") {
+        m = "UNKNOWN"
+    }
+    let mut tr = transport
+    if str_eq(tr, "") {
+        tr = "UDP"
+    }
+    let up = "INSERT INTO report_daily(day, method, transport, cnt) VALUES (" +
+        sql_quote(day) + "," + sql_quote(m) + "," + sql_quote(tr) + ",1) " +
+        "ON CONFLICT(day, method, transport) DO UPDATE SET cnt = cnt + 1"
+    let _ = sql_exec_plain(db, up)
+    // opportunistic retention
+    if id % 64 == 0 {
+        let days = parse_int_or(env_get_or("ZAMAN_DB_RETENTION_DAYS", "14"), 14)
+        if days > 0 {
+            let cutoff = now_ms() - days * 86400 * 1000
+            let _ = sql_exec_plain(db, "DELETE FROM captures WHERE ts_ms < " + string(cutoff))
+            let _ = sql_exec_plain(db, "DELETE FROM report_daily WHERE day < " + sql_quote(day_key(cutoff)))
+        }
+    }
+    return 1
+}
+
+// Enqueue record JSON for the single kicked DB writer (blocks if channel full).
+fn db_enqueue(ch: chan[string], record_json: string) {
+    let _ = ch.send(record_json)
+}
+
+// Single-writer job: owns one SQLite connection, drains via range.
+// Range exits when the channel is closed (graceful shutdown).
+fn db_writer(ch: chan[string], metrics: CMap) -> int {
+    print("db   writer kick (chan[string] cap=" + string(DB_CH_CAP) + ")")
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        print("db   writer open failed: " + db_path())
+        for j in range ch {
+            let _ = cmap_incr(metrics, "db_err", 1)
+        }
+        return 0
+    }
+    let mut n = 0
+    for j in range ch {
+        if db_insert_json(db, j) == 1 {
+            n = n + 1
+            let _ = cmap_incr(metrics, "db_ok", 1)
+        } else {
+            let _ = cmap_incr(metrics, "db_err", 1)
+        }
+    }
+    let _ = sql_close(db)
+    print("db   writer stop after " + string(n) + " inserts")
+    return n
+}
+
+fn db_messages_json(limit: int, call_id_filter: string, transport_filter: string) -> string {
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 50
+    }
+    if lim > 500 {
+        lim = 500
+    }
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let mut sql = "SELECT id, record_json FROM captures WHERE 1=1"
+    if not str_eq(call_id_filter, "") {
+        sql = sql + " AND call_id = " + sql_quote(call_id_filter)
+    }
+    if not str_eq(transport_filter, "") {
+        sql = sql + " AND transport = " + sql_quote(transport_filter)
+    }
+    sql = sql + " ORDER BY id DESC LIMIT " + string(lim)
+    let rows = sql_query_rows(db, sql, [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let id = sql_rows_int(rows, 0)
+            let rec = sql_rows_str(rows, 1)
+            if str_eq(rec, "") {
+                continue
+            }
+            // inject durable id (record_json starts with '{')
+            let with_id = "{\"id\":" + string(id) + "," + rec[1:]
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + with_id
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
+fn db_message_one_json(id: int) -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return ""
+    }
+    let rows = sql_query_rows(db, "SELECT id, record_json FROM captures WHERE id = " + string(id), [])
+    let mut out = ""
+    if sql_rows_ok(rows) == 1 {
+        if sql_rows_next(rows) == 1 {
+            let rid = sql_rows_int(rows, 0)
+            let rec = sql_rows_str(rows, 1)
+            if not str_eq(rec, "") {
+                out = "{\"id\":" + string(rid) + "," + rec[1:]
+            }
+        }
+        let _ = sql_rows_close(rows)
+    }
+    let _ = sql_close(db)
+    return out
+}
+
+fn db_report_summary_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "{\"error\":\"db unavailable\"}"
+    }
+    let total = sql_query_int(db, "SELECT COUNT(*) FROM captures", [])
+    let calls = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE call_id IS NOT NULL AND call_id != ''", [])
+    let hep = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE transport LIKE 'HEP%'", [])
+    let sip_udp = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE transport = 'UDP'", [])
+    let min_ts = sql_query_int(db, "SELECT COALESCE(MIN(ts_ms),0) FROM captures", [])
+    let max_ts = sql_query_int(db, "SELECT COALESCE(MAX(ts_ms),0) FROM captures", [])
+    // method breakdown
+    let rows = sql_query_rows(db, "SELECT method, COUNT(*) AS c FROM captures GROUP BY method ORDER BY c DESC LIMIT 20", [])
+    let mut methods = "{"
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let m = sql_rows_str(rows, 0)
+            let c = sql_rows_int(rows, 1)
+            if first == 1 {
+                first = 0
+            } else {
+                methods = methods + ","
+            }
+            methods = methods + "\"" + jesc(m) + "\":" + string(c)
+        }
+        let _ = sql_rows_close(rows)
+    }
+    methods = methods + "}"
+    // transport breakdown
+    let rows2 = sql_query_rows(db, "SELECT transport, COUNT(*) AS c FROM captures GROUP BY transport ORDER BY c DESC", [])
+    let mut transports = "{"
+    first = 1
+    if sql_rows_ok(rows2) == 1 {
+        while sql_rows_next(rows2) == 1 {
+            let tr = sql_rows_str(rows2, 0)
+            let c = sql_rows_int(rows2, 1)
+            if first == 1 {
+                first = 0
+            } else {
+                transports = transports + ","
+            }
+            transports = transports + "\"" + jesc(tr) + "\":" + string(c)
+        }
+        let _ = sql_rows_close(rows2)
+    }
+    transports = transports + "}"
+    let _ = sql_close(db)
+    return "{\"total\":" + string(total) +
+        ",\"unique_call_ids\":" + string(calls) +
+        ",\"hep\":" + string(hep) +
+        ",\"sip_udp\":" + string(sip_udp) +
+        ",\"ts_min\":" + string(min_ts) +
+        ",\"ts_max\":" + string(max_ts) +
+        ",\"db\":\"" + jesc(db_path()) + "\"" +
+        ",\"methods\":" + methods +
+        ",\"transports\":" + transports +
+        "}"
+}
+
+fn db_report_daily_json(limit: int) -> string {
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 30
+    }
+    if lim > 365 {
+        lim = 365
+    }
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let rows = sql_query_rows(db,
+        "SELECT day, method, transport, cnt FROM report_daily ORDER BY day DESC, cnt DESC LIMIT " + string(lim * 10),
+        [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let day = sql_rows_str(rows, 0)
+            let method = sql_rows_str(rows, 1)
+            let tr = sql_rows_str(rows, 2)
+            let cnt = sql_rows_int(rows, 3)
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"day\":\"" + jesc(day) + "\",\"method\":\"" + jesc(method) +
+                "\",\"transport\":\"" + jesc(tr) + "\",\"count\":" + string(cnt) + "}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
+fn db_report_top_calls_json(limit: int) -> string {
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 20
+    }
+    if lim > 100 {
+        lim = 100
+    }
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let rows = sql_query_rows(db,
+        "SELECT call_id, COUNT(*) AS c, MIN(ts_ms) AS t0, MAX(ts_ms) AS t1 " +
+        "FROM captures WHERE call_id IS NOT NULL AND call_id != '' " +
+        "GROUP BY call_id ORDER BY c DESC LIMIT " + string(lim),
+        [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let cid = sql_rows_str(rows, 0)
+            let c = sql_rows_int(rows, 1)
+            let t0 = sql_rows_int(rows, 2)
+            let t1 = sql_rows_int(rows, 3)
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"call_id\":\"" + jesc(cid) + "\",\"messages\":" + string(c) +
+                ",\"ts_first\":" + string(t0) + ",\"ts_last\":" + string(t1) + "}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
+// ---- ring store (shared via CMap) ----
+
+fn cap_push(ring: CMap, metrics: CMap, rec: string) {
+    let idx = cmap_i(ring, "idx")
+    let slot = idx % RING
+    cmap_set(ring, "msg_" + string(slot), rec)
+    cmap_set_i(ring, "idx", idx + 1)
+    let _ = cmap_incr(metrics, "msgs_total", 1)
+}
+
+fn cap_get(ring: CMap, id: int) -> string {
+    if id < 0 {
+        return ""
+    }
+    let idx = cmap_i(ring, "idx")
+    if id >= idx {
+        return ""
+    }
+    if idx - id > RING {
+        return ""
+    }
+    return cmap_get(ring, "msg_" + string(id % RING))
+}
+
+// ---- SIP field extract / record ----
+
+fn sip_dir_label(is_req: int) -> string {
+    if is_req == 1 {
+        return "request"
+    }
+    return "response"
+}
+
+fn make_record(
+    db_ch: chan[string],
+    src: string,
+    transport: string,
+    msg: string,
+    agent: string
+) -> string {
+    return make_record_ex(db_ch, src, "", transport, msg, agent, "sip", now_ms(), 0, "", "")
+}
+
+// Full capture record — used for native SIP and HEPv3.
+// Parses + builds JSON on the capture path; durable insert is kicked via db_ch.
+fn make_record_ex(
+    db_ch: chan[string],
+    src: string,
+    dst: string,
+    transport: string,
+    msg: string,
+    agent: string,
+    proto: string,
+    ts_ms: int,
+    hep_node_id: int,
+    hep_node_name: string,
+    hep_correlation: string
+) -> string {
+    let is_sip = if str_eq(proto, "sip") || str_eq(proto, "") || str_eq(proto, "unknown") {
+        1
+    } else {
+        0
+    }
+    let safe = if is_sip == 1 {
+        redact_sip(msg)
+    } else {
+        msg
+    }
+    let mut ts = ts_ms
+    if ts <= 0 {
+        ts = now_ms()
+    }
+    let mut method = ""
+    let mut status = 0
+    let mut ruri = ""
+    let mut cid = ""
+    let mut from_h = ""
+    let mut to_h = ""
+    let mut cseq = ""
+    let mut kind = "payload"
+    if is_sip == 1 && sip_ok(safe) == 1 {
+        let is_req = sip_is_request(safe)
+        kind = sip_dir_label(is_req)
+        if is_req == 1 {
+            method = sip_method(safe)
+            ruri = sip_request_uri(safe)
+        } else {
+            status = sip_status_code(safe)
+            method = sip_header(safe, "CSeq")
+        }
+        cid = sip_header(safe, "Call-ID")
+        if str_eq(cid, "") {
+            cid = sip_header(safe, "i")
+        }
+        from_h = sip_header(safe, "From")
+        if str_eq(from_h, "") {
+            from_h = sip_header(safe, "f")
+        }
+        to_h = sip_header(safe, "To")
+        if str_eq(to_h, "") {
+            to_h = sip_header(safe, "t")
+        }
+        cseq = sip_header(safe, "CSeq")
+    } else {
+        kind = proto
+        method = str_to_upper(proto)
+    }
+    // HEP correlation ID (chunk 0x0011) can fill Call-ID for non-SIP or missing CID
+    if str_eq(cid, "") && not str_eq(hep_correlation, "") {
+        cid = hep_correlation
+    }
+    let raw_b64 = base64_encode(safe)
+
+    let mut j = "{"
+    j = j + "\"ts_ms\":" + string(ts)
+    j = j + ",\"src\":\"" + jesc(src) + "\""
+    j = j + ",\"dst\":\"" + jesc(dst) + "\""
+    j = j + ",\"transport\":\"" + jesc(transport) + "\""
+    j = j + ",\"proto\":\"" + jesc(proto) + "\""
+    j = j + ",\"agent\":\"" + jesc(agent) + "\""
+    j = j + ",\"kind\":\"" + jesc(kind) + "\""
+    j = j + ",\"method\":\"" + jesc(method) + "\""
+    j = j + ",\"status\":" + string(status)
+    j = j + ",\"ruri\":\"" + jesc(ruri) + "\""
+    j = j + ",\"call_id\":\"" + jesc(cid) + "\""
+    j = j + ",\"from\":\"" + jesc(from_h) + "\""
+    j = j + ",\"to\":\"" + jesc(to_h) + "\""
+    j = j + ",\"cseq\":\"" + jesc(cseq) + "\""
+    j = j + ",\"hep_node_id\":" + string(hep_node_id)
+    j = j + ",\"hep_node\":\"" + jesc(hep_node_name) + "\""
+    j = j + ",\"hep_cid\":\"" + jesc(hep_correlation) + "\""
+    j = j + ",\"size\":" + string(len(safe))
+    j = j + ",\"raw_b64\":\"" + raw_b64 + "\""
+    j = j + "}"
+    // Durable store: enqueue JSON to single kicked writer (serialized SQLite).
+    // Ring still used for live UI via cap_push at the call site.
+    db_enqueue(db_ch, j)
+    return j
+}
+
+fn bump_method(metrics: CMap, method: string) {
+    if str_eq(method, "") {
+        let _ = cmap_incr(metrics, "m_UNKNOWN", 1)
+        return
+    }
+    let key = "m_" + str_to_upper(method)
+    let _ = cmap_incr(metrics, key, 1)
+}
+
+// ---- echo replies ----
+
+// Echo policy (security):
+//   default: OPTIONS only (monitoring ping)
+//   ZAMAN_ECHO_METHODS=OPTIONS,REGISTER,... or "ALL" with ZAMAN_ECHO_ALL=1
+// Never return 200 OK + Expires for REGISTER without real auth — that lied.
+fn method_echo_allowed(method: string, echo_all: int) -> int {
+    if echo_all == 1 {
+        return 1
+    }
+    let allow = env_get_or("ZAMAN_ECHO_METHODS", "OPTIONS")
+    if str_eq(allow, "ALL") || str_eq(allow, "all") {
+        return 1
+    }
+    let parts = str_split(str_to_upper(allow), ",")
+    let want = str_to_upper(method)
+    let mut i = 0
+    while i < len(parts) {
+        let p = str_trim_space(parts[i])
+        if str_eq(p, want) {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn should_echo(msg: string, echo_all: int) -> int {
+    if sip_is_request(msg) == 0 {
+        return 0
+    }
+    return method_echo_allowed(sip_method(msg), echo_all)
+}
+
+fn build_echo(msg: string, local_host: string, local_port: int) -> string {
+    let contact = sip_contact_value(sip_uri_build("zaman", local_host, local_port))
+    let extra = sip_headers_append("", "Contact", contact)
+    let extra2 = sip_headers_append(extra, "Server", "Zaman/" + VERSION)
+    let extra3 = sip_headers_append(extra2, "Allow", "OPTIONS")
+    // REGISTER must not look like a real registrar (white-hat H5).
+    if sip_method_eq(msg, "REGISTER") == 1 {
+        let wa = sip_www_authenticate("zaman.local", sip_tag())
+        let e = sip_headers_append(extra3, "WWW-Authenticate", wa)
+        return sip_reply(msg, 401, "Unauthorized", e, "")
+    }
+    if sip_method_eq(msg, "OPTIONS") == 1 {
+        return sip_reply(msg, 200, "OK", extra3, "")
+    }
+    // Lab methods if explicitly allowed: still 200 without faking registration.
+    return sip_reply(msg, 200, "OK", extra3, "")
+}
+
+// ---- HEPv3 / EEP (Homer Extensible Encapsulation) ----
+// Chunk layout: vendor_id(2) type_id(2) length(2) value(length-6)
+// Compatible with heplify / kamailio sipcapture / OpenSIPS HEP agents.
+// Types (vendor 0): 1 version, 2 IP proto, 3/4 IPv4, 5/6 IPv6, 7/8 ports,
+// 9/10 timestamps, 11 proto type (1=SIP), 12 node id, 14 password, 15 payload,
+// 17 correlation id, 18 vlan, 19 node name.
+
+struct HepInfo {
+    ok: int
+    version: int
+    ip_proto: int
+    src_ip: string
+    dst_ip: string
+    src_port: int
+    dst_port: int
+    tsec: int
+    tusec: int
+    proto_type: int
+    node_id: int
+    node_pw: string
+    node_name: string
+    correlation_id: string
+    vlan: int
+    payload: string
+}
+
+fn hep_empty() -> HepInfo {
+    return HepInfo {
+        ok: 0,
+        version: 0,
+        ip_proto: 0,
+        src_ip: "",
+        dst_ip: "",
+        src_port: 0,
+        dst_port: 0,
+        tsec: 0,
+        tusec: 0,
+        proto_type: 0,
+        node_id: 0,
+        node_pw: "",
+        node_name: "",
+        correlation_id: "",
+        vlan: 0,
+        payload: "",
+    }
+}
+
+fn hep_decode(pkt: string) -> HepInfo {
+    let empty = hep_empty()
+    if len(pkt) < 6 {
+        return empty
+    }
+    if not str_eq(pkt[0:4], "HEP3") {
+        return empty
+    }
+    let total = u16be_at(pkt, 4)
+    // Strict agents set total == len(pkt). Accept total <= len for trailing noise.
+    if total < 6 || total > len(pkt) {
+        return empty
+    }
+    let end = total
+    let mut off = 6
+    let mut info = hep_empty()
+
+    while off + 6 <= end {
+        // vendor ignored for matching (heplify does the same) — standard is 0
+        let typ = u16be_at(pkt, off + 2)
+        let clen = u16be_at(pkt, off + 4)
+        if clen < 6 || off + clen > end {
+            break
+        }
+        let voff = off + 6
+        let vlen = clen - 6
+        if typ == 1 && vlen >= 1 {
+            info.version = u8_at(pkt, voff)
+        } else if typ == 2 && vlen >= 1 {
+            info.ip_proto = u8_at(pkt, voff)
+        } else if typ == 3 && vlen >= 4 {
+            info.src_ip = ipv4_at(pkt, voff)
+        } else if typ == 4 && vlen >= 4 {
+            info.dst_ip = ipv4_at(pkt, voff)
+        } else if typ == 5 && vlen >= 16 {
+            info.src_ip = ipv6_at(pkt, voff)
+        } else if typ == 6 && vlen >= 16 {
+            info.dst_ip = ipv6_at(pkt, voff)
+        } else if typ == 7 && vlen >= 2 {
+            info.src_port = u16be_at(pkt, voff)
+        } else if typ == 8 && vlen >= 2 {
+            info.dst_port = u16be_at(pkt, voff)
+        } else if typ == 9 && vlen >= 4 {
+            info.tsec = u32be_at(pkt, voff)
+        } else if typ == 10 && vlen >= 4 {
+            info.tusec = u32be_at(pkt, voff)
+        } else if typ == 11 && vlen >= 1 {
+            info.proto_type = u8_at(pkt, voff)
+        } else if typ == 12 && vlen >= 4 {
+            info.node_id = u32be_at(pkt, voff)
+        } else if typ == 14 && vlen > 0 {
+            info.node_pw = pkt[voff:voff + vlen]
+        } else if typ == 15 && vlen > 0 {
+            info.payload = pkt[voff:voff + vlen]
+        } else if typ == 17 && vlen > 0 {
+            info.correlation_id = pkt[voff:voff + vlen]
+        } else if typ == 18 && vlen >= 2 {
+            info.vlan = u16be_at(pkt, voff)
+        } else if typ == 19 && vlen > 0 {
+            info.node_name = pkt[voff:voff + vlen]
+        }
+        off = off + clen
+    }
+
+    if str_eq(info.payload, "") {
+        return empty
+    }
+    info.ok = 1
+    return info
+}
+
+fn hep_ts_ms(info: HepInfo) -> int {
+    if info.tsec <= 0 {
+        return now_ms()
+    }
+    // tsec is UNIX seconds; tusec is microseconds (not milliseconds)
+    return info.tsec * 1000 + info.tusec / 1000
+}
+
+fn hep_password_ok(info: HepInfo) -> int {
+    let want = env_get_or("ZAMAN_HEP_PASSWORD", "")
+    if str_eq(want, "") {
+        return 1
+    }
+    if str_eq(info.node_pw, want) {
+        return 1
+    }
+    return 0
+}
+
+fn hep_endpoint(ip: string, port: int) -> string {
+    if str_eq(ip, "") {
+        if port > 0 {
+            return ":" + string(port)
+        }
+        return ""
+    }
+    // bracket IPv6
+    if str_contains(ip, ":") {
+        return "[" + ip + "]:" + string(port)
+    }
+    return ip + ":" + string(port)
+}
+
+fn hep_agent_label(info: HepInfo) -> string {
+    if not str_eq(info.node_name, "") {
+        return info.node_name
+    }
+    return "hep-" + string(info.node_id)
+}
+
+// ---- process one SIP message ----
+
+fn handle_sip_packet(
+    store: CMap,
+    metrics: CMap,
+    db_ch: chan[string],
+    fd: int,
+    msg: string,
+    transport: string,
+    echo_all: int,
+    local_host: string,
+    local_port: int
+) {
+    if sip_ok(msg) == 0 {
+        let _ = cmap_incr(metrics, "parse_err", 1)
+        return
+    }
+    let src = udp_last_sender()
+    let rec = make_record(db_ch, src, transport, msg, "zaman")
+    cap_push(store, metrics, rec)
+
+    if sip_is_request(msg) == 1 {
+        bump_method(metrics, sip_method(msg))
+        let _ = cmap_incr(metrics, "requests", 1)
+        if should_echo(msg, echo_all) == 1 {
+            let reply = build_echo(msg, local_host, local_port)
+            let host = udp_last_sender_host()
+            let port = udp_last_sender_port()
+            if not str_eq(host, "") && port > 0 {
+                let _ = sip_udp_send(fd, host, port, reply)
+                let rrec = make_record(db_ch, local_host + ":" + string(local_port), transport, reply, "zaman-echo")
+                cap_push(store, metrics, rrec)
+                let _ = cmap_incr(metrics, "echoes", 1)
+            }
+        }
+    } else {
+        let _ = cmap_incr(metrics, "responses", 1)
+        let code = sip_status_code(msg)
+        if code >= 200 && code < 300 {
+            let _ = cmap_incr(metrics, "status_2xx", 1)
+        } else if code >= 400 {
+            let _ = cmap_incr(metrics, "status_4xx_5xx", 1)
+        }
+    }
+}
+
+fn handle_hep_packet(store: CMap, metrics: CMap, db_ch: chan[string], pkt: string) {
+    handle_hep_packet_via(store, metrics, db_ch, pkt, "HEP3")
+}
+
+fn handle_hep_packet_via(store: CMap, metrics: CMap, db_ch: chan[string], pkt: string, transport: string) {
+    let info = hep_decode(pkt)
+    if info.ok == 0 {
+        let _ = cmap_incr(metrics, "hep_err", 1)
+        return
+    }
+    if hep_password_ok(info) == 0 {
+        let _ = cmap_incr(metrics, "hep_auth_fail", 1)
+        return
+    }
+    let _ = cmap_incr(metrics, "hep_total", 1)
+    if str_eq(transport, "HEP3/TCP") {
+        let _ = cmap_incr(metrics, "hep_tcp", 1)
+    } else if str_eq(transport, "HEP3/TLS") {
+        let _ = cmap_incr(metrics, "hep_tls", 1)
+    } else {
+        let _ = cmap_incr(metrics, "hep_udp", 1)
+    }
+
+    let mut ptype = info.proto_type
+    if ptype == 0 {
+        if sip_ok(info.payload) == 1 {
+            ptype = 1
+        }
+    }
+    let pname = proto_type_name(ptype)
+    if ptype == 1 {
+        let _ = cmap_incr(metrics, "hep_sip", 1)
+    } else if ptype == 5 {
+        let _ = cmap_incr(metrics, "hep_rtcp", 1)
+    } else {
+        let _ = cmap_incr(metrics, "hep_other", 1)
+    }
+
+    let src = hep_endpoint(info.src_ip, info.src_port)
+    let dst = hep_endpoint(info.dst_ip, info.dst_port)
+    let agent = hep_agent_label(info)
+    let ts = hep_ts_ms(info)
+    let rec = make_record_ex(
+        db_ch,
+        src,
+        dst,
+        transport,
+        info.payload,
+        agent,
+        pname,
+        ts,
+        info.node_id,
+        info.node_name,
+        info.correlation_id
+    )
+    cap_push(store, metrics, rec)
+
+    if ptype == 1 && sip_ok(info.payload) == 1 {
+        if sip_is_request(info.payload) == 1 {
+            bump_method(metrics, sip_method(info.payload))
+            let _ = cmap_incr(metrics, "requests", 1)
+        } else {
+            let _ = cmap_incr(metrics, "responses", 1)
+            let code = sip_status_code(info.payload)
+            if code >= 200 && code < 300 {
+                let _ = cmap_incr(metrics, "status_2xx", 1)
+            } else if code >= 400 {
+                let _ = cmap_incr(metrics, "status_4xx_5xx", 1)
+            }
+        }
+    } else if ptype == 1 {
+        let _ = cmap_incr(metrics, "parse_err", 1)
+    }
+}
+
+// Drain complete HEP3 frames from a stream buffer; return remainder.
+fn hep_buffer_drain(store: CMap, metrics: CMap, db_ch: chan[string], buf: string, transport: string) -> string {
+    let mut b = buf
+    // Cap buffer to limit memory DoS on a single TCP/TLS session
+    if len(b) > 2097152 {
+        let _ = cmap_incr(metrics, "hep_err", 1)
+        return ""
+    }
+    while len(b) >= 6 {
+        if not str_eq(b[0:4], "HEP3") {
+            let idx = str_index(b, "HEP3")
+            if idx < 0 {
+                return ""
+            }
+            b = b[idx:]
+            continue
+        }
+        let total = u16be_at(b, 4)
+        if total < 6 || total > 65535 {
+            // corrupt length — skip one byte and resync
+            b = b[1:]
+            let _ = cmap_incr(metrics, "hep_err", 1)
+            continue
+        }
+        if len(b) < total {
+            return b
+        }
+        // Own the frame before decode (especially important for TLS-sourced buf).
+        let pkt = "" + b[0:total]
+        b = b[total:]
+        handle_hep_packet_via(store, metrics, db_ch, pkt, transport)
+    }
+    return b
+}
+
+// Returns int so it can be kicked as a per-connection crew job.
+fn hep_tcp_session(store: CMap, metrics: CMap, db_ch: chan[string], fd: int) -> int {
+    let peer = tcp_peer_addr(fd)
+    if hep_peer_allowed(peer) == 0 {
+        let _ = cmap_incr(metrics, "hep_deny", 1)
+        let _ = tcp_close(fd)
+        return 0
+    }
+    let mut buf = ""
+    while 1 == 1 {
+        let chunk = tcp_read(fd)
+        if str_eq(chunk, "") {
+            break
+        }
+        buf = buf + chunk
+        buf = hep_buffer_drain(store, metrics, db_ch, buf, "HEP3/TCP")
+        if str_eq(buf, "") && len(chunk) == 0 {
+            break
+        }
+    }
+    let _ = tcp_close(fd)
+    return 0
+}
+
+// TLS session: read all data, close TLS, then parse/enqueue.
+// The conn is already accepted (handshake serialized in the accept loop).
+// Kicked on a nested crew so the accept loop stays responsive.
+fn hep_tls_session(store: CMap, metrics: CMap, db_ch: chan[string], conn: TlsConn) -> int {
+    let mut buf = ""
+    while 1 == 1 {
+        let chunk = tls_read(conn, 65536)
+        if str_eq(chunk, "") {
+            break
+        }
+        // Force-own TLS bytes before any later slice/parse.
+        buf = buf + ("" + chunk)
+        // Cap buffer to limit memory DoS on a single TLS session
+        if len(buf) > 2097152 {
+            let _ = cmap_incr(metrics, "hep_err", 1)
+            buf = ""
+            break
+        }
+    }
+    // Close TLS BEFORE parse — avoids malloc free-of-unallocated under crew.
+    let _ = tls_conn_close(conn)
+    if len(buf) >= 6 {
+        let owned = "" + buf
+        let _ = hep_buffer_drain(store, metrics, db_ch, owned, "HEP3/TLS")
+    }
+    return 0
+}
+
+
+fn metrics_json(metrics: CMap, store: CMap) -> string {
+    let started = cmap_i(metrics, "started_ms")
+    let uptime = now_ms() - started
+    let msgs = cmap_i(metrics, "msgs_total")
+    let reqs = cmap_i(metrics, "requests")
+    let resps = cmap_i(metrics, "responses")
+    let echoes = cmap_i(metrics, "echoes")
+    let hep_total = cmap_i(metrics, "hep_total")
+    let hep_udp = cmap_i(metrics, "hep_udp")
+    let hep_tcp = cmap_i(metrics, "hep_tcp")
+    let hep_tls = cmap_i(metrics, "hep_tls")
+    let hep_err = cmap_i(metrics, "hep_err")
+    let hep_auth_fail = cmap_i(metrics, "hep_auth_fail")
+    let hep_deny = cmap_i(metrics, "hep_deny")
+    let hep_sip = cmap_i(metrics, "hep_sip")
+    let hep_rtcp = cmap_i(metrics, "hep_rtcp")
+    let hep_other = cmap_i(metrics, "hep_other")
+    let parse_err = cmap_i(metrics, "parse_err")
+    let probes_ok = cmap_i(metrics, "probes_ok")
+    let probes_fail = cmap_i(metrics, "probes_fail")
+    let probe_rtt_ms = cmap_i(metrics, "probe_rtt_ms")
+    let m_invite = cmap_i(metrics, "m_INVITE")
+    let m_options = cmap_i(metrics, "m_OPTIONS")
+    let m_register = cmap_i(metrics, "m_REGISTER")
+    let m_bye = cmap_i(metrics, "m_BYE")
+    let m_ack = cmap_i(metrics, "m_ACK")
+    let m_info = cmap_i(metrics, "m_INFO")
+    let m_message = cmap_i(metrics, "m_MESSAGE")
+    let m_unknown = cmap_i(metrics, "m_UNKNOWN")
+    let status_2xx = cmap_i(metrics, "status_2xx")
+    let status_4xx_5xx = cmap_i(metrics, "status_4xx_5xx")
+    let db_ok = cmap_i(metrics, "db_ok")
+    let db_err = cmap_i(metrics, "db_err")
+    let mut j = "{"
+    j = j + "\"service\":\"zaman-core\""
+    j = j + ",\"version\":\"" + VERSION + "\""
+    j = j + ",\"uptime_ms\":" + string(uptime)
+    j = j + ",\"msgs_total\":" + string(msgs)
+    j = j + ",\"db_ok\":" + string(db_ok)
+    j = j + ",\"db_err\":" + string(db_err)
+    j = j + ",\"requests\":" + string(reqs)
+    j = j + ",\"responses\":" + string(resps)
+    j = j + ",\"echoes\":" + string(echoes)
+    j = j + ",\"hep_total\":" + string(hep_total)
+    j = j + ",\"hep_udp\":" + string(hep_udp)
+    j = j + ",\"hep_tcp\":" + string(hep_tcp)
+    j = j + ",\"hep_tls\":" + string(hep_tls)
+    j = j + ",\"hep_err\":" + string(hep_err)
+    j = j + ",\"hep_auth_fail\":" + string(hep_auth_fail)
+    j = j + ",\"hep_deny\":" + string(hep_deny)
+    j = j + ",\"hep_sip\":" + string(hep_sip)
+    j = j + ",\"hep_rtcp\":" + string(hep_rtcp)
+    j = j + ",\"hep_other\":" + string(hep_other)
+    j = j + ",\"parse_err\":" + string(parse_err)
+    j = j + ",\"probes_ok\":" + string(probes_ok)
+    j = j + ",\"probes_fail\":" + string(probes_fail)
+    j = j + ",\"probe_rtt_ms\":" + string(probe_rtt_ms)
+    j = j + ",\"ring_size\":" + string(RING)
+    j = j + ",\"ring_idx\":" + string(msgs)
+    j = j + ",\"methods\":{"
+    j = j + "\"INVITE\":" + string(m_invite)
+    j = j + ",\"OPTIONS\":" + string(m_options)
+    j = j + ",\"REGISTER\":" + string(m_register)
+    j = j + ",\"BYE\":" + string(m_bye)
+    j = j + ",\"ACK\":" + string(m_ack)
+    j = j + ",\"INFO\":" + string(m_info)
+    j = j + ",\"MESSAGE\":" + string(m_message)
+    j = j + ",\"UNKNOWN\":" + string(m_unknown)
+    j = j + "}"
+    j = j + ",\"status_2xx\":" + string(status_2xx)
+    j = j + ",\"status_4xx_5xx\":" + string(status_4xx_5xx)
+    j = j + "}"
+    return j
+}
+
+fn metrics_prom(metrics: CMap, store: CMap) -> string {
+    let uptime = now_ms() - cmap_i(metrics, "started_ms")
+    let mut o = ""
+    o = o + "# HELP zaman_up Zaman core up flag\n"
+    o = o + "# TYPE zaman_up gauge\n"
+    o = o + "zaman_up 1\n"
+    o = o + "# HELP zaman_uptime_ms Process uptime\n"
+    o = o + "# TYPE zaman_uptime_ms gauge\n"
+    o = o + "zaman_uptime_ms " + string(uptime) + "\n"
+    o = o + "# HELP zaman_messages_total Captured SIP messages\n"
+    o = o + "# TYPE zaman_messages_total counter\n"
+    o = o + "zaman_messages_total " + string(cmap_i(metrics, "msgs_total")) + "\n"
+    o = o + "# HELP zaman_requests_total SIP requests\n"
+    o = o + "# TYPE zaman_requests_total counter\n"
+    o = o + "zaman_requests_total " + string(cmap_i(metrics, "requests")) + "\n"
+    o = o + "# HELP zaman_responses_total SIP responses\n"
+    o = o + "# TYPE zaman_responses_total counter\n"
+    o = o + "zaman_responses_total " + string(cmap_i(metrics, "responses")) + "\n"
+    o = o + "# HELP zaman_echoes_total Auto-echo replies\n"
+    o = o + "# TYPE zaman_echoes_total counter\n"
+    o = o + "zaman_echoes_total " + string(cmap_i(metrics, "echoes")) + "\n"
+    o = o + "# HELP zaman_hep_total HEP packets accepted\n"
+    o = o + "# TYPE zaman_hep_total counter\n"
+    o = o + "zaman_hep_total " + string(cmap_i(metrics, "hep_total")) + "\n"
+    o = o + "# HELP zaman_hep_transport_total HEP by transport\n"
+    o = o + "# TYPE zaman_hep_transport_total counter\n"
+    o = o + "zaman_hep_transport_total{transport=\"udp\"} " + string(cmap_i(metrics, "hep_udp")) + "\n"
+    o = o + "zaman_hep_transport_total{transport=\"tcp\"} " + string(cmap_i(metrics, "hep_tcp")) + "\n"
+    o = o + "zaman_hep_transport_total{transport=\"tls\"} " + string(cmap_i(metrics, "hep_tls")) + "\n"
+    o = o + "# HELP zaman_hep_auth_fail_total HEP packets rejected by password\n"
+    o = o + "# TYPE zaman_hep_auth_fail_total counter\n"
+    o = o + "zaman_hep_auth_fail_total " + string(cmap_i(metrics, "hep_auth_fail")) + "\n"
+    o = o + "# HELP zaman_hep_deny_total HEP peers denied by allowlist\n"
+    o = o + "# TYPE zaman_hep_deny_total counter\n"
+    o = o + "zaman_hep_deny_total " + string(cmap_i(metrics, "hep_deny")) + "\n"
+    o = o + "# HELP zaman_hep_proto_total HEP by payload protocol type\n"
+    o = o + "# TYPE zaman_hep_proto_total counter\n"
+    o = o + "zaman_hep_proto_total{proto=\"sip\"} " + string(cmap_i(metrics, "hep_sip")) + "\n"
+    o = o + "zaman_hep_proto_total{proto=\"rtcp\"} " + string(cmap_i(metrics, "hep_rtcp")) + "\n"
+    o = o + "zaman_hep_proto_total{proto=\"other\"} " + string(cmap_i(metrics, "hep_other")) + "\n"
+    o = o + "# HELP zaman_probe_rtt_ms Last successful OPTIONS probe RTT\n"
+    o = o + "# TYPE zaman_probe_rtt_ms gauge\n"
+    o = o + "zaman_probe_rtt_ms " + string(cmap_i(metrics, "probe_rtt_ms")) + "\n"
+    o = o + "# HELP zaman_sip_method_total SIP requests by method\n"
+    o = o + "# TYPE zaman_sip_method_total counter\n"
+    o = o + "zaman_sip_method_total{method=\"INVITE\"} " + string(cmap_i(metrics, "m_INVITE")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"OPTIONS\"} " + string(cmap_i(metrics, "m_OPTIONS")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"REGISTER\"} " + string(cmap_i(metrics, "m_REGISTER")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"BYE\"} " + string(cmap_i(metrics, "m_BYE")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"ACK\"} " + string(cmap_i(metrics, "m_ACK")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"INFO\"} " + string(cmap_i(metrics, "m_INFO")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"MESSAGE\"} " + string(cmap_i(metrics, "m_MESSAGE")) + "\n"
+    o = o + "# HELP zaman_ring_idx Capture ring write index\n"
+    o = o + "# TYPE zaman_ring_idx gauge\n"
+    o = o + "zaman_ring_idx " + string(cmap_i(store, "idx")) + "\n"
+    return o
+}
+
+// ---- messages list / filter (prefer SQLite; fall back to ring) ----
+
+fn messages_json(store: CMap, limit: int, call_id_filter: string) -> string {
+    return messages_json_ex(store, limit, call_id_filter, "")
+}
+
+fn messages_json_ex(store: CMap, limit: int, call_id_filter: string, transport_filter: string) -> string {
+    // Prefer durable DB when available
+    let from_db = db_messages_json(limit, call_id_filter, transport_filter)
+    if not str_eq(from_db, "[]") {
+        return from_db
+    }
+    // Fallback: in-memory ring (startup / empty DB)
+    let idx = cmap_i(store, "idx")
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 50
+    }
+    if lim > 200 {
+        lim = 200
+    }
+    let mut out = "["
+    let mut first = 1
+    let mut added = 0
+    let mut i = idx - 1
+    while i >= 0 && added < lim {
+        let rec = cap_get(store, i)
+        if not str_eq(rec, "") {
+            let mut keep = 1
+            if not str_eq(call_id_filter, "") {
+                if not str_contains(rec, "\"call_id\":\"" + jesc(call_id_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(transport_filter, "") {
+                if not str_contains(rec, "\"transport\":\"" + jesc(transport_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 {
+                let with_id = "{\"id\":" + string(i) + "," + rec[1:]
+                if first == 1 {
+                    first = 0
+                } else {
+                    out = out + ","
+                }
+                out = out + with_id
+                added = added + 1
+            }
+        }
+        i = i - 1
+    }
+    out = out + "]"
+    return out
+}
+
+fn message_one_json(store: CMap, id: int) -> string {
+    let from_db = db_message_one_json(id)
+    if not str_eq(from_db, "") {
+        return from_db
+    }
+    let rec = cap_get(store, id)
+    if str_eq(rec, "") {
+        return ""
+    }
+    return "{\"id\":" + string(id) + "," + rec[1:]
+}
+
+// ---- OPTIONS probe ----
+
+fn do_probe(metrics: CMap, host: string, port: int, wait_ms: int) -> string {
+    if probe_enabled() == 0 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"probe disabled (set ZAMAN_PROBE=1)\"}"
+    }
+    if host_is_blocked_for_probe(host) == 1 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"host blocked by probe policy\"}"
+    }
+    if port <= 0 || port > 65535 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"invalid port\"}"
+    }
+    // Cap wait — unbounded timeout freezes the single HTTP worker (H4).
+    let mut cap = wait_ms
+    if cap <= 0 {
+        cap = 2000
+    }
+    if cap > 5000 {
+        cap = 5000
+    }
+
+    let fd = sip_udp_bind("0.0.0.0", 0)
+    if fd < 0 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"bind failed\"}"
+    }
+    let branch = sip_branch()
+    let tag = sip_tag()
+    let call_id = sip_call_id_new("zaman.probe")
+    let mut h = ""
+    h = sip_headers_append(h, "Via", sip_via_value_rport("UDP", "127.0.0.1", 0, branch))
+    h = sip_headers_append(h, "From", sip_from_value("Zaman Probe", "sip:probe@zaman.local", tag))
+    h = sip_headers_append(h, "To", sip_to_value("", "sip:echo@" + host, ""))
+    h = sip_headers_append(h, "Call-ID", call_id)
+    h = sip_headers_append(h, "CSeq", sip_cseq_value(1, "OPTIONS"))
+    h = sip_headers_append(h, "Max-Forwards", "70")
+    h = sip_headers_append(h, "User-Agent", "Zaman-Probe/" + VERSION)
+    h = sip_headers_append(h, "Content-Length", "0")
+    let opts = sip_request("OPTIONS", "sip:echo@" + host + ":" + string(port), h, "")
+
+    let t0 = now_ms()
+    let sent = sip_udp_send(fd, host, port, opts)
+    if sent < 0 {
+        let _ = udp_close(fd)
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"send failed\"}"
+    }
+
+    let _ = io_set_nonblocking(fd, 1)
+    let mut waited = 0
+    let mut status = 0
+    let mut rtt = 0 - 1
+    while waited < cap {
+        let resp = sip_udp_recv(fd, 65535)
+        if not str_eq(resp, "") {
+            if sip_is_response(resp) == 1 {
+                status = sip_status_code(resp)
+                rtt = now_ms() - t0
+                break
+            }
+        }
+        sleep_ms(5)
+        waited = waited + 5
+    }
+    let _ = udp_close(fd)
+
+    if rtt < 0 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"timeout\",\"host\":\"" + jesc(host) + "\",\"port\":" + string(port) + ",\"timeout_ms\":" + string(cap) + "}"
+    }
+    cmap_set_i(metrics, "probe_rtt_ms", rtt)
+    let _ = cmap_incr(metrics, "probes_ok", 1)
+    return "{\"ok\":true,\"host\":\"" + jesc(host) + "\",\"port\":" + string(port) + ",\"status\":" + string(status) + ",\"rtt_ms\":" + string(rtt) + ",\"call_id\":\"" + jesc(call_id) + "\"}"
+}
+
+// ---- workers ----
+
+fn sip_worker(
+    store: CMap,
+    metrics: CMap,
+    db_ch: chan[string],
+    host: string,
+    port: int,
+    echo_all: int
+) -> int {
+    let fd = sip_udp_bind(host, port)
+    if fd < 0 {
+        print("sip bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    print("sip  udp  " + host + ":" + string(port) + "  (echo policy: ZAMAN_ECHO_METHODS, default OPTIONS)")
+    let _ = io_set_nonblocking(fd, 1)
+    while 1 == 1 {
+        let msg = sip_udp_recv(fd, 65535)
+        if not str_eq(msg, "") {
+            handle_sip_packet(store, metrics, db_ch, fd, msg, "UDP", echo_all, host, port)
+        } else {
+            sleep_ms(2)
+        }
+    }
+    return 0
+}
+
+fn hep_worker(store: CMap, metrics: CMap, db_ch: chan[string], host: string, port: int) -> int {
+    let fd = sip_udp_bind(host, port)
+    if fd < 0 {
+        print("hep bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    let pw = env_get_or("ZAMAN_HEP_PASSWORD", "")
+    if str_eq(pw, "") {
+        print("hep  udp  " + host + ":" + string(port) + "  (HEPv3, no password)")
+    } else {
+        print("hep  udp  " + host + ":" + string(port) + "  (HEPv3, password required)")
+    }
+    let _ = io_set_nonblocking(fd, 1)
+    while 1 == 1 {
+        let pkt = sip_udp_recv(fd, 65535)
+        if not str_eq(pkt, "") {
+            let peer = udp_last_sender()
+            if hep_peer_allowed(peer) == 0 {
+                let _ = cmap_incr(metrics, "hep_deny", 1)
+            } else {
+                handle_hep_packet_via(store, metrics, db_ch, pkt, "HEP3")
+            }
+        } else {
+            sleep_ms(2)
+        }
+    }
+    return 0
+}
+
+// HEP/TCP accept loop — kicked from main crew. Each accepted peer is itself
+// kicked on a nested crew (Mako structured concurrency — never free `go`).
+// drain(0) detaches the session job so the accept loop keeps running.
+fn hep_tcp_worker(store: CMap, metrics: CMap, db_ch: chan[string], host: string, port: int) -> int {
+    let fd = tcp_listen_addr(host, port)
+    if fd < 0 {
+        print("hep tcp bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    print("hep  tcp  " + host + ":" + string(port) + "  (HEPv3, crew.kick/session)")
+    while 1 == 1 {
+        let c = tcp_accept(fd)
+        if c < 0 {
+            sleep_ms(5)
+            continue
+        }
+        crew sess {
+            let _ = sess.kick(hep_tcp_session(store, metrics, db_ch, c))
+            let _ = sess.drain(0)
+        }
+    }
+    return 0
+}
+
+// HEP/TLS accept loop — kicked from main crew.
+// All TLS I/O is inline (no nested kick): OpenSSL is not safe across
+// concurrent kicked handshakes, and drain(0) cancels mid-read.
+// HEP agents batch-send then close, so inline is fast enough.
+fn hep_tls_worker(
+    store: CMap,
+    metrics: CMap,
+    db_ch: chan[string],
+    host: string,
+    port: int,
+    cert: string,
+    key: string
+) -> int {
+    if tls_server_available() == 0 {
+        print("hep  tls  skipped (OpenSSL / tls_server_available=0)")
+        return idle_worker()
+    }
+    let srv = tls_server_new(cert, key)
+    let fd = tcp_listen_addr(host, port)
+    if fd < 0 {
+        print("hep tls bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    print("hep  tls  " + host + ":" + string(port) + "  cert=" + cert + "  (inline session)")
+    while 1 == 1 {
+        let c = tcp_accept(fd)
+        if c < 0 {
+            sleep_ms(5)
+            continue
+        }
+        let peer = tcp_peer_addr(c)
+        if hep_peer_allowed(peer) == 0 {
+            let _ = cmap_incr(metrics, "hep_deny", 1)
+            let _ = tcp_close(c)
+            continue
+        }
+        let _ = hep_tls_session(store, metrics, db_ch, tls_accept(srv, c))
+    }
+    return 0
+}
+
+fn idle_worker() -> int {
+    while 1 == 1 {
+        sleep_ms(1000)
+    }
+    return 0
+}
+
+fn query_get(q: string, key: string) -> string {
+    // very small query parser: key=value pairs joined by &
+    let parts = str_split(q, "&")
+    let mut i = 0
+    while i < len(parts) {
+        let p = parts[i]
+        let kv = str_cut(p, "=")
+        if len(kv) >= 2 {
+            if str_eq(kv[0], key) {
+                return kv[1]
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn path_only(path: string) -> string {
+    let cut = str_cut(path, "?")
+    if len(cut) >= 1 {
+        return cut[0]
+    }
+    return path
+}
+
+fn path_query(path: string) -> string {
+    let cut = str_cut(path, "?")
+    if len(cut) >= 2 {
+        return cut[1]
+    }
+    return ""
+}
+
+fn http_worker(store: CMap, metrics: CMap, port: int) -> int {
+    let fd = http_bind(port)
+    if fd < 0 {
+        print("http bind failed on :" + string(port))
+        return 1
+    }
+    let key = api_key_configured()
+    if str_eq(key, "") {
+        print("api  http 0.0.0.0:" + string(port) + "  (NO AUTH — set ZAMAN_API_KEY)")
+    } else {
+        print("api  http 0.0.0.0:" + string(port) + "  (X-API-Key / Bearer required; /health open)")
+    }
+    while 1 == 1 {
+        let c = http_accept(fd)
+        if c < 0 {
+            sleep_ms(5)
+            continue
+        }
+        let method = http_method(c)
+        let raw_path = http_path(c)
+        let path = path_only(raw_path)
+        let q = path_query(raw_path)
+
+        // Liveness always open for orchestrators (same close path as other routes).
+        if str_eq(path, "/health") || str_eq(path, "/api/health") {
+            let mut auth_flag = "false"
+            if not str_eq(key, "") {
+                auth_flag = "true"
+            }
+            let body = "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"0.1.0\",\"api_auth\":" + auth_flag + "}"
+            let _ = http_respond_json(c, 200, body)
+        } else if api_request_authorized(c) == 0 {
+            let _ = http_respond_json(c, 401, "{\"error\":\"unauthorized\",\"hint\":\"X-API-Key or Authorization: Bearer\"}")
+        } else if str_eq(path, "/api/metrics") {
+            let body = metrics_json(metrics, store)
+            let _ = http_respond_json(c, 200, body)
+        } else if str_eq(path, "/metrics") {
+            let body = metrics_prom(metrics, store)
+            let _ = http_respond_ct(c, 200, "text/plain", body)
+        } else if str_eq(path, "/api/messages") {
+            let lim = parse_int_or(query_get(q, "limit"), 50)
+            let cid = query_get(q, "call_id")
+            let tr = query_get(q, "transport")
+            let body = messages_json_ex(store, lim, cid, tr)
+            let _ = http_respond_json(c, 200, body)
+        } else if str_has_prefix(path, "/api/messages/") {
+            let id_s = path[14:]
+            let id = parse_int_or(id_s, 0 - 1)
+            let one = message_one_json(store, id)
+            if str_eq(one, "") {
+                let _ = http_respond_json(c, 404, "{\"error\":\"not found\"}")
+            } else {
+                let _ = http_respond_json(c, 200, one)
+            }
+        } else if str_eq(path, "/api/report") || str_eq(path, "/api/report/summary") {
+            let _ = http_respond_json(c, 200, db_report_summary_json())
+        } else if str_eq(path, "/api/report/daily") {
+            let lim = parse_int_or(query_get(q, "limit"), 30)
+            let _ = http_respond_json(c, 200, db_report_daily_json(lim))
+        } else if str_eq(path, "/api/report/top-calls") {
+            let lim = parse_int_or(query_get(q, "limit"), 20)
+            let _ = http_respond_json(c, 200, db_report_top_calls_json(lim))
+        } else if str_eq(path, "/api/probe") && str_eq(method, "POST") {
+            let body = http_body(c)
+            let mut host = json_get_string(body, "host")
+            let mut port_p = json_get_int(body, "port")
+            let mut wait_ms = json_get_int(body, "timeout_ms")
+            if str_eq(host, "") {
+                host = "127.0.0.1"
+            }
+            if port_p <= 0 {
+                port_p = 5060
+            }
+            if wait_ms <= 0 {
+                wait_ms = 2000
+            }
+            if wait_ms > 5000 {
+                wait_ms = 5000
+            }
+            let result = do_probe(metrics, host, port_p, wait_ms)
+            if str_contains(result, "probe disabled") || str_contains(result, "host blocked") {
+                let _ = http_respond_json(c, 403, result)
+            } else {
+                let _ = http_respond_json(c, 200, result)
+            }
+        } else if str_eq(path, "/api/stats") {
+            let _ = http_respond_json(c, 200, metrics_json(metrics, store))
+        } else {
+            let _ = http_respond_json(c, 404, "{\"error\":\"not found\",\"hint\":\"/api/health /api/metrics /api/messages /api/report /api/probe /metrics\"}")
+        }
+        let _ = http_close(c)
+    }
+    return 0
+}
+
+// ---- main ----
+
+fn main() {
+    let mut sip_host = env_get_or("ZAMAN_SIP_HOST", "0.0.0.0")
+    let mut sip_port = parse_int_or(env_get_or("ZAMAN_SIP_PORT", "5060"), 5060)
+    let mut hep_port = parse_int_or(env_get_or("ZAMAN_HEP_PORT", "9060"), 9060)
+    // Separate default from UDP: some runtimes abort when UDP+TCP share a port.
+    let mut hep_tcp_port = parse_int_or(env_get_or("ZAMAN_HEP_TCP_PORT", "9062"), 9062)
+    let mut hep_tls_port = parse_int_or(env_get_or("ZAMAN_HEP_TLS_PORT", "9061"), 9061)
+    let mut api_port = parse_int_or(env_get_or("ZAMAN_API_PORT", "9090"), 9090)
+    let echo_all = parse_int_or(env_get_or("ZAMAN_ECHO_ALL", "0"), 0)
+    // HEP/TCP opt-in (default off): some multi-worker layouts abort under
+    // concurrent HTTP+TCP on current Mako; enable explicitly for production agents.
+    let hep_tcp_on = parse_int_or(env_get_or("ZAMAN_HEP_TCP", "0"), 0)
+    let hep_tls_on = parse_int_or(env_get_or("ZAMAN_HEP_TLS", "0"), 0)
+    let tls_cert = env_get_or("ZAMAN_HEP_TLS_CERT", "")
+    let tls_key = env_get_or("ZAMAN_HEP_TLS_KEY", "")
+
+    // CLI overrides: zaman-core [sip_port] [hep_port] [api_port]
+    if argc() > 1 {
+        sip_port = parse_int_or(arg_get(1), sip_port)
+    }
+    if argc() > 2 {
+        hep_port = parse_int_or(arg_get(2), hep_port)
+    }
+    if argc() > 3 {
+        api_port = parse_int_or(arg_get(3), api_port)
+    }
+    // Optional: share UDP port for TCP when set to 0
+    if hep_tcp_port <= 0 {
+        hep_tcp_port = hep_port
+    }
+
+    print("zaman-core " + VERSION)
+    print("integrated SIP capture + echo + HEP (UDP/TCP/TLS) + metrics + SQLite reporting")
+    // Mako concurrency only: crew / kick / join / chan — never Go `go`/goroutines.
+    print("concurrency: Mako crew.kick (not go) · db_writer|sip|hep|http|tcp?|tls? · chan[string]")
+    print("security: ZAMAN_API_KEY · ZAMAN_HEP_PASSWORD · ZAMAN_HEP_ALLOW · ZAMAN_PROBE")
+
+    let _ = db_init()
+
+    let metrics = cmap_new()
+    let store = cmap_new()
+    cmap_set_i(metrics, "started_ms", now_ms())
+    cmap_set_i(store, "idx", 0)
+    cmap_set_i(metrics, "db_ok", 0)
+    cmap_set_i(metrics, "db_err", 0)
+
+    // Capture path: kicked workers enqueue JSON → kicked db_writer owns SQLite.
+    let db_ch = chan_open[string](DB_CH_CAP)
+
+    // One structured crew per process. Only kick enabled collectors (no idle
+    // filler jobs — extra always-on kicks have aborted HTTP accept on some layouts).
+    let want_tcp = hep_tcp_on
+    let mut want_tls = 0
+    if hep_tls_on == 1 && not str_eq(tls_cert, "") && not str_eq(tls_key, "") {
+        want_tls = 1
+    } else if hep_tls_on == 1 {
+        print("hep  tls  disabled (set ZAMAN_HEP_TLS_CERT and ZAMAN_HEP_TLS_KEY)")
+    }
+
+    if want_tcp == 0 && want_tls == 0 {
+        crew t {
+            let w = t.kick(db_writer(db_ch, metrics))
+            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
+            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
+            let a = t.kick(http_worker(store, metrics, api_port))
+            let _ = w.join()
+            let _ = s.join()
+            let _ = h.join()
+            let _ = a.join()
+        }
+    } else if want_tcp == 1 && want_tls == 0 {
+        crew t {
+            let w = t.kick(db_writer(db_ch, metrics))
+            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
+            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
+            let a = t.kick(http_worker(store, metrics, api_port))
+            let ht = t.kick(hep_tcp_worker(store, metrics, db_ch, sip_host, hep_tcp_port))
+            let _ = w.join()
+            let _ = s.join()
+            let _ = h.join()
+            let _ = a.join()
+            let _ = ht.join()
+        }
+    } else if want_tcp == 0 && want_tls == 1 {
+        crew t {
+            let w = t.kick(db_writer(db_ch, metrics))
+            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
+            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
+            let a = t.kick(http_worker(store, metrics, api_port))
+            let hl = t.kick(hep_tls_worker(store, metrics, db_ch, sip_host, hep_tls_port, tls_cert, tls_key))
+            let _ = w.join()
+            let _ = s.join()
+            let _ = h.join()
+            let _ = a.join()
+            let _ = hl.join()
+        }
+    } else {
+        crew t {
+            let w = t.kick(db_writer(db_ch, metrics))
+            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
+            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
+            let a = t.kick(http_worker(store, metrics, api_port))
+            let ht = t.kick(hep_tcp_worker(store, metrics, db_ch, sip_host, hep_tcp_port))
+            let hl = t.kick(hep_tls_worker(store, metrics, db_ch, sip_host, hep_tls_port, tls_cert, tls_key))
+            let _ = w.join()
+            let _ = s.join()
+            let _ = h.join()
+            let _ = a.join()
+            let _ = ht.join()
+            let _ = hl.join()
+        }
+    }
+}

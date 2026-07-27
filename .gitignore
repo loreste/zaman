@@ -1,0 +1,14 @@
+bin/
+.mako/
+.claude/
+.tokensave/
+data/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+vendor/
+weft.lock
+*.log
+*.crt
+*.key
