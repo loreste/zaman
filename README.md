@@ -67,6 +67,51 @@ make smoke          # end-to-end test
 ./scripts/demo.sh   # core + dashboard → http://127.0.0.1:3000
 ```
 
+### Cloud / public IP
+
+The installer handles everything — including HTTPS and firewall:
+
+```bash
+# AWS EC2, GCP VM, or any server with a public IP
+curl -fsSL .../install.sh | sudo ZAMAN_DB=postgres bash
+
+# During install, say yes to TLS and enter your domain:
+#   Enable TLS? [y/N]: y
+#   Domain name: sip-monitor.company.com
+#   Enable HEP TLS? [y/N]: y
+```
+
+This will:
+- Install nginx as a reverse proxy with Let's Encrypt TLS
+- Generate a self-signed HEP TLS cert for remote agents
+- Configure firewall rules (ufw or firewalld)
+- Generate a unique API key
+- Generate a unique PostgreSQL password (if using Postgres)
+- Keep the core API (port 9090) internal — proxied via nginx
+
+**AWS security group**: open 443/tcp (dashboard), 9060/udp (HEP), 9061/tcp (HEP TLS), 5060/udp (SIP).
+
+**GCP firewall**: same ports. Use a static IP and point your domain at it.
+
+### Multi-office / remote agents
+
+Remote offices send HEP over TLS to the central Zaman instance:
+
+```bash
+# On the central Zaman server (already installed with HEP TLS enabled):
+# Remote agents connect to port 9061/tcp with TLS
+
+# Kamailio config (remote office):
+modparam("sipcapture", "hep_capture_on", 1)
+modparam("sipcapture", "hep_send_on", 1)
+modparam("sipcapture", "hep_send_addr", "sip-monitor.company.com:9061;transport=tls")
+
+# heplify (remote office):
+heplify -hs sip-monitor.company.com:9061 -ht tls -hi eth0
+```
+
+The HEP TLS certificate is at `/opt/zaman/data/tls/hep.crt`. Distribute it to remote agents or use `--insecure` for self-signed certs.
+
 ### Systemd (after manual build)
 
 ```bash

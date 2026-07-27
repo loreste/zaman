@@ -127,12 +127,15 @@ install_database() {
                 postgresql-setup --initdb 2>/dev/null || true
             fi
             systemctl enable --now postgresql 2>/dev/null || true
-            # Create database and user
+            # Create database and user with generated password
+            PG_PASS=$(openssl rand -hex 16)
             sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='zaman'" | grep -q 1 || {
-                sudo -u postgres createuser --no-password zaman 2>/dev/null || true
+                sudo -u postgres psql -c "CREATE USER zaman WITH PASSWORD '${PG_PASS}'" 2>/dev/null || true
                 sudo -u postgres createdb -O zaman zaman 2>/dev/null || true
-                log "Created PostgreSQL database 'zaman'"
+                log "Created PostgreSQL database 'zaman' (password generated)"
             }
+            # Store for DSN construction
+            export ZAMAN_PG_PASS="${PG_PASS}"
             DB_CHOICE="postgres"
             ;;
         clickhouse|ch)
@@ -221,7 +224,7 @@ COREENV
             postgres)
                 cat >> "$CONF_DIR/core.env" << PGENV
 ZAMAN_DB_DRIVER=postgres
-ZAMAN_DB_DSN=host=/var/run/postgresql dbname=zaman user=zaman sslmode=disable
+ZAMAN_DB_DSN=host=127.0.0.1 dbname=zaman user=zaman password=${ZAMAN_PG_PASS:-} sslmode=disable
 PGENV
                 ;;
             clickhouse)
@@ -245,6 +248,163 @@ WEBENV
     fi
 
     systemctl daemon-reload
+}
+
+# ── Setup nginx reverse proxy with TLS ──
+setup_nginx_tls() {
+    if [ "${ZAMAN_TLS:-}" != "1" ] && [ "${SETUP_TLS:-}" != "1" ]; then
+        return
+    fi
+
+    DOMAIN="${ZAMAN_DOMAIN:-$(hostname -f 2>/dev/null || hostname)}"
+    log "Setting up nginx TLS reverse proxy for ${DOMAIN}..."
+
+    if [ "$PKG_MGR" = "apt" ]; then
+        apt-get install -y -qq nginx certbot python3-certbot-nginx >/dev/null 2>&1 || \
+        apt-get install -y -qq nginx >/dev/null
+    else
+        yum install -y -q nginx certbot python3-certbot-nginx >/dev/null 2>&1 || \
+        dnf install -y -q nginx >/dev/null 2>&1
+    fi
+
+    # Write nginx config
+    cat > /etc/nginx/conf.d/zaman.conf << NGINX
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    # Redirect HTTP to HTTPS (if cert exists)
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # Core API (internal, or expose for remote agents)
+    location /api/ {
+        proxy_pass http://127.0.0.1:9090/api/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    location /metrics {
+        proxy_pass http://127.0.0.1:9090/metrics;
+    }
+}
+NGINX
+
+    # Remove default site if it conflicts
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+
+    nginx -t 2>/dev/null && systemctl enable --now nginx
+
+    # Try Let's Encrypt if domain looks real (not localhost/IP)
+    if echo "$DOMAIN" | grep -qE '\.'; then
+        if command -v certbot >/dev/null 2>&1; then
+            log "Attempting Let's Encrypt certificate for ${DOMAIN}..."
+            certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsecurely-without-email 2>/dev/null || \
+                warn "Let's Encrypt failed — dashboard available on HTTP. Run: certbot --nginx -d ${DOMAIN}"
+        fi
+    else
+        warn "No domain set — dashboard on HTTP. Set ZAMAN_DOMAIN and run certbot later."
+    fi
+}
+
+# ── Configure firewall ──
+setup_firewall() {
+    if [ "${ZAMAN_SKIP_FW:-0}" = "1" ]; then
+        return
+    fi
+
+    log "Configuring firewall..."
+
+    if command -v ufw >/dev/null 2>&1; then
+        # Debian/Ubuntu UFW
+        ufw allow 80/tcp comment 'Zaman HTTP' 2>/dev/null || true
+        ufw allow 443/tcp comment 'Zaman HTTPS' 2>/dev/null || true
+        ufw allow 9060/udp comment 'Zaman HEP UDP' 2>/dev/null || true
+        ufw allow 5060/udp comment 'Zaman SIP UDP' 2>/dev/null || true
+        # HEP TCP/TLS only if enabled
+        if [ "${ZAMAN_HEP_TCP:-0}" = "1" ]; then
+            ufw allow 9062/tcp comment 'Zaman HEP TCP' 2>/dev/null || true
+        fi
+        if [ "${ZAMAN_HEP_TLS_ENABLED:-0}" = "1" ]; then
+            ufw allow 9061/tcp comment 'Zaman HEP TLS' 2>/dev/null || true
+        fi
+        # Keep API port internal (only localhost + nginx)
+        log "UFW rules added (9090 API kept internal — accessed via nginx /api/)"
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        # RHEL/CentOS firewalld
+        firewall-cmd --permanent --add-port=80/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=443/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=9060/udp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=5060/udp 2>/dev/null || true
+        if [ "${ZAMAN_HEP_TCP:-0}" = "1" ]; then
+            firewall-cmd --permanent --add-port=9062/tcp 2>/dev/null || true
+        fi
+        if [ "${ZAMAN_HEP_TLS_ENABLED:-0}" = "1" ]; then
+            firewall-cmd --permanent --add-port=9061/tcp 2>/dev/null || true
+        fi
+        firewall-cmd --reload 2>/dev/null || true
+        log "firewalld rules added"
+    else
+        warn "No firewall manager found (ufw/firewalld). Configure manually:"
+        warn "  Open: 80/tcp 443/tcp 9060/udp 5060/udp"
+        warn "  Keep internal: 9090/tcp (API — proxied via nginx)"
+    fi
+}
+
+# ── Setup HEP TLS for remote offices ──
+setup_hep_tls() {
+    if [ "${ZAMAN_HEP_TLS_ENABLED:-0}" != "1" ]; then
+        return
+    fi
+
+    TLS_DIR="${DATA_DIR}/tls"
+    mkdir -p "$TLS_DIR"
+
+    if [ ! -f "$TLS_DIR/hep.crt" ]; then
+        log "Generating HEP TLS certificate..."
+        DOMAIN="${ZAMAN_DOMAIN:-$(hostname -f 2>/dev/null || hostname)}"
+        openssl req -x509 -newkey rsa:2048 \
+            -keyout "$TLS_DIR/hep.key" -out "$TLS_DIR/hep.crt" \
+            -days 365 -nodes -subj "/CN=${DOMAIN}" 2>/dev/null
+        chown zaman:zaman "$TLS_DIR/hep.key" "$TLS_DIR/hep.crt"
+        chmod 600 "$TLS_DIR/hep.key"
+        log "HEP TLS cert generated: ${TLS_DIR}/hep.crt (self-signed, 365 days)"
+    fi
+
+    # Add TLS config to core.env
+    if ! grep -q 'ZAMAN_HEP_TLS=' "$CONF_DIR/core.env" 2>/dev/null; then
+        cat >> "$CONF_DIR/core.env" << TLSENV
+ZAMAN_HEP_TLS=1
+ZAMAN_HEP_TLS_CERT=${TLS_DIR}/hep.crt
+ZAMAN_HEP_TLS_KEY=${TLS_DIR}/hep.key
+ZAMAN_HEP_TCP=1
+TLSENV
+        log "HEP TLS enabled on port 9061, TCP on port 9062"
+    fi
+}
+
+# ── Generate API key ──
+setup_api_key() {
+    if grep -q 'ZAMAN_API_KEY=' "$CONF_DIR/core.env" 2>/dev/null && \
+       ! grep -q '# ZAMAN_API_KEY=' "$CONF_DIR/core.env" 2>/dev/null; then
+        return
+    fi
+
+    API_KEY=$(openssl rand -hex 24)
+    sed -i "s|# ZAMAN_API_KEY=|ZAMAN_API_KEY=${API_KEY}|" "$CONF_DIR/core.env" 2>/dev/null || true
+
+    # Also set in web.env so dashboard can talk to core
+    if ! grep -q 'ZAMAN_API_KEY=' "$CONF_DIR/web.env" 2>/dev/null; then
+        echo "ZAMAN_API_KEY=${API_KEY}" >> "$CONF_DIR/web.env"
+    fi
+
+    log "API key generated and configured"
 }
 
 # ── Start services ──
@@ -279,14 +439,30 @@ print_summary() {
     echo -e "${CYAN}║${NC}  ${GREEN}Zaman installed successfully${NC}                            ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  Dashboard:  ${GREEN}http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1'):3000${NC}"
+    IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1')
+    DOMAIN="${ZAMAN_DOMAIN:-${IP}}"
+    PROTO="http"
+    PORT=":3000"
+    if [ "${SETUP_TLS:-0}" = "1" ]; then
+        PROTO="https"
+        PORT=""
+    fi
+    echo -e "${CYAN}║${NC}  Dashboard:  ${GREEN}${PROTO}://${DOMAIN}${PORT}${NC}"
     echo -e "${CYAN}║${NC}  Core API:   http://127.0.0.1:9090/api/health            ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  SIP:        udp/5060                                    ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  HEP:        udp/9060                                    ${CYAN}║${NC}"
+    if [ "${ZAMAN_HEP_TLS_ENABLED:-0}" = "1" ]; then
+    echo -e "${CYAN}║${NC}  HEP TLS:    tcp/9061  (cert: ${DATA_DIR}/tls/hep.crt)   ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  HEP TCP:    tcp/9062                                    ${CYAN}║${NC}"
+    fi
     echo -e "${CYAN}║${NC}  Database:   ${DB_CHOICE}                                ${CYAN}║${NC}"
     if [ -n "$ADMIN_PW" ]; then
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  Login:      admin / ${YELLOW}${ADMIN_PW}${NC}"
+    fi
+    API_KEY_SHOW=$(grep 'ZAMAN_API_KEY=' "$CONF_DIR/core.env" 2>/dev/null | grep -v '^#' | head -1 | cut -d= -f2)
+    if [ -n "${API_KEY_SHOW:-}" ]; then
+    echo -e "${CYAN}║${NC}  API Key:    ${YELLOW}${API_KEY_SHOW}${NC}"
     fi
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  Config:     /etc/zaman/core.env                         ${CYAN}║${NC}"
@@ -328,6 +504,33 @@ main() {
     fi
 
     log "Database: ${DB_CHOICE}"
+
+    # TLS / public deployment
+    if [ -z "${ZAMAN_TLS:-}" ] && [ -z "${SETUP_TLS:-}" ]; then
+        echo ""
+        echo "Setup HTTPS reverse proxy (nginx + Let's Encrypt)?"
+        echo "  Recommended for: AWS, GCP, public IP, multi-office"
+        echo "  Not needed for: lab, localhost, VPN-only"
+        echo ""
+        read -rp "Enable TLS? [y/N]: " tls_yn
+        case "${tls_yn}" in
+            y|Y|yes) SETUP_TLS=1
+                read -rp "Domain name (e.g. sip-monitor.company.com): " input_domain
+                ZAMAN_DOMAIN="${input_domain:-$(hostname -f)}"
+                ;;
+        esac
+    fi
+
+    # HEP TLS for remote offices
+    if [ -z "${ZAMAN_HEP_TLS_ENABLED:-}" ]; then
+        echo ""
+        echo "Enable HEP over TLS (for remote offices sending captures over the internet)?"
+        read -rp "Enable HEP TLS? [y/N]: " hep_tls_yn
+        case "${hep_tls_yn}" in
+            y|Y|yes) ZAMAN_HEP_TLS_ENABLED=1 ;;
+        esac
+    fi
+
     echo ""
 
     detect_distro
@@ -336,6 +539,10 @@ main() {
     install_weft
     install_database
     install_zaman
+    setup_api_key
+    setup_hep_tls
+    setup_nginx_tls
+    setup_firewall
     start_services
     print_summary
 }
