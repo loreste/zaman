@@ -37,7 +37,14 @@ fn users_path() {
 }
 
 fn hash_pw(salt, password) {
-    crypto.sha256(salt + ":" + password)
+    // Key stretching: 1000 rounds of HMAC-SHA256 (Weft has no bcrypt/Argon2)
+    mut h := crypto.hmac_sha256(salt, password)
+    mut i := 0
+    while i < 999 {
+        h = crypto.hmac_sha256(salt, h)
+        i = i + 1
+    }
+    h
 }
 
 fn load_users() {
@@ -139,7 +146,7 @@ fn verify_token(token_secret, token) {
     payload := str.slice(raw, 0, sig_start - 1)
     got_sig := str.slice(raw, sig_start, len(raw))
     expected := crypto.hmac_sha256(token_secret, payload)
-    if got_sig != expected { return null }
+    if !crypto.equal(got_sig, expected) { return null }
     // Parse payload: id:username:role:expires
     parts := str.split(payload, ":")
     if len(parts) < 4 { return null }
@@ -177,7 +184,8 @@ fn login_redirect() {
 }
 
 fn set_session_cookie(token) {
-    {"status": 302, "headers": {"Location": "/", "Set-Cookie": "zaman_sid=" + token + "; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax"}, "body": ""}
+    // Secure flag added — browsers will only send over HTTPS (except localhost for dev)
+    {"status": 302, "headers": {"Location": "/", "Set-Cookie": "zaman_sid=" + token + "; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax; Secure"}, "body": ""}
 }
 
 fn clear_session_cookie() {
@@ -1398,7 +1406,7 @@ fn verify_share_token(token_secret, token) {
     payload := str.slice(raw, 0, sig_start - 1)
     got_sig := str.slice(raw, sig_start, len(raw))
     expected := crypto.hmac_sha256(token_secret, payload)
-    if got_sig != expected { return null }
+    if !crypto.equal(got_sig, expected) { return null }
     // Parse: share:call_id:expires
     if !str.starts_with(payload, "share:") { return null }
     rest := str.slice(payload, 6, len(payload))
@@ -2007,6 +2015,7 @@ fn main {
     })
 
     app.get("/partials/messages", fn(req) {
+        if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
         mut lim := int.parse(req.query_map["limit"] ?? "20").unwrap_or(0)
         if lim <= 0 { lim = 20 }
         cid := req.query_map["call_id"] ?? ""
@@ -2785,6 +2794,8 @@ fn main {
     // ---- recording routes ----
 
     app.get("/recordings/:cid", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return web.status(401) }
         cid := req.params["cid"]
         path := recording_path(cid)
         if !fs.exists(path) { return web.status(404) }
@@ -2801,6 +2812,9 @@ fn main {
         if cid == "" { return web.html(layout("Error", "<p class=\"text-[#f87171]\">Missing call_id</p>", user)) }
         f := req.files["file"]
         if f == null { return web.html(layout("Error", "<p class=\"text-[#f87171]\">No file uploaded</p>", user)) }
+        // F4: file size limit (50 MB)
+        fsize := f["size"] ?? 0
+        if fsize > 52428800 { return web.html(layout("Error", "<p class=\"text-[#f87171]\">File too large (max 50 MB)</p>", user)) }
         dir := recordings_dir()
         if !fs.exists(dir) { fs.mkdir(dir) }
         path := recording_path(cid)

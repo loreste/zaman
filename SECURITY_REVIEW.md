@@ -1,649 +1,338 @@
-# Zaman Security Review (White-Hat)
+# Zaman Security Review v2
 
-**Scope:** read-only review of Zaman SIP monitoring (v0.1)  
-**Primary artifacts:** `core/main.mko`, `web/main.weft`, `scripts/*`, `README.md`, `Makefile`  
+**Scope:** `core/main.mko` (v0.2.0), `web/main.weft`, `install.sh`  
 **Date:** 2026-07-27  
-**Mode:** offensive-minded, defensive outcomes — no code was modified for exploitation
+**Reviewer:** White-hat audit, code-level review  
+**Status:** v0.2 adds RBAC, HMAC sessions, rate limiting, HEP password/IP allowlist, probe restrictions. Several issues remain.
 
 ---
 
-## Executive summary
+## Executive Summary
 
-Zaman v0.1 is an integrated SIP capture / echo / HEP / metrics stack with an HTMX dashboard. The roadmap correctly lists **auth as unfinished**, but several design choices make an internet- or LAN-exposed deployment dangerous *today*:
+Zaman v0.2 substantially improved over v0.1 (which had no auth at all). The dashboard now has RBAC with HMAC-SHA256 signed cookies, API key auth on the core, rate limiting, HEP password auth, IP allowlists, and probe SSRF protections. Good fundamentals.
 
-1. **Unauthenticated read/write of VoIP metadata and raw SIP** (including credential-bearing headers) via the HTTP API and dashboard.
-2. **Unauthenticated active probing** (`POST /api/probe`) that turns the host into a **network-scanner / SIP flooder / SSRF-like internal recon tool**, with **no host allowlist**, **no rate limit**, and an **unbounded timeout** that **blocks the only HTTP worker**.
-3. **Open UDP SIP echo** for `OPTIONS` / `REGISTER` / `INFO` / `MESSAGE` (and all methods if `ZAMAN_ECHO_ALL=1`) without authentication — a **reflector**, false-registration oracle, and MESSAGE spam amplifier.
-4. **Unauthenticated HEP ingest** allowing forged call metadata into the ring store and dashboards.
-5. **Default bind-all** (`0.0.0.0` SIP/HEP; API/web print localhost but listen more broadly) with **no TLS, no auth, no rate limiting**.
+Remaining risks ranked by severity:
 
-Dashboard HTML escaping is generally conscientious (`h()` / `html.escape`). That reduces XSS risk but does **not** mitigate data exposure, SSRF-class probe abuse, or open SIP services. Several JSON-construction paths are incomplete (`jesc`), and `do_probe` never closes its ephemeral UDP socket.
-
-**Bottom line:** treat Zaman as a **lab / trusted-network tool only**. Do not expose SIP, HEP, API, or dashboard ports to untrusted networks until auth, probe controls, and echo policy are fixed.
-
----
-
-## Threat model assumptions
-
-| Actor | Access | Goals |
-|-------|--------|--------|
-| Untrusted SIP peer | UDP to SIP port (default 5060, binds `0.0.0.0`) | Reflect traffic, spam REGISTER/MESSAGE, fill ring with junk, DoS |
-| Untrusted HEP peer | UDP to HEP port (default 9060) | Inject forged call metadata / raw SIP into store |
-| Untrusted HTTP client | TCP to API (default 9090) and/or dashboard (3000) | Exfil call metadata + raw SIP; SSRF/scan via probe; DoS API |
-| Insider / multi-tenant co-tenant | Shared network with Zaman | Same as above plus silent recon of other tenants via probe |
-| Malicious SIP payload author | Controls headers/bodies that later render in UI / JSON API | JSON breakout, XSS, filter bypass, consumer crashes |
-
-**Out of scope / not fully validated:** Mako/Weft runtime memory safety, `http_bind` exact interface binding, CMap concurrency guarantees, and whether `html.escape` encodes all HTML-significant codepoints. Items needing runtime confirmation are marked **needs validation**.
-
-**Assumed defaults:** process started with no args → SIP `0.0.0.0:5060`, HEP same host `:9060`, API `:9090`, web `:3000`, `ZAMAN_ECHO_ALL=0`.
+| # | Severity | Issue |
+|---|----------|-------|
+| F1 | **Critical** | Password hashing uses unsalted SHA-256 (not a KDF) |
+| F2 | **Critical** | Session/share token HMAC comparison is not constant-time |
+| F3 | **High** | Federation push accepts arbitrary JSON into DB with no validation |
+| F4 | **High** | Recording upload has no file type/size validation |
+| F5 | **High** | Recording download endpoint has no auth check |
+| F6 | **High** | HMAC secret regenerated on restart invalidates all sessions |
+| F7 | **Medium** | ClickHouse queries use string interpolation (no parameterized queries) |
+| F8 | **Medium** | Core API key compared with string equality (not constant-time) |
+| F9 | **Medium** | HEP password compared with string equality (not constant-time) |
+| F10 | **Medium** | XFF header trusted without validation for rate limiting |
+| F11 | **Medium** | Session cookie missing `Secure` flag |
+| F12 | **Medium** | User/token JSON files readable by process user (no encryption at rest) |
+| F13 | **Low** | Password policy is weak (8 chars + 1 digit) |
+| F14 | **Low** | No login brute-force rate limiting |
+| F15 | **Low** | Installer downloads binaries over HTTPS but no checksum verification |
+| F16 | **Low** | Partials endpoints skip auth check |
+| F17 | **Low** | CSRF protection relies solely on SameSite=Lax |
 
 ---
 
-## Critical/High findings
+## Threat Model
 
-### H1 — Critical: Unauthenticated API exposes full SIP captures (including secrets)
+**Assets:** SIP metadata (Call-IDs, From/To URIs, IPs), raw SIP messages (may contain auth headers pre-redaction), call recordings, user credentials, API tokens.
 
-**Severity:** Critical  
+**Trust boundaries:**
+- Internet -> nginx (TLS termination) -> zaman-web (:3000) -> zaman-core (:9090)
+- HEP agents (remote offices) -> zaman-core (:9060 UDP, :9062 TCP, :9061 TLS)
+- SIP endpoints -> zaman-core (:5060 UDP echo)
+- Federation peers -> zaman-core (/api/federation/push)
 
-**Attack scenario:**  
-Any client that can reach the API port can list recent messages and fetch full records including `raw_b64` (entire SIP message). REGISTER/INVITE traffic often carries `Authorization` / `Proxy-Authorization` (Digest passwords hashes, or worse, cleartext credentials), `P-Asserted-Identity`, numbers, and SDP. An attacker exfiltrates call metadata and auth material without credentials.
-
-**Evidence:**
-- No auth checks in `http_worker` — every path responds openly:
-
-```646:688:core/main.mko
-        if str_eq(path, "/health") || str_eq(path, "/api/health") {
-            let body = "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"}"
-            let _ = http_respond_json(c, 200, body)
-        } else if str_eq(path, "/api/metrics") {
-            ...
-        } else if str_eq(path, "/api/messages") {
-            ...
-        } else if str_has_prefix(path, "/api/messages/") {
-            ...
-        } else if str_eq(path, "/api/probe") && str_eq(method, "POST") {
-            ...
-```
-
-- Full message stored and exported as base64 of **complete** SIP:
-
-```139:158:core/main.mko
-    let raw_b64 = base64_encode(msg)
-    ...
-    j = j + ",\"raw_b64\":\"" + raw_b64 + "\""
-```
-
-- README documents open endpoints and deferred auth (`README.md` Core API table; roadmap “Auth on dashboard / API” unchecked).
-
-**Fix recommendation:**
-1. Require authentication on all non-health endpoints (API key / mTLS / reverse-proxy auth). Prefer bind API to `127.0.0.1` by default when used only by local Weft.
-2. Redact sensitive headers (`Authorization`, `Proxy-Authorization`, `WWW-Authenticate`, cookie-like headers) before store **and** before export; optional “raw mode” behind elevated role.
-3. Separate scrape credentials for `/metrics` (or network-restrict Prometheus).
-4. Document that v0.1 has **no** confidentiality guarantee.
+**Attackers:**
+1. External unauthenticated (internet-facing)
+2. Authenticated low-privilege user (viewer escalating to admin)
+3. Rogue HEP agent (compromised network node)
+4. Adjacent network attacker (LAN, no TLS)
 
 ---
 
-### H2 — Critical: Unauthenticated dashboard is a full control plane over the same data + probe
+## Findings
 
-**Severity:** Critical  
+### F1: Critical — Password Hashing Uses SHA-256 (Not a KDF)
 
-**Attack scenario:**  
-Browser or curl to `:3000` (or wherever Weft listens) yields Overview, Messages, Call ladder, Metrics, and **Echo probe** with no login. The web app server-side-fetches the core and renders raw SIP after base64 decode. Same data-exfil as H1, plus a UI for probing arbitrary hosts.
+**File:** `web/main.weft` line 39  
+**Code:** `crypto.sha256(salt + ":" + password)`
 
-**Evidence:**
-- All routes open in `web/main.weft` (`app.get("/")`, `/messages`, `/messages/:id`, `/probe`, `app.post("/probe")`, etc.).
-- `app.listen(":3000")` — host not restricted to loopback.
-- Probe form posts user-controlled host/port to core:
+SHA-256, even with a salt, is not a password hashing function. It runs in nanoseconds on GPUs. A stolen `data/zaman-users.json` file (see F12) allows offline brute-force at billions of guesses/second.
 
-```350:355:web/main.weft
-    app.post("/probe", fn(req) {
-        host := web.form_get(req, "host", "127.0.0.1")
-        port := int.parse(web.form_get(req, "port", "5060")).unwrap_or(0)
-        wait_ms := int.parse(web.form_get(req, "timeout_ms", "2000")).unwrap_or(0)
-        payload := json.stringify({"host": host, "port": port, "timeout_ms": wait_ms})
-        resp := http.post(core_base() + "/api/probe", payload, {"headers": {"Content-Type": "application/json"}})
-```
-
-**Fix recommendation:**
-1. AuthN/AuthZ on Weft (session/cookie + CSRF on POST `/probe`).
-2. Bind dashboard to `127.0.0.1` by default; put behind reverse proxy with TLS in production.
-3. Disable or hide probe in production builds unless explicitly enabled.
+**Fix:** Use bcrypt, scrypt, or Argon2id. If Weft doesn't support these natively, use PBKDF2-SHA256 with >= 600,000 iterations. The salt is already generated correctly (32 hex chars).
 
 ---
 
-### H3 — Critical: `POST /api/probe` is an open network scanner / SIP emitter (SSRF-class)
+### F2: Critical — Token HMAC Comparison Is Not Constant-Time
 
-**Severity:** Critical  
+**File:** `web/main.weft` lines 142, 1401  
+**Code:** `if got_sig != expected { return null }`
 
-**Attack scenario:**  
-Attacker (or anyone who can hit API or dashboard probe form) POSTs:
+Both `verify_token()` and `verify_share_token()` compare HMAC signatures using string equality (`!=`), which may short-circuit on the first differing byte. This enables timing attacks to forge session tokens byte-by-byte.
 
-```json
-{"host":"10.0.0.5","port":5060,"timeout_ms":5000}
-```
-
-Zaman binds an ephemeral UDP socket and sends a crafted SIP OPTIONS to **any** host:port. Impacts:
-
-- **Internal recon:** map which IPs/ports speak SIP (status codes / RTT).
-- **Cross-tenant / cloud metadata-adjacent abuse:** scan RFC1918, link-local, cloud VPC neighbors (**needs validation** whether runtime resolves hostnames and follows anything beyond UDP SIP — still dangerous for lateral SIP mapping).
-- **SIP flood:** many probe requests → many OPTIONS to a victim (abuse of Zaman as attack proxy).
-- **CSRF from dashboard:** no CSRF token on `POST /probe`.
-
-**Evidence:**
-
-```495:547:core/main.mko
-fn do_probe(metrics: CMap, host: string, port: int, wait_ms: int) -> string {
-    let fd = sip_udp_bind("0.0.0.0", 0)
-    ...
-    let opts = sip_request("OPTIONS", "sip:echo@" + host + ":" + string(port), h, "")
-    ...
-    let sent = sip_udp_send(fd, host, port, opts)
-    ...
-    while waited < wait_ms {
-        let resp = sip_udp_recv(fd, 65535)
-        ...
-    }
-```
-
-```667:682:core/main.mko
-        } else if str_eq(path, "/api/probe") && str_eq(method, "POST") {
-            let body = http_body(c)
-            let mut host = json_get_string(body, "host")
-            let mut port_p = json_get_int(body, "port")
-            let mut wait_ms = json_get_int(body, "timeout_ms")
-            ...
-            let result = do_probe(metrics, host, port_p, wait_ms)
-```
-
-No allowlist, denylist (localhost / link-local / metadata IPs), auth, or rate limit. Port only checked `<= 0` (defaults to 5060); no upper bound check to 65535.
-
-**Fix recommendation:**
-1. **Disable probe by default**; enable with `ZAMAN_PROBE=1`.
-2. Allowlist destinations (CIDR / exact hosts); block private/link-local/metadata ranges unless `ZAMAN_PROBE_ALLOW_PRIVATE=1`.
-3. Cap `timeout_ms` (e.g. 50–5000), cap concurrent probes, rate-limit per source IP.
-4. Require auth + CSRF for dashboard-triggered probes.
-5. Log every probe with client identity.
+**Fix:** Use `crypto.constant_time_compare(got_sig, expected)` or equivalent. If unavailable, double-HMAC: `hmac(key, got_sig) == hmac(key, expected)` -- this makes timing differences uninformative.
 
 ---
 
-### H4 — High: Probe blocks the sole HTTP accept loop (API DoS) + unbounded timeout
+### F3: High — Federation Push Accepts Arbitrary JSON
 
-**Severity:** High  
+**File:** `core/main.mko` lines 2909-2957  
+**Code:** The `/api/federation/push` endpoint parses JSON bodies and directly enqueues them into the DB via `db_enqueue()` and `cap_push()`.
 
-**Attack scenario:**  
-HTTP worker is a single sequential loop: `http_accept` → handle → `http_close`. `do_probe` runs **inline** for up to `wait_ms` with a busy-wait (`sleep_ms(5)`). Attacker sets:
+Any authenticated API client can inject arbitrary records. The records are stored verbatim and rendered in the dashboard. While the dashboard uses `h()` for HTML escaping, the `record_json` field is stored raw and re-parsed -- a malformed record could corrupt queries or inject misleading call data.
 
-```json
-{"host":"203.0.113.1","port":9,"timeout_ms":2147483647}
-```
+No validation is performed on required fields (ts_ms, src, dst, method, etc.). No federation peer authentication exists beyond the shared API key.
 
-`wait_ms` only defaults when `<= 0`; **no maximum**. One request can freeze `/api/health`, `/api/messages`, `/metrics`, and further probes for a very long time. Even with modest timeouts, concurrent attackers serialize the API.
+**Fix:**
+1. Validate required fields and types before enqueue.
+2. Add a dedicated federation API key or mutual TLS for peer auth.
+3. Tag federated records with a `source` field so they can be distinguished from local captures.
 
-**Evidence:**
+---
 
-```629:689:core/main.mko
-fn http_worker(...) {
-    ...
-    while 1 == 1 {
-        let c = http_accept(fd)
-        ...
-            let result = do_probe(metrics, host, port_p, wait_ms)
-            let _ = http_respond_json(c, 200, result)
-        ...
-        let _ = http_close(c)
-    }
+### F4: High — Recording Upload Has No File Validation
+
+**File:** `web/main.weft` lines 2796-2810  
+**Code:** `fs.write_bytes(path, f["body"])`
+
+The upload accepts any file content and writes it directly to disk. No checks for:
+- File size (DoS via disk exhaustion)
+- File type (MIME type / magic bytes)
+- Filename (the call_id is sanitized, but the content is not)
+
+An operator-role user can upload multi-GB files or non-audio content.
+
+**Fix:** Add a max file size check (e.g., 50MB). Validate audio magic bytes (RIFF header for WAV). The `sanitize_cid()` function correctly prevents path traversal.
+
+---
+
+### F5: High — Recording Download Has No Auth
+
+**File:** `web/main.weft` lines 2787-2794  
+**Code:** `app.get("/recordings/:cid", fn(req) { ... })` -- no `get_user()` call.
+
+Anyone who can guess or enumerate a Call-ID can download call recordings without authentication. Call-IDs are visible in share links, URLs, and are often predictable.
+
+**Fix:** Add `get_user(req, token_secret)` check. At minimum require viewer role.
+
+---
+
+### F6: High — Session Secret Regenerated on Restart
+
+**File:** `web/main.weft` line 1841  
+**Code:** `token_secret := secrets.token_hex(32)`
+
+The HMAC signing key is generated at process start. Every restart invalidates all sessions and share links. This is acceptable for development but problematic in production:
+- Rolling restarts force all users to re-login.
+- Share links become invalid unexpectedly.
+- No key rotation strategy exists.
+
+**Fix:** Persist the secret to `data/zaman-token-secret` on first run. Load it on subsequent starts. Provide a rotation mechanism that accepts both old and new keys during a grace period.
+
+---
+
+### F7: Medium — ClickHouse String Interpolation
+
+**File:** `core/main.mko` lines 344-352, 556-565  
+**Code:** `http_post(url, sql)` where SQL is built via string concatenation.
+
+While `sql_quote()` (line 359) escapes single quotes for SQLite/Postgres, the ClickHouse path sends raw SQL over HTTP. The `sql_quote()` function only replaces `'` with `''`, which is insufficient for ClickHouse's syntax (which also needs `\` escaping in some modes).
+
+SIP header values are attacker-controlled. A crafted Call-ID like `x'); DROP TABLE captures; --` would be quoted to `'x''); DROP TABLE captures; --'` which is safe for standard SQL but depends on ClickHouse's parsing mode.
+
+**Fix:** Use ClickHouse parameterized queries (`{param:String}` syntax) or validate that the ClickHouse server is configured in non-backslash-escape mode. Add `\` escaping to `sql_quote()`.
+
+---
+
+### F8: Medium — API Key Comparison Not Constant-Time
+
+**File:** `core/main.mko` lines 181-198  
+**Code:** `if str_eq(h, want)` and `if str_eq(tok, want)`
+
+The API key comparison uses `str_eq` which likely short-circuits. Combined with the rate limiter, this is hard to exploit in practice, but it's a defense-in-depth gap.
+
+**Fix:** Use constant-time comparison for the API key check.
+
+---
+
+### F9: Medium — HEP Password Not Constant-Time
+
+**File:** `core/main.mko` lines 1982-1991  
+**Code:** `if str_eq(info.node_pw, want)`
+
+Same issue as F8 but for the HEP password. Exploitable over UDP where there's no rate limiting on HEP packets.
+
+**Fix:** Constant-time compare. Also consider rate-limiting HEP auth failures per source IP.
+
+---
+
+### F10: Medium — XFF Trusted for Rate Limiting
+
+**File:** `core/main.mko` lines 2724-2728  
+**Code:** Rate limiter uses `http_header(c, "X-Forwarded-For")` as the client IP.
+
+An attacker can set arbitrary `X-Forwarded-For` headers to bypass rate limiting by rotating spoofed IPs. When behind nginx this is partially mitigated (nginx overwrites XFF), but the core can be accessed directly if port 9090 is exposed.
+
+**Fix:** Only trust XFF when a `ZAMAN_TRUSTED_PROXIES` list is configured. Fall back to the TCP peer address. The web dashboard has the same issue (line 1532-1540) but for IP allowlisting, where spoofed XFF could bypass the allowlist entirely.
+
+---
+
+### F11: Medium — Session Cookie Missing `Secure` Flag
+
+**File:** `web/main.weft` line 180  
+**Code:** `"zaman_sid=" + token + "; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax"`
+
+When deployed behind TLS (the recommended production config), the cookie should include the `Secure` flag to prevent transmission over HTTP.
+
+**Fix:** Add `Secure` flag when `ZAMAN_TLS=1` or when `X-Forwarded-Proto: https` is detected. Consider also setting `__Host-` prefix for additional protection.
+
+---
+
+### F12: Medium — User/Token Files Readable at Rest
+
+**Files:** `data/zaman-users.json`, `data/zaman-api-tokens.json`
+
+User password hashes (even weak SHA-256 ones) and API token hashes are stored in plain JSON files. File permissions are set to 750 on the data directory by the installer, but the zaman process user can read them. Any file-read vulnerability or log exposure could leak these.
+
+**Fix:** The installer correctly sets `chmod 750`. Ensure the web process doesn't serve the data directory. Add a check that `data/` is not under the web root. Consider encrypting sensitive fields at rest.
+
+---
+
+### F13: Low — Weak Password Policy
+
+**File:** `web/main.weft` lines 1514-1526  
+8 characters + 1 digit is below modern standards (NIST SP 800-63B recommends checking against breached password lists).
+
+**Fix:** Increase minimum to 12 characters. Consider checking against a top-10k breached passwords list.
+
+---
+
+### F14: Low — No Login Brute-Force Protection
+
+**File:** `web/main.weft` lines 1869-1880  
+Failed logins are audited but not rate-limited. An attacker can attempt unlimited password guesses.
+
+**Fix:** Add per-IP and per-username rate limiting (e.g., 5 attempts per minute). Lock accounts after 10 consecutive failures with admin unlock required.
+
+---
+
+### F15: Low — Installer Supply Chain
+
+**File:** `install.sh` lines 117-143  
+The installer runs `curl | bash` from `mako-lang.dev/install.sh` and downloads binaries from multiple fallback URLs without checksum verification.
+
+**Fix:** Pin expected SHA-256 checksums for binaries. Verify GPG signatures if available. Use `--proto =https` with curl.
+
+---
+
+### F16: Low — Partials Endpoints Skip Auth
+
+**File:** `web/main.weft` lines 1967-2007  
+`/partials/status`, `/partials/charts`, `/partials/nodes`, `/partials/messages` do not call `get_user()`. They return HTML fragments that could leak node names, message counts, and traffic patterns to unauthenticated users.
+
+`/partials/alerts` (line 2814) also skips auth and additionally fires alert notifications on every poll, meaning an unauthenticated client could trigger webhook floods.
+
+**Fix:** Add auth checks to all partials endpoints, or gate them behind a middleware.
+
+---
+
+### F17: Low — CSRF Relies on SameSite=Lax Only
+
+POST actions (user creation, deletion, password reset, alert configuration) use HTML forms without CSRF tokens. SameSite=Lax prevents cross-site form submissions in modern browsers, but older browsers or certain redirect-based attacks may bypass this.
+
+**Fix:** Add a CSRF token to state-changing forms. A per-session random value in a hidden field, verified on POST, is sufficient.
+
+---
+
+## What v0.2 Got Right
+
+Credit where due -- these are solid security decisions:
+
+1. **SIP credential redaction** (`redact_sip()`) strips Authorization headers before storage.
+2. **Probe SSRF protections** block metadata endpoints (169.254.169.254), private IPs by default, and cap timeout to 5s.
+3. **API key auth** on the core with rate limiting (configurable req/s per IP).
+4. **HEP password + IP allowlist** for ingest authentication.
+5. **HTML escaping** via `h()` is consistently applied across the dashboard.
+6. **`sql_quote()`** handles single-quote escaping for SQL parameters.
+7. **`sanitize_cid()`** blocks path traversal in recording filenames.
+8. **RBAC enforcement** is checked on every route (admin/operator/viewer).
+9. **Audit logging** with rotation for compliance.
+10. **HMAC-signed stateless sessions** avoid server-side session storage attacks.
+11. **API tokens stored as SHA-256 hashes** (not plaintext).
+12. **SIP echo policy** defaults to OPTIONS-only, REGISTER returns 401 (not fake 200).
+
+---
+
+## Hardening Recommendations
+
+### Immediate (before any internet exposure)
+
+1. **Replace SHA-256 password hashing with bcrypt/Argon2id** (F1).
+2. **Add auth to `/recordings/:cid`** (F5).
+3. **Add auth to `/partials/*` endpoints** (F16).
+4. **Add file size limit to recording upload** (F4, e.g., reject > 50MB).
+
+### Short-term (before production)
+
+5. **Constant-time comparison** for all secret comparisons (F2, F8, F9).
+6. **Persist the token secret** to survive restarts (F6).
+7. **Add the `Secure` cookie flag** when behind TLS (F11).
+8. **Login rate limiting** -- 5 attempts/minute per IP (F14).
+9. **Validate federation push records** (F3).
+10. **Only trust XFF from configured proxy IPs** (F10).
+
+### Longer-term
+
+11. **CSRF tokens** on all state-changing forms (F17).
+12. **Checksum verification** in the installer (F15).
+13. **Stronger password policy** (F13).
+14. **ClickHouse parameterized queries** (F7).
+15. **Mutual TLS for federation peers**.
+
+---
+
+## Security Configuration Reference
+
+| Variable | Purpose | Default | Recommendation |
+|----------|---------|---------|----------------|
+| `ZAMAN_API_KEY` | Core API authentication | *(none -- open)* | Always set. 48+ hex chars. |
+| `ZAMAN_AUTH` | Dashboard auth toggle | `1` (on) | Never set to `0` in production. |
+| `ZAMAN_HEP_PASSWORD` | HEP ingest password | *(none -- open)* | Set for all deployments accepting HEP. |
+| `ZAMAN_HEP_ALLOW` | HEP source IP allowlist | *(any)* | Set to known agent IPs. |
+| `ZAMAN_DASHBOARD_ALLOW_IPS` | Dashboard IP allowlist | *(any)* | Set for internal/VPN deployments. |
+| `ZAMAN_PROBE` | Enable active probing | `0` (off) | Keep off unless needed. |
+| `ZAMAN_PROBE_ALLOW_PRIVATE` | Allow probing RFC1918 | `0` (off) | Keep off. |
+| `ZAMAN_ECHO_METHODS` | SIP echo method filter | `OPTIONS` | Keep default. Never set `ALL`. |
+| `ZAMAN_ECHO_ALL` | Echo all SIP methods | `0` (off) | Keep off in production. |
+| `ZAMAN_RATE_LIMIT` | API req/s per IP | `100` | Lower to 20-50 for public deployments. |
+| `ZAMAN_DB_RETENTION_DAYS` | Auto-purge captures | `14` | Set per compliance requirements. |
+| `ZAMAN_HEP_TLS` | HEP TLS listener | `0` (off) | Enable for WAN HEP agents. |
+
+### Nginx hardening (add to `/etc/nginx/conf.d/zaman.conf`)
+
+```nginx
+# Block direct access to core API from outside
+location /api/ {
+    allow 127.0.0.1;
+    deny all;
+    proxy_pass http://127.0.0.1:9090/api/;
 }
+
+# Security headers
+add_header X-Content-Type-Options nosniff always;
+add_header X-Frame-Options DENY always;
+add_header Referrer-Policy strict-origin-when-cross-origin always;
+add_header Content-Security-Policy "default-src 'self' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net" always;
 ```
 
-```678:680:core/main.mko
-            if wait_ms <= 0 {
-                wait_ms = 2000
-            }
+### Firewall (verify after install)
+
+```bash
+# Core API should NOT be internet-accessible
+ufw deny from any to any port 9090
+# Only allow HEP from known agents
+ufw allow from 10.0.0.0/8 to any port 9060 proto udp
 ```
-
-**Fix recommendation:**
-1. Hard-cap `timeout_ms` (e.g. `min(wait_ms, 5000)`).
-2. Run probes on a worker pool / separate thread; never block accept loop.
-3. Reject new probes when one is in flight (or queue with limit).
-4. Use blocking recv with SO_RCVTIMEO instead of busy-poll if available.
-
----
-
-### H5 — High: Open SIP echo (REGISTER 200 unauthenticated, MESSAGE, OPTIONS) — reflector & abuse
-
-**Severity:** High  
-
-**Attack scenario:**
-1. **UDP reflection:** Attacker spoofs source IP of OPTIONS/REGISTER/MESSAGE to victim; Zaman replies 200 OK to the victim (classic SIP reflection; amp factor modest but still open responder).
-2. **False registration success:** Any REGISTER gets **200 OK + Expires: 3600** with no credentials check — scanners/clients may believe they registered; operational confusion; potential policy bypass if something trusts “registered to Zaman”.
-3. **MESSAGE spam:** Auto-200 for MESSAGE encourages abuse and stores MESSAGE bodies in the ring for later exfil via API.
-4. **`ZAMAN_ECHO_ALL=1`:** Echoes **all** requests (including INVITE) with 200 — can disrupt real call setups if mis-deployed on a shared path.
-
-**Evidence:**
-
-```173:208:core/main.mko
-fn should_echo(msg: string, echo_all: int) -> int {
-    ...
-    if sip_method_eq(msg, "OPTIONS") == 1 { return 1 }
-    if sip_method_eq(msg, "REGISTER") == 1 { return 1 }
-    if sip_method_eq(msg, "INFO") == 1 { return 1 }
-    if sip_method_eq(msg, "MESSAGE") == 1 { return 1 }
-    return 0
-}
-...
-    if sip_method_eq(msg, "REGISTER") == 1 {
-        let exp = sip_headers_append(extra3, "Expires", "3600")
-        return sip_reply(msg, 200, "OK", exp, "")
-    }
-```
-
-```316:325:core/main.mko
-        if should_echo(msg, echo_all) == 1 {
-            let reply = build_echo(msg, local_host, local_port)
-            let host = udp_last_sender_host()
-            let port = udp_last_sender_port()
-            if not str_eq(host, "") && port > 0 {
-                let _ = sip_udp_send(fd, host, port, reply)
-```
-
-Default bind:
-
-```697:697:core/main.mko
-    let mut sip_host = env_get_or("ZAMAN_SIP_HOST", "0.0.0.0")
-```
-
-**Fix recommendation:**
-1. Default echo **off** or OPTIONS-only; make REGISTER/MESSAGE opt-in (`ZAMAN_ECHO_METHODS=OPTIONS`).
-2. For REGISTER: respond `401`/`403` or `200` only with explicit lab mode; never advertise real registration success without auth.
-3. Rate-limit echoes per source IP; optional require shared secret / allowlisted peers.
-4. Do not enable `ZAMAN_ECHO_ALL` outside isolated labs; document blast radius.
-5. Prefer binding SIP to specific interface; firewall by default.
-
----
-
-### H6 — High: Unauthenticated HEP ingest → forged telemetry & ring pollution
-
-**Severity:** High  
-
-**Attack scenario:**  
-Anyone who can UDP to HEP port sends HEPv3 with arbitrary payload chunk (type 0x000f). Payload is parsed as SIP and stored with attacker-chosen src IP/port and agent id. Impacts: fake call ladders, false incidents, injection of malicious SIP text into dashboards/API for other analysts, ring eviction of real traffic (DoS of visibility).
-
-**Evidence:**
-
-```338:358:core/main.mko
-fn handle_hep_packet(store: CMap, metrics: CMap, pkt: string) {
-    let info = hep_decode(pkt)
-    ...
-    let rec = make_record(src, "HEP3", info.payload, agent)
-    cap_push(store, metrics, rec)
-```
-
-No HEP shared secret, TLS, or source allowlist. `hep_decode` accepts any `HEP3` framing with a payload chunk.
-
-**Fix recommendation:**
-1. Shared secret / HMAC HEP auth (Homer-style) or mTLS on a TCP HEP path.
-2. Allowlist HEP agent IPs.
-3. Separate retention quotas for HEP vs native SIP.
-4. Default HEP bind to localhost if only local agents exist.
-
----
-
-## Medium findings
-
-### M1 — Medium: Resource leak in `do_probe` (UDP sockets never closed)
-
-**Severity:** Medium  
-
-**Attack scenario:**  
-Each probe calls `sip_udp_bind("0.0.0.0", 0)` and returns without closing `fd` (success, send-fail, and timeout paths). Repeated probes exhaust file descriptors; subsequent binds fail; SIP/HEP workers may also fail if FD table fills (**needs validation** of runtime FD limits and whether Mako GC closes sockets).
-
-**Evidence:** `do_probe` in `core/main.mko` ~495–547 — no `close`/`sip_udp_close` on any path.
-
-**Fix recommendation:**  
-Always close the probe socket in a finally-equivalent path; prefer one reusable probe socket with serialized use.
-
----
-
-### M2 — Medium: Incomplete JSON escaping (`jesc`) — injection / parser confusion
-
-**Severity:** Medium  
-
-**Attack scenario:**  
-SIP headers (From, To, Call-ID, etc.) are attacker-controlled. `jesc` only escapes `\`, `"`, `\r`, `\n`, `\t`. Missing: other C0 controls (`\u0000`–`\u001f`), `\b`, `\f`, U+2028/U+2029. A header containing raw bytes can:
-
-- Break strict JSON parsers (API clients, Weft `http.get_json`).
-- Truncate or confuse C-string based consumers on `\0`.
-- Cause subtle dashboard failures (empty tables) which is availability impact.
-
-`raw_b64` is not passed through `jesc`; standard Base64 alphabet is JSON-safe (OK if encoder is strict).
-
-**Evidence:**
-
-```12:18:core/main.mko
-fn jesc(s: string) -> string {
-    let mut o = str_replace(s, "\\", "\\\\")
-    o = str_replace(o, "\"", "\\\"")
-    o = str_replace(o, "\r", "\\r")
-    o = str_replace(o, "\n", "\\n")
-    o = str_replace(o, "\t", "\\t")
-    return o
-}
-```
-
-**Fix recommendation:**  
-Implement full JSON string escaping (all controls as `\u00XX`). Prefer a single JSON builder primitive from the runtime if available. Fuzz with random SIP headers.
-
----
-
-### M3 — Medium: Call-ID filter is substring match over whole JSON record (incl. `raw_b64`)
-
-**Severity:** Medium  
-
-**Attack scenario:**  
-Filter uses `str_contains(rec, "\"call_id\":\"" + jesc(call_id_filter) + "\"")` on the entire serialized record. Impact:
-
-- Substring false positives (`ab` matches `abc`).
-- Filter string may match inside `raw_b64` or other fields if the JSON substring appears coincidentally — information-leak / confusion; attackers can craft SIP so Call-ID filtering becomes unreliable.
-- Query string is **not URL-decoded** in `query_get` — `%xx` not normalized.
-
-**Evidence:**
-
-```458:466:core/main.mko
-            let keep = if str_eq(call_id_filter, "") {
-                1
-            } else {
-                if str_contains(rec, "\"call_id\":\"" + jesc(call_id_filter) + "\"") {
-                    1
-                } else {
-                    0
-                }
-            }
-```
-
-**Fix recommendation:**  
-Parse fields into structured storage; exact-match Call-ID; URL-decode query params.
-
----
-
-### M4 — Medium: Binding defaults & misleading localhost messaging
-
-**Severity:** Medium  
-
-**Attack scenario:**  
-Operators read logs / README “http://127.0.0.1:PORT” and believe the API is loopback-only. Code uses `http_bind(port)` (no host) and SIP/HEP default `0.0.0.0`. Web listens on `":3000"`. Accidental exposure on multi-homed hosts / cloud VMs is likely.
-
-**Evidence:**
-- `ZAMAN_SIP_HOST` default `0.0.0.0` (`core/main.mko` ~697).
-- `print("api  http http://127.0.0.1:" + string(port))` (~634) while bind is port-only (~629).
-- `app.listen(":3000")` (`web/main.weft` ~424).
-- README documents `0.0.0.0` for SIP host but API/web exposure is under-emphasized.
-
-**Fix recommendation:**  
-Default all listeners to `127.0.0.1`; require `ZAMAN_*_HOST=0.0.0.0` to go public; log actual bind address; fix print strings.
-
----
-
-### M5 — Medium: No rate limiting on SIP / HEP / HTTP
-
-**Severity:** Medium  
-
-**Attack scenario:**  
-Flood UDP SIP or HEP to force CPU parse + ring overwrite (visibility DoS) + echo replies (outbound bandwidth). Flood HTTP for connection churn. Combine with H4 for total monitoring outage.
-
-**Evidence:** No rate-limit counters or token buckets in workers; ring only bounds memory to ~512 slots, not CPU/bandwidth.
-
-**Fix recommendation:**  
-Per-source rate limits; global PPS caps; drop + metric when exceeded; optional fail2ban-style temp bans.
-
----
-
-### M6 — Medium: Capture ring concurrent access race (sip + hep + http)
-
-**Severity:** Medium (**needs validation** of CMap atomicity)
-
-**Attack scenario:**  
-`sip_worker`, `hep_worker`, and `http_worker` share `store`/`metrics`. `cap_push` does non-atomic read-modify-write of `idx` and slot write. If CMap ops are not atomic across threads, possible torn reads, lost messages, or wrong id mapping — integrity failure for forensics.
-
-**Evidence:**
-
-```66:72:core/main.mko
-fn cap_push(ring: CMap, metrics: CMap, rec: string) {
-    let idx = cmap_i(ring, "idx")
-    let slot = idx % RING
-    cmap_set(ring, "msg_" + string(slot), rec)
-    cmap_set_i(ring, "idx", idx + 1)
-    ...
-}
-```
-
-Workers kicked concurrently in `crew t` (~722–729).
-
-**Fix recommendation:**  
-Document CMap concurrency; if not atomic, use a mutex or single writer thread with queues.
-
----
-
-### M7 — Medium: CSRF / clickjacking on probe (dashboard)
-
-**Severity:** Medium  
-
-**Attack scenario:**  
-Authenticated-user scenario after auth is added — or any browser on a network that can reach open dashboard today. Malicious page auto-POSTs `/probe` via HTMX/form to force OPTIONS against internal targets. No CSRF token, no `SameSite` session cookies (no sessions yet), no `X-Frame-Options` / CSP.
-
-**Evidence:** `app.post("/probe")` form without token (`web/main.weft` ~338–355).
-
-**Fix recommendation:**  
-CSRF tokens; `SameSite=strict` cookies when auth lands; CSP; `frame-ancestors 'none'`.
-
----
-
-## Low/Info findings
-
-### L1 — Low: Message id path handling is integer-only (path traversal largely mitigated)
-
-**Severity:** Low / Info  
-
-`/api/messages/:id` uses `path[14:]` + `parse_int_or`. Non-numeric ids fail closed to 404. Web route `/messages/:id` concatenates id into core URL — **needs validation** that Weft param cannot contain `/` or `?` for open proxy path abuse; likely single path segment.
-
-**Fix:** Explicit integer validation; reject non-`^[0-9]+$`.
-
----
-
-### L2 — Low: URL query construction without `encodeURIComponent` (web → core)
-
-**Severity:** Low  
-
-`fetch_messages` appends `call_id` raw (`web/main.weft` ~136–138). Call-IDs with `&`, `=`, spaces break filters; not classic SSRF (host fixed by `ZAMAN_CORE`).
-
-**Fix:** URL-encode query parameters.
-
----
-
-### L3 — Low: HTML attribute vs URL context mixing
-
-**Severity:** Low  
-
-Call-IDs are HTML-escaped (`h()`) then placed in `href` / `hx-get` query strings. Good against XSS attribute breakout; can mangle URLs for special characters. Prefer: URL-encode for URLs, HTML-escape for text nodes.
-
-**Evidence:** e.g. `href="/calls?call_id=" + cid` with `cid := h(call_id)` (`web/main.weft` ~89–99, ~278, ~314).
-
----
-
-### L4 — Low: Numeric fields rendered without `h()` in some places
-
-**Severity:** Low  
-
-`id`, `status`, `rtt` sometimes concatenated as `"" + (id)`. If JSON types are always numbers from core, safe. If a compromised/buggy core returned strings with HTML, risk rises. Defense-in-depth: always `h()`.
-
----
-
-### L5 — Info: Third-party CDN scripts (supply chain)
-
-**Severity:** Info  
-
-Tailwind browser CDN (`cdn.jsdelivr.net`) and HTMX CDN in layout. Compromised CDN → XSS on dashboard.
-
-**Fix:** Pin SRI hashes, self-host assets.
-
----
-
-### L6 — Info: Demo/smoke scripts use high ports but still open services
-
-**Severity:** Info  
-
-`demo.sh` / `smoke.sh` use 15060/19060/19090 and curl localhost — good for local lab. Core still binds SIP to `0.0.0.0` by default even in demo. Smoke does not test auth, probe restrictions, or REGISTER behavior.
-
----
-
-### L7 — Info: Prometheus metrics are mostly safe from injection
-
-**Severity:** Info (positive-leaning)  
-
-Metric names/labels are code-defined counters, not SIP-derived label values — low Prometheus injection risk. `/metrics` remains unauthenticated information disclosure (traffic volumes, probe RTT).
-
----
-
-### L8 — Info: README honesty vs residual overconfidence
-
-**Severity:** Info  
-
-README correctly lists auth as TODO. Residual false confidence:
-
-- Log line implies API is `127.0.0.1` only.
-- “production-ish ports” language without production security controls.
-- Echo of REGISTER as 200 may be read as intentional SIP server behavior rather than lab convenience.
-
----
-
-### L9 — Info: Mild amplification via echo replies
-
-**Severity:** Low  
-
-Small OPTIONS request → larger 200 with Contact/Server/Allow. Not a classic large amp factor, but open internet exposure still enables reflection nuisance.
-
----
-
-### L10 — Info: Memory bounded by ring, not by single message policy
-
-**Severity:** Info  
-
-`RING = 512`, UDP recv up to 65535. Worst-case resident payload on order of tens of MB if every slot holds max-size messages — acceptable for v0.1 but worth documenting. No max body size policy for stored SIP beyond UDP limit.
-
----
-
-## Positive controls (what is done right)
-
-1. **Dashboard XSS posture is strong overall** — dedicated `h()` helper wrapping `html.escape` used for Call-ID, From, To, raw SIP text, probe errors, etc.
-2. **Raw SIP display path** decodes base64 then escapes before `<pre>` (`web/main.weft` ~291–313).
-3. **HEP does not auto-echo** — only stores; no HEP-triggered reflection.
-4. **Messages list limit capped** at 200 (`messages_json`).
-5. **Ring size fixed** — prevents unbounded capture growth.
-6. **Prometheus series are static** — no user-controlled label injection surface in `metrics_prom`.
-7. **Roadmap admits missing auth** — reduces “false product security” claim (good honesty).
-8. **Demo/smoke prefer high ports and 127.0.0.1 clients** — healthier local defaults than blindly using 5060 in scripts.
-9. **`jesc` handles the common JSON breakout characters** (`\`, `"`, newlines) even if incomplete.
-10. **Probe accepts only SIP responses on ephemeral socket** — reduces some cross-talk; still not a security boundary.
-
----
-
-## Recommended fix order (priority patch list)
-
-| Priority | Item | Effort | Risk reduced |
-|----------|------|--------|--------------|
-| P0 | Bind API + web to `127.0.0.1` by default; document firewall for SIP/HEP | Small | Accidental exposure |
-| P0 | Disable or heavily gate `POST /api/probe` (flag + allowlist + auth) | Small–Med | SSRF/scanner/flood |
-| P0 | Cap `timeout_ms`; never block HTTP accept on probe; close probe FD | Small | API DoS + FD leak |
-| P0 | Auth on API + dashboard (or reverse-proxy only deployment guide) | Med | Data exfil |
-| P1 | Redact Authorization* headers in store/export | Small | Credential leak |
-| P1 | Echo policy: OPTIONS-only default; REGISTER must not 200 as registered without auth | Small | Reflector / false auth |
-| P1 | HEP allowlist / shared secret | Med | Forged telemetry |
-| P2 | Full JSON escape; structured records instead of string contains filter | Med | Injection / integrity |
-| P2 | Rate limits on SIP/HEP/HTTP | Med | DoS |
-| P2 | CSRF + CSP + CDN SRI | Small | Web abuse |
-| P3 | CMap concurrency audit / mutex | Med | Race integrity |
-| P3 | URL-encoding of query params in Weft | Small | Correctness |
-
-**Minimal “don’t get owned tomorrow” checklist:**
-
-```text
-1. Firewall: deny WAN → 5060/9060/9090/3000
-2. export ZAMAN_SIP_HOST=127.0.0.1   # if local only
-3. Do not set ZAMAN_ECHO_ALL=1 on shared networks
-4. Do not publish /api/probe without auth + allowlist
-5. Put nginx/caddy with basic auth or mTLS in front of 9090/3000
-```
-
----
-
-## Residual risk if nothing is fixed
-
-If Zaman is reachable by untrusted parties with current defaults:
-
-- **Confidentiality:** All recent SIP (up to 512 messages), including auth headers and MESSAGE bodies, is world-readable via HTTP.
-- **Integrity:** HEP and SIP sources can forge monitoring data; analysts cannot trust ladders/metrics.
-- **Availability:** Probe timeout DoS freezes the API; UDP floods churn CPU and overwrite the ring; FD leak from probes can brick the process over time.
-- **Abuse / liability:** Host becomes an open SIP OPTIONS/REGISTER/MESSAGE responder and an on-demand SIP scanner against third parties — network abuse complaints, reflection participation, and lateral recon from a “monitoring” box.
-- **Compliance:** Call metadata/PII capture without access control may violate privacy expectations even on internal VoIP.
-
-With **network isolation only** (no code fixes): risk drops sharply for internet attackers but **remains high for any local multi-tenant user, compromised laptop on the same LAN, or SSRF into the host**. Isolation is necessary but not sufficient for multi-user environments.
-
----
-
-## Appendix A — Endpoint exposure matrix
-
-| Surface | Default | Auth | Notes |
-|---------|---------|------|-------|
-| SIP UDP | `0.0.0.0:5060` | None | Capture + echo |
-| HEP UDP | `0.0.0.0:9060` | None | Ingest only |
-| API HTTP | `:9090` (host unspecified) | None | Full read + probe |
-| Dashboard | `:3000` all interfaces | None | UI + probe proxy |
-| `/metrics` | on API | None | Counters only |
-
-## Appendix B — False confidence map
-
-| Looks safe | Reality |
-|------------|---------|
-| Log “API http://127.0.0.1:…” | Bind is not obviously loopback-restricted |
-| `jesc` present | Incomplete vs JSON RFC; control chars slip through |
-| HTML escaping everywhere important | Prevents XSS ≠ prevents data theft or probe SSRF |
-| Ring size 512 | Bounds memory, not exfil of the last N sensitive messages |
-| README “auth TODO” | Accurate, but defaults still “production-ish ports” |
-| Probe “only OPTIONS” | Still full UDP reachability test + flood vector |
-| REGISTER 200 + Expires | Looks like a registrar; is unauthenticated lab echo |
-
-## Appendix C — Key code references
-
-| Topic | Location |
-|-------|----------|
-| `jesc` | `core/main.mko` 12–18 |
-| Record / `raw_b64` | `core/main.mko` 97–159 |
-| Echo policy + REGISTER 200 | `core/main.mko` 173–208, 316–325 |
-| HEP decode/ingest | `core/main.mko` 222–291, 338–358 |
-| Probe | `core/main.mko` 495–547, 667–682 |
-| HTTP routes | `core/main.mko` 629–691 |
-| Defaults / bind host | `core/main.mko` 696–730 |
-| Dashboard `h()` / routes / probe | `web/main.weft` 8–10, 241–424 |
-| Demo ports | `scripts/demo.sh`, `scripts/smoke.sh` |
-
----
-
-*End of report. This review did not run dynamic exploits against live systems; classifications marked “needs validation” should be confirmed with runtime tests under a controlled lab.*
-
----
-
-## Mitigations applied after this review (same session)
-
-| Finding | Mitigation landed |
-|---------|-------------------|
-| H3 probe open by default | `ZAMAN_PROBE` default **0**; 403 when disabled |
-| H4 unbounded timeout | Cap **5000 ms** on probe wait |
-| M1 probe FD leak | `udp_close(fd)` on all probe paths |
-| H5 REGISTER false success | Default echo **OPTIONS only**; REGISTER → **401** if enabled |
-| H1 partial secret leak | `Authorization` / `Proxy-Authorization` **redacted** before store |
-| M2 incomplete jesc | Control bytes → `\u00XX` |
-| Misleading API log | Log warns **NO AUTH** / bind `0.0.0.0` |
-
-| TLS mid-session abort | TLS sessions inline (no `drain(0)` kill); read → close TLS → parse |
-| `for s in range ch` broken | Mako 0.4.17 codegen fix; `db_writer` uses `for j in range ch` |
-
-**Still open (do not claim fixed):** full API/dashboard authentication, HEP allowlist, rate limits, CMap races, CSRF, loopback-only `http_bind` (runtime API is port-only), SSRF private-range allowlist beyond metadata IP.
