@@ -19,17 +19,19 @@ Integrated SIP monitoring: capture, metrics, dashboards, alerting, and echo — 
 2. Echo monitoring pings safely (default: OPTIONS → 200 only).
 3. Durable storage with three backend options: SQLite, PostgreSQL, ClickHouse.
 4. Real-time NOC dashboard with telecom KPIs (ASR, NER), time-series charts, anomaly detection.
-5. SIP call ladder with PCAP export, recording upload/playback, share links.
-6. RBAC (admin / operator / viewer), API tokens, audit log.
-7. Alerting via Slack, generic webhook, email.
-8. Prometheus-compatible `/metrics` endpoint.
-9. Structured concurrency via Mako `crew` / `kick` / `chan`.
+5. SIP call ladder with PCAP export, recording upload/playback, share links, B2BUA correlation.
+6. RTCP parsing with QoS metrics (jitter, loss, R-factor, MOS via ITU-T G.107).
+7. RBAC (admin / operator / viewer), API tokens, audit log, LDAP/SSO.
+8. Alerting via Slack, generic webhook, email with retry.
+9. Multi-node federation (remote instances push to central aggregator).
+10. Per-agent and per-destination SLA tracking with configurable thresholds.
+11. Prometheus-compatible `/metrics` endpoint and Grafana datasource API.
+12. Dashboard TLS via nginx reverse proxy (auto-configured by installer).
+13. Structured concurrency via Mako `crew` / `kick` / `chan`.
 
 ### 1.2 Non-goals
 
-- RTP/media capture or MOS scoring (SIP signaling only).
-- Multi-node federation (single core instance).
-- Built-in TLS on the dashboard (use a reverse proxy).
+- Full RTP media stream capture (RTCP quality metrics are supported, raw RTP is not).
 - Client-side SPA (server-rendered HTMX).
 
 ---

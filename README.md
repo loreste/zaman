@@ -1,6 +1,6 @@
 # Zaman
 
-Enterprise SIP monitoring — capture, ladder, metrics, alerting, and dashboards in one platform.
+Enterprise SIP monitoring — capture, call ladders, metrics, alerting, and dashboards in one platform.
 
 ## Why this exists
 
@@ -10,314 +10,259 @@ Zaman was built to fix that. Named after that friend, it puts SIP capture, call 
 
 It runs on SQLite out of the box — no external databases, no infrastructure prerequisites. When you outgrow that, switch to PostgreSQL or ClickHouse with one environment variable. Same binary, same dashboard, same API.
 
+---
+
 ## Install
 
-### One-line install (Linux)
+### One command (Linux)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/loreste/zaman/main/install.sh | sudo bash
 ```
 
-The installer:
-- Detects your distro (Debian/Ubuntu, RHEL/CentOS/Fedora/Rocky)
-- Installs all dependencies (Mako, Weft, clang, openssl)
-- Asks you to pick a database (SQLite, PostgreSQL, or ClickHouse)
-- Installs and configures the chosen database
-- Builds the core binary
-- Creates systemd services
-- Starts everything
-- Prints the dashboard URL and admin password
+This single command handles everything:
 
-To pick the database non-interactively:
+1. **Detects your distro** — Debian, Ubuntu, RHEL, CentOS, Fedora, Rocky, AlmaLinux
+2. **Installs all system dependencies** — clang, gcc, libc-dev, libssl-dev, pkg-config, python3, openssl, git
+3. **Installs Mako** — the language the core is written in (tries official installer, falls back to direct download)
+4. **Installs Weft** — the framework the dashboard runs on (same pattern)
+5. **Verifies the toolchain** — confirms mako, weft, clang/gcc, git, openssl all work before proceeding
+6. **Asks you to pick a database** — SQLite, PostgreSQL, or ClickHouse
+7. **Installs and configures the database** — creates users, databases, passwords (all generated per install)
+8. **Optionally sets up HTTPS** — nginx reverse proxy with Let's Encrypt
+9. **Optionally enables HEP TLS** — generates certs for remote agents
+10. **Configures firewall** — ufw (Debian) or firewalld (RHEL)
+11. **Builds the core binary** from source
+12. **Creates systemd services** with security hardening
+13. **Generates unique credentials** — admin password, API key, database password
+14. **Starts everything** and prints the dashboard URL
+
+Non-interactive install:
 
 ```bash
-# SQLite (default, zero-config)
+# SQLite (default)
 curl -fsSL .../install.sh | sudo ZAMAN_DB=sqlite bash
 
-# PostgreSQL
-curl -fsSL .../install.sh | sudo ZAMAN_DB=postgres bash
+# PostgreSQL with HTTPS
+curl -fsSL .../install.sh | sudo ZAMAN_DB=postgres ZAMAN_TLS=1 ZAMAN_DOMAIN=sip.company.com bash
 
-# ClickHouse (millions of calls/day)
+# ClickHouse for carrier scale
 curl -fsSL .../install.sh | sudo ZAMAN_DB=clickhouse bash
 ```
 
 ### Docker
 
 ```bash
-# SQLite (simplest)
-docker compose up
-
-# With PostgreSQL
-docker compose --profile pg up
-
-# With ClickHouse
-docker compose --profile ch up
+docker compose up                     # SQLite
+docker compose --profile pg up        # PostgreSQL
+docker compose --profile ch up        # ClickHouse
 ```
 
 ### Manual build
 
-Requirements: [Mako](https://mako-lang.dev) ≥ 0.4.17, [Weft](https://weft.dev).
+Requires [Mako](https://mako-lang.dev) ≥ 0.4.18 and [Weft](https://weft.dev) on PATH.
 
 ```bash
 make build          # → bin/zaman-core
-make smoke          # end-to-end test
+make smoke          # end-to-end test (SIP echo, HEP UDP/TCP/TLS, probe, metrics)
 ./scripts/demo.sh   # core + dashboard → http://127.0.0.1:3000
 ```
 
-### Cloud / public IP
+For sizing recommendations, cloud instance types, architecture diagrams, and post-install checklists, see the **[Deployment Guide](docs/DEPLOYMENT.md)**.
 
-The installer handles everything — including HTTPS and firewall:
+---
 
-```bash
-# AWS EC2, GCP VM, or any server with a public IP
-curl -fsSL .../install.sh | sudo ZAMAN_DB=postgres bash
+## Features
 
-# During install, say yes to TLS and enter your domain:
-#   Enable TLS? [y/N]: y
-#   Domain name: sip-monitor.company.com
-#   Enable HEP TLS? [y/N]: y
-```
+### Capture
 
-This will:
-- Install nginx as a reverse proxy with Let's Encrypt TLS
-- Generate a self-signed HEP TLS cert for remote agents
-- Configure firewall rules (ufw or firewalld)
-- Generate a unique API key
-- Generate a unique PostgreSQL password (if using Postgres)
-- Keep the core API (port 9090) internal — proxied via nginx
+- SIP over UDP with OPTIONS echo
+- HEPv3 over UDP, TCP, and TLS
+- Compatible with Kamailio, OpenSIPS, FreeSWITCH, Asterisk, heplify, captagent
+- Auth header redaction before storage
+- REGISTER always returns 401 (never fakes a registrar)
 
-**AWS security group**: open 443/tcp (dashboard), 9060/udp (HEP), 9061/tcp (HEP TLS), 5060/udp (SIP).
+### Dashboard
 
-**GCP firewall**: same ports. Use a static IP and point your domain at it.
+| Page | Purpose |
+|------|---------|
+| **Overview** | Hero KPIs (active calls, ASR, error rate), node health bar, traffic charts with selectable time windows (5m–24h + custom), live capture feed |
+| **NOC** | Full network operations — node status table with health dots, anomaly alerts, traffic summary |
+| **Messages** | Multi-field search (Call-ID, agent, method, transport, IP), saved searches, JSON/CSV/PCAP export |
+| **Calls** | SIP ladder with directional arrows, PCAP download, call recording upload + playback, public share links, B2BUA leg correlation |
+| **Probe** | Active OPTIONS RTT test against any host |
+| **Metrics** | Core health, capture counters, HEP ingest stats, real-time 5m window, telecom KPIs, method + response code charts, Prometheus + Grafana config |
+| **Reports** | ASR/NER gauges with thresholds, response code breakdown with percentage bars, top talkers, HEP agent inventory, daily rollups |
+| **SLA** | Per-agent and per-destination SLA tracking with configurable ASR/NER/error targets |
+| **Alerts** | Threshold rules, Slack/webhook/email channels with retry, alert history |
+| **Users** | User management with inline password reset, role legend |
+| **API Tokens** | Generate/revoke Bearer tokens for automation with usage hints |
+| **Audit Log** | All auth and admin actions with human-readable timestamps |
 
-### Multi-office / remote agents
+### QoS and MOS
 
-Remote offices send HEP over TLS to the central Zaman instance:
+RTCP packets received via HEP (proto_type=5) are parsed for:
+- Jitter (ms), packet loss (%), cumulative loss
+- R-factor (ITU-T G.107 E-model)
+- MOS (Mean Opinion Score, 1.0–5.0)
 
-```bash
-# On the central Zaman server (already installed with HEP TLS enabled):
-# Remote agents connect to port 9061/tcp with TLS
+QoS data is attached to capture records and available via `GET /api/qos?call_id=X`.
 
-# Kamailio config (remote office):
-modparam("sipcapture", "hep_capture_on", 1)
-modparam("sipcapture", "hep_send_on", 1)
-modparam("sipcapture", "hep_send_addr", "sip-monitor.company.com:9061;transport=tls")
+### Multi-node federation
 
-# heplify (remote office):
-heplify -hs sip-monitor.company.com:9061 -ht tls -hi eth0
-```
-
-The HEP TLS certificate is at `/opt/zaman/data/tls/hep.crt`. Distribute it to remote agents or use `--insecure` for self-signed certs.
-
-### Systemd (after manual build)
+Remote Zaman instances forward captures to a central aggregator:
 
 ```bash
-sudo bash deploy/install.sh
-sudo systemctl enable --now zaman-core zaman-web
+# Central instance accepts pushes
+POST /api/federation/push   # JSON array or single record
+GET  /api/federation/health  # connectivity check
 ```
 
-Config: `/etc/zaman/core.env` and `/etc/zaman/web.env`. Logs: `journalctl -u zaman-core`.
+### Alerting
 
-For detailed sizing, architecture diagrams, cloud instance recommendations, and post-install checklists, see the **[Deployment Guide](docs/DEPLOYMENT.md)**.
+- **Anomaly detection**: auth failure spikes, registration storms, SIP scanning, 5xx errors, busy (486) spikes
+- **Threshold rules**: configurable on ASR, error rate, 5xx/4xx count, 401/403/503, INVITE rate, active calls
+- **Channels**: Slack webhook, generic webhook (PagerDuty/Teams/Opsgenie), email (SMTP)
+- **Retry**: 3 attempts with 1-second backoff
 
-## What it does
+### Auth and security
 
-```
- SIP/HEP agents          Browser
-       │                    │
-       ▼                    ▼
-┌──────────────┐     ┌──────────────┐
-│  zaman-core  │◄───►│  zaman-web   │
-│  (Mako)      │ API │  (Weft/HTMX) │
-│  :5060 SIP   │     │  :3000       │
-│  :9060 HEP   │     └──────────────┘
-│  :9090 HTTP  │
-└──────────────┘
-```
+- RBAC: **admin**, **operator**, **viewer**
+- Signed session tokens (HMAC-SHA256, stateless)
+- API tokens for automation (`Authorization: Bearer <token>`)
+- Password policy (min 8 chars + digit)
+- IP allowlisting (`ZAMAN_DASHBOARD_ALLOW_IPS`)
+- LDAP/SSO support (`ZAMAN_LDAP_URL`)
+- Audit log (all auth and admin actions)
+- Rate limiting (100 req/s per IP, configurable)
+- Dashboard TLS via nginx reverse proxy (configured by installer)
 
-**Capture** — SIP over UDP, HEPv3 over UDP/TCP/TLS. Compatible with any HEP-speaking SIP proxy or agent.
-
-**Dashboard** — Real-time overview with active calls, ASR/NER gauges, node health, anomaly detection. HTMX live-refresh, no JavaScript frameworks.
-
-**Call ladder** — SIP flow diagrams with directional arrows between endpoints. PCAP export for Wireshark. Call recording upload and playback. Public share links.
-
-**Search** — Filter by Call-ID, agent/server, SIP method, transport, endpoint IP. Save searches. Export as JSON, CSV, or PCAP.
-
-**Reports** — Telecom KPIs (ASR, NER), response code breakdown, top talkers, agent inventory, daily rollups.
-
-**SLA** — Per-agent and per-destination SLA tracking with configurable thresholds.
-
-**NOC** — Dedicated network operations view with node status table, anomaly alerts, traffic summary.
-
-**Alerting** — Threshold rules on ASR, error rates, 5xx spikes, auth failures. Notify via Slack, generic webhook, or email. Retry on failure.
-
-**Auth** — RBAC (admin/operator/viewer), API tokens, audit log, password policy, IP allowlisting, LDAP/SSO.
-
-**Metrics** — Prometheus-compatible `/metrics`, Grafana datasource API.
-
-**CLI** — `scripts/zaman-cli.sh` for terminal search, export, and ASCII call ladders.
+---
 
 ## Database
-
-Three backends, depending on scale:
 
 | Backend | Best for | Config |
 |---------|----------|--------|
 | **SQLite** | Single instance, lab, small deployments | default — zero config |
-| **PostgreSQL** | Production with existing Postgres infrastructure | `ZAMAN_DB_DRIVER=postgres` |
-| **ClickHouse** | High volume — millions of calls/day, long retention | `ZAMAN_DB_DRIVER=clickhouse` |
+| **PostgreSQL** | Production, existing Postgres infrastructure | `ZAMAN_DB_DRIVER=postgres` |
+| **ClickHouse** | Millions of calls/day, long retention | `ZAMAN_DB_DRIVER=clickhouse` |
 
-Tables are auto-created on first run for all backends.
+Tables and indexes are auto-created on first run. Schema is identical across backends.
 
-## HEP
+ClickHouse uses MergeTree with monthly partitions, SummingMergeTree for daily rollups, and communicates via the HTTP interface (no native driver needed).
 
-Native HEPv3 collector. Point your existing SIP proxies at Zaman's HEP port and it works.
-
-| Transport | Default | Enable |
-|-----------|---------|--------|
-| UDP | `:9060` | always on |
-| TCP | `:9062` | `ZAMAN_HEP_TCP=1` |
-| TLS | `:9061` | `ZAMAN_HEP_TLS=1` + cert/key |
-
-Optional HEP password and peer IP allowlisting are supported.
-
-## Dashboard pages
-
-| Page | What it shows |
-|------|--------------|
-| **Overview** | Active calls, ASR, error rate, node summary, traffic charts with time windows (5m–24h + custom), live capture feed |
-| **NOC** | Full network operations — node status table, anomaly alerts, agent inventory |
-| **Messages** | Multi-field search, saved filters, JSON/CSV/PCAP export |
-| **Calls** | SIP ladder with arrows, PCAP download, recording player, public share links, B2BUA correlation |
-| **Probe** | Active OPTIONS RTT test |
-| **Metrics** | Core health, capture counters, HEP ingest, real-time window, telecom KPIs, method/response charts, Prometheus + Grafana config |
-| **Reports** | ASR/NER gauges, response codes, top talkers, agents, daily rollups |
-| **SLA** | Per-agent and per-destination SLA with configurable targets |
-| **Alerts** | Threshold rules, notification channels (Slack/webhook/email), alert history |
-| **Users** | User management with inline password reset |
-| **API Tokens** | Generate/revoke Bearer tokens for automation |
-| **Audit Log** | Login attempts, config changes, exports |
-
-## Auth
-
-Three roles: **admin** (full access), **operator** (+ probe, alerts, SLA), **viewer** (read-only).
-
-Disable with `ZAMAN_AUTH=0` for lab use.
-
-API tokens for scripts: `Authorization: Bearer <token>`.
-
-IP allowlisting: `ZAMAN_DASHBOARD_ALLOW_IPS=10.0.0.,192.168.1.`
-
-LDAP: set `ZAMAN_LDAP_URL` to your LDAP HTTP bind proxy.
+---
 
 ## Integrations
 
-**Prometheus** — scrape `/metrics` on the core port.
+| System | How |
+|--------|-----|
+| **Prometheus** | Scrape `/metrics` on the core port |
+| **Grafana** | SimpleJSON datasource at `/api/grafana/` |
+| **LDAP/SSO** | `ZAMAN_LDAP_URL` — HTTP bind proxy |
+| **Kamailio/OpenSIPS** | HEP agent → Zaman port 9060 (UDP) or 9061 (TLS) |
+| **heplify** | `heplify -hs zaman-host:9060` |
+| **CLI** | `scripts/zaman-cli.sh health\|kpi\|nodes\|search\|calls\|ladder\|export` |
 
-**Grafana** — SimpleJSON datasource at `/api/grafana/`.
-
-**LDAP/SSO** — `ZAMAN_LDAP_URL` env var.
-
-**CLI** — `scripts/zaman-cli.sh health|kpi|nodes|search|calls|ladder|export`
+---
 
 ## Configuration
 
 | Env | Default | Purpose |
 |-----|---------|---------|
+| **Database** | | |
 | `ZAMAN_DB_DRIVER` | `sqlite` | `sqlite`, `postgres`, or `clickhouse` |
 | `ZAMAN_DB` | `data/zaman.db` | SQLite path |
 | `ZAMAN_DB_DSN` | _(localhost)_ | PostgreSQL connection string |
 | `ZAMAN_CH_URL` | `http://localhost:8123` | ClickHouse HTTP endpoint |
 | `ZAMAN_CH_DB` | `zaman` | ClickHouse database name |
 | `ZAMAN_DB_RETENTION_DAYS` | `14` | Auto-delete older captures (0 = keep all) |
-| `ZAMAN_SIP_HOST` | `0.0.0.0` | Bind address |
+| **Network** | | |
+| `ZAMAN_SIP_HOST` | `0.0.0.0` | Bind address for SIP/HEP |
 | `ZAMAN_SIP_PORT` | `5060` | SIP UDP (or argv1) |
 | `ZAMAN_HEP_PORT` | `9060` | HEP UDP (or argv2) |
 | `ZAMAN_API_PORT` | `9090` | HTTP API (or argv3) |
-| `ZAMAN_API_KEY` | _(empty)_ | Require key on API (except /health) |
-| `ZAMAN_ECHO_METHODS` | `OPTIONS` | Which methods get auto-reply |
-| `ZAMAN_PROBE` | `0` | Enable probe API |
-| `ZAMAN_HEP_TCP` | `0` | Enable HEP/TCP |
-| `ZAMAN_HEP_TLS` | `0` | Enable HEP/TLS |
+| `ZAMAN_HEP_TCP` | `0` | Enable HEP over TCP |
+| `ZAMAN_HEP_TLS` | `0` | Enable HEP over TLS |
 | `ZAMAN_HEP_TLS_CERT/KEY` | | PEM paths |
-| `ZAMAN_HEP_PASSWORD` | _(empty)_ | HEP auth |
-| `ZAMAN_HEP_ALLOW` | _(empty)_ | HEP peer allowlist |
+| **Security** | | |
+| `ZAMAN_API_KEY` | _(empty)_ | Require key on API (except /health) |
+| `ZAMAN_HEP_PASSWORD` | _(empty)_ | HEP password auth |
+| `ZAMAN_HEP_ALLOW` | _(empty)_ | HEP peer IP allowlist |
 | `ZAMAN_AUTH` | _(enabled)_ | Set `0` to disable dashboard auth |
 | `ZAMAN_DASHBOARD_ALLOW_IPS` | _(empty)_ | IP allowlist for dashboard |
-| `ZAMAN_RATE_LIMIT` | `100` | API requests/sec per IP (0 = disabled) |
+| `ZAMAN_RATE_LIMIT` | `100` | API requests/sec per IP |
 | `ZAMAN_LDAP_URL` | _(empty)_ | LDAP HTTP bind proxy URL |
+| **Behavior** | | |
+| `ZAMAN_ECHO_METHODS` | `OPTIONS` | Which SIP methods get auto-reply |
+| `ZAMAN_PROBE` | `0` | Enable active probe API |
+| `ZAMAN_FEDERATION_TARGET` | _(empty)_ | URL to forward captures to central instance |
 | `ZAMAN_BRAND_NAME` | `Zaman` | Custom dashboard title |
 | `ZAMAN_BRAND_SUBTITLE` | `SIP monitoring · echo` | Custom subtitle |
 | `ZAMAN_CORE` | `http://127.0.0.1:9090` | Core URL (for dashboard) |
 
-## Scale
+---
 
-- **Small**: SQLite, single binary, laptop or VM. Thousands of calls/day. No dependencies.
-- **Large**: ClickHouse backend, millions of calls/day, months of retention. Same binary, different env var.
+## API
 
-The dashboard is stateless (HMAC-signed cookies). Run multiple instances behind a load balancer.
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Deep health check (DB, uptime, channel capacity) |
+| GET | `/api/metrics` | JSON counters |
+| GET | `/metrics` | Prometheus text exposition |
+| GET | `/api/messages` | Search: `?limit=&call_id=&agent=&method=&transport=&src=` |
+| GET | `/api/messages/:id` | Single message |
+| GET | `/api/report/summary` | Totals, methods, transports |
+| GET | `/api/report/kpi` | ASR, NER, registration stats |
+| GET | `/api/report/response-codes` | Status code distribution |
+| GET | `/api/report/top-calls` | Busiest Call-IDs |
+| GET | `/api/report/top-talkers` | Busiest endpoints |
+| GET | `/api/report/agents` | HEP node inventory |
+| GET | `/api/report/daily` | Daily rollup |
+| GET | `/api/report/cps` | Calls per minute: `?minutes=` |
+| GET | `/api/realtime` | Live windowed stats: `?window=` (minutes) |
+| GET | `/api/nodes` | Per-agent health with status dots |
+| GET | `/api/anomalies` | Active anomaly indicators |
+| GET | `/api/qos` | QoS/MOS for a call: `?call_id=` |
+| GET | `/api/sla/agents` | Per-agent SLA metrics |
+| GET | `/api/sla/destinations` | Per-destination SLA metrics |
+| GET | `/api/related` | B2BUA correlated calls: `?call_id=` |
+| GET | `/api/export` | JSON export with filters |
+| POST | `/api/probe` | OPTIONS RTT test |
+| POST | `/api/delete` | Bulk delete: `{"call_id":"X"}` or `{"before_ts":N}` |
+| POST | `/api/federation/push` | Accept captures from remote instances |
+| GET | `/api/federation/health` | Federation connectivity check |
+| GET | `/api/grafana/` | Grafana datasource health |
+| GET | `/api/grafana/search` | Available Grafana metrics |
+| POST | `/api/grafana/query` | Grafana time-series query |
+
+---
 
 ## Project layout
 
 ```
 zaman/
-  core/main.mko          # capture, echo, HEP, API, metrics (Mako)
-  web/main.weft           # dashboard, auth, alerting (Weft + HTMX)
-  install.sh              # universal Linux installer
-  Dockerfile              # multi-stage build
-  docker-compose.yml      # SQLite / PostgreSQL / ClickHouse profiles
+  core/main.mko           # SIP capture, HEP, echo, API, metrics, QoS
+  web/main.weft            # dashboard, RBAC, alerting, SLA
+  install.sh               # universal Linux installer (Debian + RHEL)
+  Dockerfile               # multi-stage container build
+  docker-compose.yml       # profiles: default (SQLite), pg, ch
   deploy/
-    zaman-core.service    # systemd unit
-    zaman-web.service     # systemd unit
-    install.sh            # bare-metal installer (post-build)
+    zaman-core.service     # systemd unit (security-hardened)
+    zaman-web.service      # systemd unit
+    install.sh             # bare-metal post-build installer
   scripts/
-    smoke.sh              # end-to-end test
-    demo.sh               # local demo
-    zaman-cli.sh          # command-line interface
-    send_hep.py           # HEP test client
-    send_options.py       # SIP OPTIONS test client
-    gen_pcap.py           # PCAP generation
-  spec.md                 # engineering spec
-  SECURITY_REVIEW.md      # threat model
-  docs/                   # screenshots
+    smoke.sh               # end-to-end test suite
+    demo.sh                # local demo (core + dashboard)
+    zaman-cli.sh           # CLI: search, export, ladder, kpi
+    send_hep.py            # HEP test client (UDP/TCP/TLS)
+    send_options.py        # SIP OPTIONS test client
+    gen_pcap.py            # PCAP generation from JSON
+  docs/
+    DEPLOYMENT.md          # sizing, architecture, cloud, checklists
+  spec.md                  # engineering spec
+  SECURITY_REVIEW.md       # threat model and hardening
 ```
-
-## QoS and MOS scoring
-
-RTCP packets received via HEP (proto_type=5) are automatically parsed for quality metrics:
-- **Jitter** (ms), **packet loss** (%), **cumulative loss**
-- **R-factor** (ITU-T G.107 E-model)
-- **MOS** (Mean Opinion Score, 1.0–5.0)
-
-QoS data is attached to each RTCP capture record and available via `/api/qos?call_id=X`. The call ladder page shows QoS metrics when RTCP data exists for a call.
-
-## Multi-node federation
-
-Multiple Zaman instances can forward captures to a central aggregator:
-
-```bash
-# Remote office Zaman pushes to central
-ZAMAN_FEDERATION_TARGET=https://sip-monitor.company.com/api/federation/push \
-  ./bin/zaman-core
-
-# Central instance accepts pushes on /api/federation/push (POST)
-# Accepts JSON array or single capture record
-curl -X POST -H "Content-Type: application/json" \
-  -d '[{"ts_ms":...,"src":"...","call_id":"..."}]' \
-  https://central:9090/api/federation/push
-```
-
-## Dashboard TLS
-
-TLS is handled via nginx reverse proxy, configured automatically by the installer:
-
-```bash
-# Installer sets up nginx + Let's Encrypt
-sudo bash install.sh
-# Say yes to "Enable TLS?" and enter your domain
-```
-
-For manual setup, see the [Deployment Guide](docs/DEPLOYMENT.md).
 
 ## License
 
