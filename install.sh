@@ -61,48 +61,131 @@ install_deps() {
     if [ "$PKG_MGR" = "apt" ]; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq curl git make clang gcc python3 openssl ca-certificates sqlite3 >/dev/null
+        apt-get install -y -qq \
+            curl wget git make \
+            clang gcc libc-dev \
+            python3 \
+            openssl libssl-dev \
+            ca-certificates \
+            sqlite3 libsqlite3-dev \
+            pkg-config \
+            >/dev/null 2>&1
+        log "APT dependencies installed"
     else
-        yum install -y -q curl git make clang gcc python3 openssl ca-certificates sqlite >/dev/null 2>&1 || \
-        dnf install -y -q curl git make clang gcc python3 openssl ca-certificates sqlite >/dev/null 2>&1
+        # RHEL/CentOS/Fedora/Rocky
+        yum install -y -q \
+            curl wget git make \
+            clang gcc glibc-devel \
+            python3 \
+            openssl openssl-devel \
+            ca-certificates \
+            sqlite sqlite-devel \
+            pkgconfig \
+            >/dev/null 2>&1 || \
+        dnf install -y -q \
+            curl wget git make \
+            clang gcc glibc-devel \
+            python3 \
+            openssl openssl-devel \
+            ca-certificates \
+            sqlite sqlite-devel \
+            pkgconfig \
+            >/dev/null 2>&1
+        log "YUM/DNF dependencies installed"
     fi
 }
 
 # ── Install Mako ──
 install_mako() {
     if command -v mako >/dev/null 2>&1; then
-        log "Mako already installed: $(mako version 2>/dev/null | head -1)"
+        MAKO_VER=$(mako version 2>/dev/null | head -1)
+        log "Mako already installed: ${MAKO_VER}"
         return
     fi
-    log "Installing Mako..."
-    mkdir -p /usr/local/bin
+
+    log "Installing Mako language..."
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64|amd64) MAKO_ARCH="amd64" ;;
         aarch64|arm64) MAKO_ARCH="arm64" ;;
         *) err "Unsupported architecture: $ARCH" ;;
     esac
-    curl -fsSL "https://mako-lang.dev/dl/mako-linux-${MAKO_ARCH}" -o /usr/local/bin/mako
-    chmod +x /usr/local/bin/mako
+
+    mkdir -p /usr/local/bin
+
+    # Try official install script first
+    if curl -fsSL https://mako-lang.dev/install.sh -o /tmp/mako-install.sh 2>/dev/null; then
+        bash /tmp/mako-install.sh 2>/dev/null && {
+            # Move to system path if installed to ~/.local/bin
+            [ -f "$HOME/.local/bin/mako" ] && cp "$HOME/.local/bin/mako" /usr/local/bin/mako
+            rm -f /tmp/mako-install.sh
+        }
+    fi
+
+    # Fallback: direct binary download
+    if ! command -v mako >/dev/null 2>&1; then
+        for url in \
+            "https://mako-lang.dev/dl/mako-linux-${MAKO_ARCH}" \
+            "https://github.com/mako-lang/mako/releases/latest/download/mako-linux-${MAKO_ARCH}" \
+            "https://mako-lang.com/dl/mako-linux-${MAKO_ARCH}"; do
+            if curl -fsSL "$url" -o /usr/local/bin/mako 2>/dev/null; then
+                chmod +x /usr/local/bin/mako
+                break
+            fi
+        done
+    fi
+
+    # Verify
+    if ! command -v mako >/dev/null 2>&1; then
+        err "Failed to install Mako. Install manually from https://mako-lang.dev and re-run."
+    fi
+
     log "Mako installed: $(mako version 2>/dev/null | head -1)"
 }
 
 # ── Install Weft ──
 install_weft() {
     if command -v weft >/dev/null 2>&1; then
-        log "Weft already installed: $(weft version 2>/dev/null | head -1)"
+        WEFT_VER=$(weft version 2>/dev/null | head -1)
+        log "Weft already installed: ${WEFT_VER}"
         return
     fi
-    log "Installing Weft..."
-    mkdir -p /usr/local/bin
+
+    log "Installing Weft framework..."
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64|amd64) WEFT_ARCH="amd64" ;;
         aarch64|arm64) WEFT_ARCH="arm64" ;;
         *) err "Unsupported architecture: $ARCH" ;;
     esac
-    curl -fsSL "https://weft.dev/dl/weft-linux-${WEFT_ARCH}" -o /usr/local/bin/weft
-    chmod +x /usr/local/bin/weft
+
+    mkdir -p /usr/local/bin
+
+    # Try official install script first
+    if curl -fsSL https://weft.dev/install.sh -o /tmp/weft-install.sh 2>/dev/null; then
+        bash /tmp/weft-install.sh 2>/dev/null && {
+            [ -f "$HOME/.local/bin/weft" ] && cp "$HOME/.local/bin/weft" /usr/local/bin/weft
+            rm -f /tmp/weft-install.sh
+        }
+    fi
+
+    # Fallback: direct binary download
+    if ! command -v weft >/dev/null 2>&1; then
+        for url in \
+            "https://weft.dev/dl/weft-linux-${WEFT_ARCH}" \
+            "https://github.com/loreste32/weft/releases/latest/download/weft-linux-${WEFT_ARCH}"; do
+            if curl -fsSL "$url" -o /usr/local/bin/weft 2>/dev/null; then
+                chmod +x /usr/local/bin/weft
+                break
+            fi
+        done
+    fi
+
+    # Verify
+    if ! command -v weft >/dev/null 2>&1; then
+        err "Failed to install Weft. Install manually from https://weft.dev and re-run."
+    fi
+
     log "Weft installed: $(weft version 2>/dev/null | head -1)"
 }
 
@@ -537,6 +620,16 @@ main() {
     install_deps
     install_mako
     install_weft
+
+    # Verify toolchain before proceeding
+    log "Verifying toolchain..."
+    command -v mako >/dev/null 2>&1 || err "Mako not found after install"
+    command -v weft >/dev/null 2>&1 || err "Weft not found after install"
+    command -v clang >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || err "C compiler not found (need clang or gcc)"
+    command -v git >/dev/null 2>&1 || err "git not found"
+    command -v openssl >/dev/null 2>&1 || err "openssl not found"
+    log "Toolchain OK: mako=$(mako version 2>/dev/null | head -1), weft=$(weft version 2>/dev/null | head -1)"
+
     install_database
     install_zaman
     setup_api_key
