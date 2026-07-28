@@ -59,6 +59,7 @@ fn save_users(users) {
     dir := env.get("ZAMAN_DATA_DIR") ?? "data"
     if !fs.exists(dir) { fs.mkdir(dir) }
     fs.write_atomic(users_path(), json.stringify(users))
+    fs.chmod(users_path(), 384)
 }
 
 fn next_user_id(users) {
@@ -183,6 +184,28 @@ fn login_redirect() {
     {"status": 302, "headers": {"Location": "/login"}, "body": ""}
 }
 
+// CSRF: derive token from hmac(token_secret, session_cookie) — stateless, tied to session.
+fn csrf_token(req, token_secret) {
+    cookie := web.cookie_get(req, "zaman_sid") ?? ""
+    if cookie == "" { return secrets.token_hex(16) }
+    crypto.hmac_sha256(token_secret, "csrf:" + cookie)
+}
+
+fn csrf_field(req, token_secret) {
+    "<input type=\"hidden\" name=\"_csrf\" value=\"" + csrf_token(req, token_secret) + "\"/>"
+}
+
+fn csrf_valid(req, token_secret) {
+    submitted := web.form_get(req, "_csrf", "")
+    if submitted == "" { return false }
+    expected := csrf_token(req, token_secret)
+    crypto.equal(submitted, expected)
+}
+
+fn csrf_reject() {
+    {"status": 403, "body": "CSRF token invalid or missing."}
+}
+
 fn set_session_cookie(token) {
     // Secure flag added — browsers will only send over HTTPS (except localhost for dev)
     {"status": 302, "headers": {"Location": "/", "Set-Cookie": "zaman_sid=" + token + "; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax; Secure"}, "body": ""}
@@ -268,6 +291,52 @@ fn ldap_auth(username, password) {
     {"id": 0, "username": username, "role": role}
 }
 
+// Brute-force protection: track failed login attempts per IP
+fn login_attempts_path() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    dir + "/zaman-login-attempts.json"
+}
+
+fn load_login_attempts() {
+    r := fs.read(login_attempts_path())
+    if !r.ok { return [] }
+    p := json.parse(r.value)
+    if p.ok { p.value } else { [] }
+}
+
+fn save_login_attempts(attempts) {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    fs.write_atomic(login_attempts_path(), json.stringify(attempts))
+}
+
+fn record_failed_login(ip) {
+    attempts := load_login_attempts()
+    entry := {"ip": ip, "ts": time.unix()}
+    save_login_attempts(list_append(attempts, entry))
+}
+
+fn check_login_rate(ip) {
+    attempts := load_login_attempts()
+    cutoff := time.unix() - 60
+    mut count := 0
+    mut kept := "["
+    mut first := true
+    for a in attempts {
+        ts := a["ts"] ?? 0
+        if ts >= cutoff {
+            if !first { kept = kept + "," }
+            kept = kept + json.stringify(a)
+            first = false
+            if (a["ip"] ?? "") == ip { count = count + 1 }
+        }
+    }
+    // Prune old entries while we're at it
+    pruned := json.parse(kept + "]").value
+    save_login_attempts(pruned)
+    count < 5
+}
+
 fn do_login(token_secret, username, password) {
     // Try LDAP first if configured
     ldap_user := ldap_auth(username, password)
@@ -325,7 +394,15 @@ fn change_password(user_id, new_password) {
 
 // ---- layout ----
 
+fn layout_with_csrf(title, body, user, csrf) {
+    layout_inner(title, body, user, csrf)
+}
+
 fn layout(title, body, user) {
+    layout_inner(title, body, user, "")
+}
+
+fn layout_inner(title, body, user, csrf) {
     cdn := web.htmx_cdn()
     base := h(core_base())
     mut user_info := ""
@@ -389,7 +466,9 @@ fn layout(title, body, user) {
     "</div>" +
     (if user_info != "" { user_info } else { "" }) +
     "</aside>" +
-    "<main class=\"p-5 md:p-7 lg:p-8 w-full\">" + body + "</main></div></body></html>"
+    "<main class=\"p-5 md:p-7 lg:p-8 w-full\">" + body + "</main></div>" +
+    (if csrf != "" { "<script>document.querySelectorAll('form[method=\"post\"]').forEach(function(f){if(!f.querySelector('[name=_csrf]')){var i=document.createElement('input');i.type='hidden';i.name='_csrf';i.value='" + csrf + "';f.appendChild(i)}})</script>" } else { "" }) +
+    "</body></html>"
 }
 
 fn nav_link(href, label, icon) {
@@ -1480,6 +1559,7 @@ fn save_api_tokens(tokens) {
     dir := env.get("ZAMAN_DATA_DIR") ?? "data"
     if !fs.exists(dir) { fs.mkdir(dir) }
     fs.write_atomic(api_tokens_path(), json.stringify(tokens))
+    fs.chmod(api_tokens_path(), 384)
 }
 
 fn create_api_token(username, role, label) {
@@ -1520,16 +1600,23 @@ fn delete_api_token(prefix) {
 // ---- password policy ----
 
 fn validate_password(pw) {
-    if len(pw) < 8 { return "password must be at least 8 characters" }
-    // Check for at least one digit
+    if len(pw) < 12 { return "password must be at least 12 characters" }
     mut has_digit := false
+    mut has_upper := false
+    mut has_special := false
     mut i := 0
     while i < len(pw) {
         c := str.slice(pw, i, i + 1)
         if c >= "0" && c <= "9" { has_digit = true }
+        if c >= "A" && c <= "Z" { has_upper = true }
+        if !has_special {
+            if (c < "0" || c > "9") && (c < "a" || c > "z") && (c < "A" || c > "Z") { has_special = true }
+        }
         i = i + 1
     }
     if !has_digit { return "password must contain at least one digit" }
+    if !has_upper { return "password must contain at least one uppercase letter" }
+    if !has_special { return "password must contain at least one special character" }
     ""
 }
 
@@ -1537,7 +1624,12 @@ fn validate_password(pw) {
 // ZAMAN_DASHBOARD_ALLOW_IPS: comma-separated IPs/prefixes. Empty = allow all.
 
 fn get_client_ip(req) {
-    // Check X-Forwarded-For first (behind reverse proxy)
+    direct := req.headers["Remote-Addr"] ?? "unknown"
+    trusted := env.get("ZAMAN_TRUSTED_PROXY") ?? ""
+    // Only trust XFF/X-Real-Ip when TCP peer matches the trusted proxy
+    if trusted != "" && direct != trusted {
+        return direct
+    }
     xff := req.headers["X-Forwarded-For"] ?? ""
     if xff != "" {
         parts := str.split(xff, ",")
@@ -1545,7 +1637,7 @@ fn get_client_ip(req) {
     }
     xri := req.headers["X-Real-Ip"] ?? ""
     if xri != "" { return str.trim(xri) }
-    req.headers["Remote-Addr"] ?? "unknown"
+    direct
 }
 
 fn ip_allowed(req) {
@@ -1844,9 +1936,23 @@ fn rcode_bar(label, count, total, color) {
 
 // ---- main ----
 
+fn load_or_create_token_secret() {
+    dir := env.get("ZAMAN_DATA_DIR") ?? "data"
+    if !fs.exists(dir) { fs.mkdir(dir) }
+    path := dir + "/zaman-token-secret"
+    r := fs.read(path)
+    if r.ok && len(r.value) >= 32 {
+        return str.trim(r.value)
+    }
+    s := secrets.token_hex(32)
+    fs.write_atomic(path, s)
+    fs.chmod(path, 384)
+    s
+}
+
 fn main {
-    // HMAC secret — generated per process start. Restart = all sessions expire (acceptable).
-    token_secret := secrets.token_hex(32)
+    // HMAC secret — persisted to disk so sessions survive restarts.
+    token_secret := load_or_create_token_secret()
 
     if auth_enabled() {
         auth_init(token_secret)
@@ -1876,10 +1982,15 @@ fn main {
 
     app.post("/login", fn(req) {
         if !auth_enabled() { return {"status": 302, "headers": {"Location": "/"}, "body": ""} }
+        client_ip := get_client_ip(req)
+        if !check_login_rate(client_ip) {
+            return web.html(login_page("Too many login attempts. Please wait 60 seconds."))
+        }
         username := web.form_get(req, "username", "")
         password := web.form_get(req, "password", "")
         token := do_login(token_secret, username, password)
         if token == null {
+            record_failed_login(client_ip)
             audit(username, "login_failed", "bad credentials")
             return web.html(login_page("Invalid username or password."))
         }
@@ -2984,7 +3095,7 @@ fn main {
             "<table class=\"w-full text-left\"><thead><tr class=\"" + th + "\">" +
             "<th class=\"py-2 px-4\">Severity</th><th class=\"py-2 px-4\">Rule</th><th class=\"py-2 px-4\">Detail</th></tr></thead>" +
             "<tbody class=\"divide-y divide-[#27272a]/40\">" + hist_rows + "</tbody></table></div>"
-        web.html(layout("Alerts", body, user))
+        web.html(layout_with_csrf("Alerts", body, user, csrf_token(req, token_secret)))
     })
 
     // Alert channel CRUD
@@ -2992,6 +3103,7 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "operator") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         ch_type := web.form_get(req, "type", "webhook")
         url := web.form_get(req, "url", "")
         smtp_host := web.form_get(req, "smtp_host", "localhost")
@@ -3015,6 +3127,7 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "operator") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         del_type := web.form_get(req, "type", "")
         del_url := web.form_get(req, "url", "")
         config := load_alert_config()
@@ -3040,6 +3153,7 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "operator") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         config := load_alert_config()
         rules := config["rules"] ?? []
         // Next ID
@@ -3066,6 +3180,7 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "operator") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         del_id := int.parse(web.form_get(req, "id", "0")).unwrap_or(0)
         config := load_alert_config()
         config["rules"] = list_remove(config["rules"] ?? [], "id", del_id)
@@ -3167,13 +3282,14 @@ fn main {
             "<option value=\"viewer\">viewer</option><option value=\"operator\">operator</option><option value=\"admin\">admin</option></select></div>" +
             "<button type=\"submit\" class=\"rounded-md px-4 py-2 text-sm bg-[#a78bfa] text-[#0a0a0c] font-medium hover:bg-[#c4b5fd] transition-colors\">Generate</button>" +
             "</form></div>"
-        web.html(layout("API Tokens", body, user))
+        web.html(layout_with_csrf("API Tokens", body, user, csrf_token(req, token_secret)))
     })
 
     app.post("/admin/tokens", fn(req) {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         label := web.form_get(req, "label", "")
         role := web.form_get(req, "role", "viewer")
         uname := user["username"] ?? "admin"
@@ -3186,6 +3302,7 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         prefix := web.form_get(req, "prefix", "")
         delete_api_token(prefix)
         audit(user["username"] ?? "", "api_token_revoke", "prefix=" + prefix)
@@ -3398,6 +3515,7 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "operator") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         targets := {
             "asr_target": int.parse(web.form_get(req, "asr_target", "45")).unwrap_or(45),
             "asr_warning": int.parse(web.form_get(req, "asr_warning", "40")).unwrap_or(40),
@@ -3418,50 +3536,53 @@ fn main {
         if !has_role(user, "admin") {
             return web.html(layout("Forbidden", "<h1 class=\"text-xl font-bold\">Forbidden</h1><p class=\"text-[#a1a1aa] mt-2\">Admin role required.</p>", user))
         }
-        web.html(layout("Users", admin_users_page(user, ""), user))
+        web.html(layout_with_csrf("Users", admin_users_page(user, ""), user, csrf_token(req, token_secret)))
     })
 
     app.post("/admin/users", fn(req) {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         username := web.form_get(req, "username", "")
         password := web.form_get(req, "password", "")
         role := web.form_get(req, "role", "viewer")
         err := create_user(username, password, role)
         if err != "" {
-            return web.html(layout("Users", admin_users_page(user, "Error: " + err), user))
+            return web.html(layout_with_csrf("Users", admin_users_page(user, "Error: " + err), user, csrf_token(req, token_secret)))
         }
-        web.html(layout("Users", admin_users_page(user, "User " + username + " created."), user))
+        web.html(layout_with_csrf("Users", admin_users_page(user, "User " + username + " created."), user, csrf_token(req, token_secret)))
     })
 
     app.post("/admin/users/password", fn(req) {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         uid := web.form_get(req, "user_id", "")
         pw := web.form_get(req, "new_password", "")
         uid_int := int.parse(uid).unwrap_or(0)
         if uid_int <= 0 {
-            return web.html(layout("Users", admin_users_page(user, "Error: invalid user ID"), user))
+            return web.html(layout_with_csrf("Users", admin_users_page(user, "Error: invalid user ID"), user, csrf_token(req, token_secret)))
         }
         err := change_password(uid_int, pw)
         if err != "" {
-            return web.html(layout("Users", admin_users_page(user, "Error: " + err), user))
+            return web.html(layout_with_csrf("Users", admin_users_page(user, "Error: " + err), user, csrf_token(req, token_secret)))
         }
-        web.html(layout("Users", admin_users_page(user, "Password updated for user #" + uid + "."), user))
+        web.html(layout_with_csrf("Users", admin_users_page(user, "Password updated for user #" + uid + "."), user, csrf_token(req, token_secret)))
     })
 
     app.post("/admin/users/:id/delete", fn(req) {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
+        if !csrf_valid(req, token_secret) { return csrf_reject() }
         id := int.parse(req.params["id"]).unwrap_or(0)
         if id == (user["id"] ?? -1) {
-            return web.html(layout("Users", admin_users_page(user, "Error: cannot delete yourself"), user))
+            return web.html(layout_with_csrf("Users", admin_users_page(user, "Error: cannot delete yourself"), user, csrf_token(req, token_secret)))
         }
         if id > 0 { delete_user_by_id(id) }
-        web.html(layout("Users", admin_users_page(user, "User deleted."), user))
+        web.html(layout_with_csrf("Users", admin_users_page(user, "User deleted."), user, csrf_token(req, token_secret)))
     })
 
     say("zaman-web → http://127.0.0.1:3000  (core " + core_base() + ", auth " + (if auth_enabled() { "on" } else { "off (ZAMAN_AUTH=0)" }) + ")")

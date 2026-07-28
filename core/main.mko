@@ -178,19 +178,38 @@ fn api_key_configured() -> string {
     return env_get_or("ZAMAN_API_KEY", "")
 }
 
+// Constant-time string comparison to prevent timing attacks.
+fn ct_str_eq(a: string, b: string) -> int {
+    let la = len(a)
+    let lb = len(b)
+    if la != lb {
+        return 0
+    }
+    let mut diff = 0
+    let mut i = 0
+    while i < la {
+        diff = diff | (int(a[i]) ^ int(b[i]))
+        i = i + 1
+    }
+    if diff == 0 {
+        return 1
+    }
+    return 0
+}
+
 fn api_request_authorized(c: int) -> int {
     let want = api_key_configured()
     if str_eq(want, "") {
         return 1
     }
     let h = http_header(c, "X-API-Key")
-    if str_eq(h, want) {
+    if ct_str_eq(h, want) == 1 {
         return 1
     }
     let auth = http_header(c, "Authorization")
     if str_has_prefix(auth, "Bearer ") {
         let tok = auth[7:]
-        if str_eq(tok, want) {
+        if ct_str_eq(tok, want) == 1 {
             return 1
         }
     }
@@ -357,7 +376,8 @@ fn ch_query_tsv(sql: string) -> string {
 }
 
 fn sql_quote(s: string) -> string {
-    return "'" + str_replace(s, "'", "''") + "'"
+    let s1 = str_replace(s, "\\", "\\\\")
+    return "'" + str_replace(s1, "'", "''") + "'"
 }
 
 fn db_ensure_dir() {
@@ -1984,10 +2004,7 @@ fn hep_password_ok(info: HepInfo) -> int {
     if str_eq(want, "") {
         return 1
     }
-    if str_eq(info.node_pw, want) {
-        return 1
-    }
-    return 0
+    return ct_str_eq(info.node_pw, want)
 }
 
 fn hep_endpoint(ip: string, port: int) -> string {
@@ -2700,6 +2717,25 @@ fn rate_check(rl: CMap, ip: string) -> int {
     return 1
 }
 
+// Validate federation record has required fields, inject "federated":true tag.
+// Returns tagged JSON string or "" if invalid.
+fn fed_validate_and_tag(rec: string) -> string {
+    let ts = json_get_int(rec, "ts_ms")
+    let src = json_get_string(rec, "src")
+    let cid = json_get_string(rec, "call_id")
+    let m = json_get_string(rec, "method")
+    if ts <= 0 || str_eq(src, "") || str_eq(cid, "") || str_eq(m, "") {
+        return ""
+    }
+    // Inject "federated":true if not already present
+    if str_contains(rec, "\"federated\"") {
+        return rec
+    }
+    // Insert before final '}'
+    let rlen = len(rec)
+    return rec[0:rlen - 1] + ",\"federated\":true}"
+}
+
 fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> int {
     let fd = http_bind(port)
     if fd < 0 {
@@ -2720,11 +2756,22 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             sleep_ms(5)
             continue
         }
-        // Rate limiting
-        let client_ip = http_header(c, "X-Forwarded-For")
-        let mut rip = client_ip
-        if str_eq(rip, "") {
-            rip = "direct"
+        // Rate limiting — only trust XFF if TCP peer matches ZAMAN_TRUSTED_PROXY
+        let mut rip = "direct"
+        let trusted_proxy = env_get_or("ZAMAN_TRUSTED_PROXY", "")
+        let peer_addr = http_header(c, "X-Real-IP")
+        if not str_eq(trusted_proxy, "") {
+            if str_eq(peer_addr, trusted_proxy) {
+                let xff = http_header(c, "X-Forwarded-For")
+                if not str_eq(xff, "") {
+                    rip = xff
+                }
+            }
+        } else {
+            let xff = http_header(c, "X-Forwarded-For")
+            if not str_eq(xff, "") {
+                rip = xff
+            }
         }
         if rate_check(rate_limiter, rip) == 0 {
             let _ = http_respond_json(c, 429, "{\"error\":\"rate limit exceeded\"}")
@@ -2913,6 +2960,7 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                 // Parse array and enqueue each record
                 // Simple approach: split on },{ boundaries
                 let mut count = 0
+                let mut rejected = 0
                 let mut pos = 0
                 let blen = len(body)
                 while pos < blen {
@@ -2936,9 +2984,14 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                         if depth == 0 && end < blen {
                             let rec = body[pos:end + 1]
                             if len(rec) > 10 {
-                                db_enqueue(db_ch, rec)
-                                cap_push(store, metrics, rec)
-                                count = count + 1
+                                let validated = fed_validate_and_tag(rec)
+                                if not str_eq(validated, "") {
+                                    db_enqueue(db_ch, validated)
+                                    cap_push(store, metrics, validated)
+                                    count = count + 1
+                                } else {
+                                    rejected = rejected + 1
+                                }
                             }
                         }
                         pos = end + 1
@@ -2946,12 +2999,17 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                         pos = pos + 1
                     }
                 }
-                let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":" + string(count) + "}")
+                let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":" + string(count) + ",\"rejected\":" + string(rejected) + "}")
             } else if len(body) > 2 && str_has_prefix(body, "{") {
                 // Single record
-                db_enqueue(db_ch, body)
-                cap_push(store, metrics, body)
-                let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":1}")
+                let validated = fed_validate_and_tag(body)
+                if not str_eq(validated, "") {
+                    db_enqueue(db_ch, validated)
+                    cap_push(store, metrics, validated)
+                    let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":1}")
+                } else {
+                    let _ = http_respond_json(c, 400, "{\"error\":\"invalid record: missing required fields (ts_ms, src, call_id, method)\"}")
+                }
             } else {
                 let _ = http_respond_json(c, 400, "{\"error\":\"expected JSON array or object\"}")
             }

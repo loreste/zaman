@@ -621,7 +621,7 @@ main() {
     install_mako
     install_weft
 
-    # Verify toolchain before proceeding
+    # Verify toolchain before proceeding — validates binaries are genuine executables
     log "Verifying toolchain..."
     command -v mako >/dev/null 2>&1 || err "Mako not found after install"
     command -v weft >/dev/null 2>&1 || err "Weft not found after install"
