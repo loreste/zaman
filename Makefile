@@ -56,6 +56,12 @@ demo: bin/zaman-core
 smoke: bin/zaman-core
 	./scripts/smoke.sh
 
+test: bin/zaman-core
+	./scripts/test_integration.sh sqlite
+
+test-load: bin/zaman-core
+	./scripts/test_load.sh 1000 10
+
 # ---- clean ----
 
 clean:
