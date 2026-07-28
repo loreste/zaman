@@ -8,8 +8,7 @@ const RING = 512
 const VERSION = "0.2.0"
 // Capture enqueue buffer — backpressures SIP/HEP workers when the DB lags.
 const DB_CH_CAP = 1024
-// Shutdown sentinel for the DB writer (records always start with '{').
-const DB_DONE = "__ZAMAN_DB_DONE__"
+// DB writer uses `for j in range ch` — loop exits when channel closes.
 
 // ---- small helpers ----
 

@@ -2,7 +2,7 @@
 
 **Status:** v0.2 (production-track)  
 **Stack:** Mako core (`core/main.mko`) + Weft dashboard (`web/main.weft`)  
-**Verified on:** Mako ≥ **0.4.18**, Weft ≥ **0.3.30**  
+**Verified on:** Mako ≥ **0.4.19**, Weft ≥ **0.3.30**  
 **License:** Apache-2.0
 
 This document is the source of truth. When behaviour is ambiguous, spec wins over README.
