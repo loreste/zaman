@@ -1,320 +1,293 @@
-# Zaman — Product & Engineering Spec
+# Zaman Product and Engineering Spec
 
-**Status:** v0.2 (production-track)
-**Stack:** Makori core (`core/main.mko`) + Weft dashboard (`web/main.weft`)
-**Verified on:** Makori >= **0.6.1**, Weft >= **0.6.0**
+**Status:** v0.3 production-track
+**Stack:** Makori core (`core/main.mko`) and Weft dashboard (`web/main.weft`)
+**Verified on:** Makori >= 0.6.1, Weft >= 0.6.0
 **License:** Apache-2.0
 
-This document is the source of truth. When behaviour is ambiguous, spec wins over README.
+This document is the source of truth. When behavior is ambiguous, this spec
+wins over README text.
 
 ---
 
-## 1. What Zaman is
+## 1. Product Scope
 
-Integrated SIP monitoring: capture, metrics, dashboards, alerting, and echo — one process pair, no external dependencies unless you want them.
+Zaman is an integrated SIP/HEP monitoring system for VoIP operations teams. It
+captures SIP signaling, receives HEP3 telemetry, stores searchable history, and
+provides realtime dashboards for troubleshooting calls, peers, nodes, reports,
+SLA, and alerts.
 
-### 1.1 Goals
+### Goals
 
-1. Capture native SIP (UDP) and HEPv3 (UDP / TCP / TLS).
-2. Echo monitoring pings safely (default: OPTIONS → 200 only).
-3. Durable storage with three backend options: SQLite, PostgreSQL, ClickHouse.
-4. Real-time NOC dashboard with telecom KPIs (ASR, NER), time-series charts, anomaly detection.
-5. SIP call ladder with PCAP export, recording upload/playback, share links, B2BUA correlation.
-6. RTCP parsing with QoS metrics (jitter, loss, R-factor, MOS via ITU-T G.107).
-7. RBAC (admin / operator / viewer), API tokens, audit log, LDAP/SSO.
-8. Alerting via Slack, generic webhook, email with retry.
-9. Multi-node federation (remote instances push to central aggregator).
-10. Per-agent and per-destination SLA tracking with configurable thresholds.
-11. Prometheus-compatible `/metrics` endpoint and Grafana datasource API.
-12. Dashboard TLS via nginx reverse proxy (auto-configured by installer).
-13. Structured concurrency via Makori `crew` / `kick` / `chan`.
+1. Capture native SIP over UDP and HEPv3 over UDP, TCP, and TLS.
+2. Echo monitoring pings safely, with OPTIONS returning 200 by default.
+3. Store captures in SQLite, PostgreSQL, or ClickHouse.
+4. Provide realtime CPS, concurrent calls, active calls, ASR, NER, message rate,
+   failure rate, live feed, and node health.
+5. Group messages by Call-ID and expose all messages for the selected Call-ID.
+6. Provide a dedicated `/ladder?call_id=...` page for SIP ladder analysis.
+7. Search by Call-ID, IP address, from number, to number, method, transport,
+   agent, status, and timestamp/date range.
+8. Support source/destination IP history and runtime labels for peers, sites,
+   carriers, customers, and SIP nodes.
+9. Provide report building and export across telecom KPIs and filtered message
+   or call datasets.
+10. Track SLA by agent, destination, availability, ASR, failures, and CPS.
+11. Support RBAC, API tokens, audit logs, optional LDAP bind proxy, and optional
+    dashboard IP allowlisting.
+12. Support Slack, webhook, and email alert channels.
+13. Keep deployment-specific hosts, credentials, and labels outside source.
 
-### 1.2 Non-goals
+### Non-Goals
 
-- Full RTP media stream capture (RTCP quality metrics are supported, raw RTP is not).
-- Client-side SPA (server-rendered HTMX).
-
----
-
-## 2. Repository layout
-
-```
-zaman/
-  spec.md               # this document
-  README.md             # operator-facing docs
-  SECURITY_REVIEW.md    # threat model + hardening
-  LICENSE               # Apache-2.0
-  Makefile              # build / smoke / demo / doctor
-  mako.toml             # Makori package manifest
-  main.mko              # stub → build core/
-  core/
-    main.mko            # zaman-core (capture, echo, HEP, API, DB)
-  web/
-    main.weft           # zaman-web (dashboard, auth, alerting)
-    public/             # static assets (favicon)
-  scripts/
-    smoke.sh            # e2e SIP / HEP UDP+TCP+TLS / probe / metrics
-    demo.sh             # core + web local demo
-    send_hep.py         # HEPv3 test client (UDP/TCP/TLS)
-    send_options.py     # SIP OPTIONS test client
-    gen_pcap.py         # PCAP generation from JSON
-  data/                 # runtime (gitignored): DB, users, recordings, alerts
-```
+- Zaman is not a SIP proxy and must not be placed in the live call path.
+- Zaman is not a complete RTP media recorder. SIP PCAP export is supported;
+  audio playback depends on uploaded or captured media artifacts.
+- Zaman is not a client-side SPA. The dashboard is server-rendered Weft with
+  HTMX for live partial refreshes.
 
 ---
 
-## 3. Runtime components
+## 2. Runtime Components
 
-### 3.1 zaman-core (Makori)
+### zaman-core
 
-Single native binary. Captures SIP/HEP, stores to database, serves JSON/Prometheus API.
+Makori service responsible for:
 
-```bash
-makori build --release core/main.mko -o bin/zaman-core
-./bin/zaman-core [sip_port] [hep_port] [api_port]
-```
+- SIP UDP capture and safe echo behavior.
+- HEP3 UDP/TCP/TLS ingest.
+- SIP parsing and redaction.
+- Database writes and migrations.
+- JSON API and Prometheus metrics.
+- Realtime window metrics.
+- Report, export, SLA, QoS, anomaly, probe, and federation APIs.
 
-Default ports: SIP 5060, HEP 9060, API 9090.
+Default ports:
 
-### 3.2 zaman-web (Weft)
+| Service | Default |
+|---------|---------|
+| SIP UDP | 5060 |
+| HEP UDP | 9060 |
+| API HTTP | 9090 |
+| HEP TLS | 9061 |
+| HEP TCP | 9062 |
 
-HTMX dashboard + auth + alerting. Talks to core via HTTP API.
+### zaman-web
 
-```bash
-ZAMAN_CORE=http://127.0.0.1:9090 weft run web/main.weft
-```
+Weft dashboard responsible for:
 
-Listens on :3000.
+- Login and RBAC enforcement.
+- Overview, NOC, messages, calls, ladder, IP history, metrics, reports, SLA,
+  alerts, users, tokens, and audit pages.
+- HTMX realtime partials for KPIs, live feed, active calls, charts, alerts, and
+  NOC tables.
+- Runtime labels for nodes and IPs.
 
----
-
-## 4. Database backends
-
-| Backend | Engine | Best for |
-|---------|--------|----------|
-| SQLite | WAL mode, single file | Lab, small deployments, zero-config |
-| PostgreSQL | `sql_open_postgres` | Production with existing PG infra |
-| ClickHouse | HTTP interface, MergeTree | Millions of calls/day, long retention |
-
-Selected via `ZAMAN_DB_DRIVER` (default: `sqlite`).
-
-### 4.1 Schema
-
-**captures** — one row per SIP message:
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | integer/snowflake | Auto-generated |
-| ts_ms | int64 | Epoch milliseconds |
-| src, dst | text | `host:port` |
-| transport | text | UDP, HEP3, HEP3/TCP, HEP3/TLS |
-| proto | text | sip, rtcp, ... |
-| agent | text | HEP node name |
-| kind | text | request, response |
-| method | text | INVITE, BYE, OPTIONS, ... |
-| status | int | SIP response code (0 for requests) |
-| call_id | text | SIP Call-ID |
-| from_h, to_h, cseq, ruri | text | SIP headers |
-| hep_node_id, hep_node, hep_cid | text/int | HEP metadata |
-| size | int | Payload length |
-| raw_b64 | text | Base64 of redacted SIP |
-| record_json | text | Full JSON record |
-
-**report_daily** — day/method/transport counters (SummingMergeTree on ClickHouse).
-
-### 4.2 ClickHouse specifics
-
-- MergeTree partitioned by month, ordered by `(ts_ms, call_id)`.
-- Communication via HTTP POST to port 8123.
-- Append-only — no UPDATE (each capture is a single INSERT).
-- SummingMergeTree for daily rollups (automatic counter merge).
+Default port: 3000 behind nginx.
 
 ---
 
-## 5. Concurrency model
+## 3. Database Backends
 
-1. Concurrency uses Makori's structured primitives: `crew`, `kick`, `join`, `drain`, `chan`.
-2. Capture producers enqueue JSON via `chan[string]` — they do not open the database directly.
-3. A single `db_writer` job owns the database connection (or ClickHouse HTTP client).
-4. Optional TCP/TLS collectors are started only when enabled.
+| Backend | Use Case | Notes |
+|---------|----------|-------|
+| SQLite | lab, demo, very small deployments | zero-config, local file |
+| PostgreSQL | production deployments | persistent history and better concurrency |
+| ClickHouse | very high volume / long retention | append-heavy analytics |
+
+Primary capture fields:
+
+| Field | Meaning |
+|-------|---------|
+| `id` | message identifier |
+| `ts_ms` | epoch timestamp in milliseconds |
+| `src`, `dst` | source and destination endpoint |
+| `transport` | SIP/HEP transport |
+| `proto` | protocol family such as `sip` or `rtcp` |
+| `agent` | HEP node/agent name |
+| `kind` | `request` or `response` |
+| `method` | SIP method or parsed response method |
+| `status` | SIP response code |
+| `call_id` | SIP Call-ID |
+| `from_h`, `to_h`, `cseq`, `ruri` | SIP header fields |
+| `hep_node_id`, `hep_node`, `hep_cid` | HEP metadata |
+| `raw_b64` | redacted raw SIP payload |
+| `record_json` | structured capture JSON |
+
+Retention is controlled by `ZAMAN_DB_RETENTION_DAYS`.
 
 ---
 
-## 6. Dashboard pages
+## 4. Dashboard Pages
 
 | Route | Page | Role | Features |
 |-------|------|------|----------|
-| `/` | Overview | all | NOC view: KPI strip, node health grid, time-series traffic charts (5m/15m/1h/6h/24h/custom), anomaly alerts, live capture feed |
-| `/messages` | Messages | all | Multi-field search (Call-ID, agent, method, transport, IP), saved searches, JSON/CSV/PCAP export |
-| `/messages/:id` | Message detail | all | Full SIP headers, raw decoded message |
-| `/calls` | Call ladder | all | Homer-style arrow diagram, PCAP download, recording player, share link, recent calls sidebar |
-| `/probe` | Echo probe | operator+ | Active OPTIONS RTT test against any host |
-| `/metrics` | Metrics | all | Charts, Prometheus scrape config |
-| `/report` | Reports | all | ASR/NER gauges, response codes, top talkers, agents, daily rollup, method/transport charts |
-| `/alerts` | Alerts | operator+ | Alert rules, notification channels (Slack/webhook/email), alert history |
-| `/sla` | SLA Report | all | Availability status, ASR gauge, threshold reference |
+| `/` | Overview | all | Realtime CPS, concurrent calls, active calls, message rate, failures, ASR, node health, charts, live feed, notifications |
+| `/noc` | NOC | all | Node health, server naming, stale/degraded detection |
+| `/messages` | Messages | all | Call-ID grouping, filters, saved searches, JSON/CSV/PCAP export |
+| `/messages/:id` | Message Detail | all | Full decoded SIP, headers, source/destination, ladder drilldown |
+| `/ladder` | SIP Ladder | all | Dedicated Call-ID ladder with chronological rows, directional flow, PCAP, media, related legs |
+| `/calls` | Calls | all | Realtime call operations, active calls, CPS, concurrent calls, recent dialogs, source/destination IPs |
+| `/ip` | IP History | all | Source/destination history, labels, paths, peers, timeout drilldowns |
+| `/probe` | Echo Probe | operator+ | Active OPTIONS RTT test |
+| `/metrics` | Metrics | all | Operational breakdowns, source/destination IPs, response codes, Prometheus guidance |
+| `/report` | Reports | all | Report builder, telecom KPIs, ASR/NER, top talkers, routes, daily rollup, export |
+| `/sla` | SLA | all | Availability, ASR, failures, CPS, destination targets |
+| `/alerts` | Alerts | operator+ | Alert rules, notification channels, alert history |
 | `/admin/users` | Users | admin | Create/delete users, assign roles, reset passwords |
-| `/admin/tokens` | API Tokens | admin | Generate/revoke Bearer tokens for automation |
-| `/admin/audit` | Audit Log | admin | Login attempts, config changes, exports |
+| `/admin/tokens` | API Tokens | admin | Generate/revoke automation tokens |
+| `/admin/audit` | Audit Log | admin | Login attempts, admin actions, exports |
 
 ---
 
-## 7. Auth
+## 5. SIP Ladder Behavior
 
-### 7.1 RBAC
+Ladder links must point to `/ladder?call_id=<value>`, not `/calls`.
 
-| Action | viewer | operator | admin |
-|--------|--------|----------|-------|
-| Dashboard read | yes | yes | yes |
-| Run probe | no | yes | yes |
-| Manage alerts | no | yes | yes |
-| Manage users, tokens, audit | no | no | yes |
+The ladder page must:
 
-### 7.2 Session tokens
-
-HMAC-SHA256 signed cookies (stateless — no server-side session store). Token contains `id:username:role:expires`. HMAC secret is per-process (restart invalidates all sessions).
-
-### 7.3 API tokens
-
-Long-lived Bearer tokens for automation. Stored as SHA-256 hashes. Generated from admin panel, shown once.
-
-### 7.4 Password policy
-
-Minimum 8 characters, at least one digit.
-
-### 7.5 IP allowlisting
-
-`ZAMAN_DASHBOARD_ALLOW_IPS` — comma-separated IPs/prefixes. Checks `X-Forwarded-For` for reverse proxy setups.
-
-### 7.6 Disable auth
-
-`ZAMAN_AUTH=0` — all routes open, anonymous user gets admin role. Lab only.
+- Fetch all capture rows for the exact Call-ID.
+- Preserve literal Call-ID characters required by the core API.
+- Include SIP requests and SIP responses.
+- Normalize response rows from CSeq when needed, so responses render as
+  `100 INVITE`, `180 INVITE`, `200 PRACK`, `200 BYE`, and similar labels.
+- Show a chronological table with message id, label, source, destination, CSeq,
+  and seen time.
+- Show the directional ladder visualization.
+- Link each row to `/messages/:id`.
+- Expose PCAP export and available media/recording actions.
 
 ---
 
-## 8. Alerting
+## 6. Realtime Metrics
 
-### 8.1 Channels
+Realtime values are based on recent windows, not all-time counters.
 
-- **Slack**: webhook URL, formatted messages with severity icons.
-- **Generic webhook**: POST JSON to any URL (PagerDuty, Teams, Opsgenie).
-- **Email**: SMTP with configurable host/port.
+| Metric | Meaning |
+|--------|---------|
+| CPS | distinct INVITE Call-IDs per second in the selected window |
+| Concurrent calls | Call-IDs with INVITE activity and no later BYE/CANCEL/final failure in the live window |
+| Active calls | currently open dialogs observed in the live sample |
+| Message rate | total captured messages per second |
+| Attempts | distinct INVITE Call-IDs |
+| Failures | 4xx/5xx responses |
+| ASR | answered calls divided by attempts |
+| NER | network effectiveness from successful/non-user-failure outcomes |
 
-### 8.2 Rules
-
-Threshold-based on 5-minute windowed metrics: ASR, error rate, 5xx count, 4xx count, 401/403/503 counts, INVITE rate, REGISTER rate, active calls.
-
-Default rules: Low ASR (<40%), High error rate (>15%), 5xx spike (>5), Auth failures (>10), 503 unavailable (>3).
-
-### 8.3 Anomaly detection
-
-Built-in pattern detection (core API `/api/anomalies`): auth failure spikes, registration storms (>50/min), server errors, SIP scanning (>20 distinct Call-IDs from one source in 5 min), busy (486) spikes.
-
-### 8.4 Evaluation
-
-HTMX polls `/partials/alerts` every 30 seconds. Fires matched rules to all configured channels. History persisted to `data/zaman-alert-history.json`.
+OPTIONS keepalives must be separated from calls in call reports and active-call
+views.
 
 ---
 
-## 9. Core API
+## 7. Core API
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/health` | open | Liveness |
+| GET | `/api/health` | open | Liveness and version |
 | GET | `/api/metrics` | key? | JSON counters |
 | GET | `/metrics` | key? | Prometheus text |
-| GET | `/api/messages` | key? | Search: `?limit=&call_id=&agent=&method=&transport=&src=` |
+| GET | `/api/messages` | key? | Message search: `limit`, `call_id`, `agent`, `method`, `transport`, `ip`, `from_number`, `to_number`, `status`, `since_ms`, `until_ms` |
 | GET | `/api/messages/:id` | key? | Single message |
 | GET | `/api/report/summary` | key? | Totals, methods, transports |
 | GET | `/api/report/kpi` | key? | ASR, NER, registration stats |
-| GET | `/api/report/response-codes` | key? | Status code distribution |
+| GET | `/api/report/response-codes` | key? | Status distribution |
 | GET | `/api/report/top-calls` | key? | Busiest Call-IDs |
 | GET | `/api/report/top-talkers` | key? | Busiest endpoints |
 | GET | `/api/report/agents` | key? | HEP node inventory |
 | GET | `/api/report/daily` | key? | Daily rollup |
-| GET | `/api/report/cps` | key? | Calls per minute: `?minutes=` |
-| GET | `/api/realtime` | key? | Windowed live stats: `?window=` (minutes) |
-| GET | `/api/nodes` | key? | Per-agent health with status |
+| GET | `/api/report/cps` | key? | Calls per minute |
+| GET | `/api/realtime` | key? | Windowed live stats: `window` in minutes |
+| GET | `/api/nodes` | key? | Per-agent health |
 | GET | `/api/anomalies` | key? | Active anomaly indicators |
-| GET | `/api/export` | key? | JSON export: `?limit=&call_id=&transport=` |
-| POST | `/api/probe` | key? | OPTIONS RTT: `{"host","port","timeout_ms"}` |
+| GET | `/api/export` | key? | JSON/CSV/PCAP export using message filters |
+| GET | `/api/related` | key? | Related Call-IDs |
+| POST | `/api/probe` | key? | OPTIONS RTT test |
+| POST | `/api/federation/push` | key? | Remote instance capture push |
 
 ---
 
-## 10. Configuration
+## 8. Configuration
 
 | Env | Default | Purpose |
 |-----|---------|---------|
 | `ZAMAN_DB_DRIVER` | `sqlite` | `sqlite`, `postgres`, or `clickhouse` |
 | `ZAMAN_DB` | `data/zaman.db` | SQLite path |
-| `ZAMAN_DB_DSN` | _(localhost)_ | PostgreSQL connection string |
+| `ZAMAN_DB_DSN` | backend-specific | PostgreSQL connection string |
 | `ZAMAN_CH_URL` | `http://localhost:8123` | ClickHouse HTTP endpoint |
 | `ZAMAN_CH_DB` | `zaman` | ClickHouse database name |
-| `ZAMAN_DB_RETENTION_DAYS` | `14` | Auto-delete older captures (0 = keep all) |
+| `ZAMAN_DB_RETENTION_DAYS` | `14` | Auto-delete older captures, `0` keeps all |
 | `ZAMAN_SIP_HOST` | `0.0.0.0` | Bind address |
-| `ZAMAN_SIP_PORT` / argv1 | `5060` | SIP UDP |
-| `ZAMAN_HEP_PORT` / argv2 | `9060` | HEP UDP |
-| `ZAMAN_API_PORT` / argv3 | `9090` | HTTP API |
-| `ZAMAN_API_KEY` | _(empty)_ | Require key on API (except /health) |
-| `ZAMAN_ECHO_METHODS` | `OPTIONS` | Which methods get auto-reply |
-| `ZAMAN_ECHO_ALL` | `0` | Echo every request (lab only) |
+| `ZAMAN_SIP_PORT` | `5060` | SIP UDP |
+| `ZAMAN_HEP_PORT` | `9060` | HEP UDP |
+| `ZAMAN_API_PORT` | `9090` | HTTP API |
+| `ZAMAN_API_KEY` | empty | Require key on API except `/health` |
+| `ZAMAN_ECHO_METHODS` | `OPTIONS` | SIP methods that get auto-reply |
+| `ZAMAN_ECHO_ALL` | `0` | Echo every request, lab only |
 | `ZAMAN_PROBE` | `0` | Enable probe API |
-| `ZAMAN_PROBE_ALLOW_PRIVATE` | `0` | Allow probing RFC1918 |
+| `ZAMAN_PROBE_ALLOW_PRIVATE` | `0` | Allow probing RFC1918 targets |
 | `ZAMAN_HEP_TCP` | `0` | Enable HEP/TCP |
-| `ZAMAN_HEP_TCP_PORT` | `9062` | TCP port |
+| `ZAMAN_HEP_TCP_PORT` | `9062` | HEP/TCP port |
 | `ZAMAN_HEP_TLS` | `0` | Enable HEP/TLS |
-| `ZAMAN_HEP_TLS_PORT` | `9061` | TLS port |
-| `ZAMAN_HEP_TLS_CERT/KEY` | | PEM paths |
-| `ZAMAN_HEP_PASSWORD` | _(empty)_ | HEP auth |
-| `ZAMAN_HEP_ALLOW` | _(empty)_ | HEP peer allowlist |
-| `ZAMAN_AUTH` | _(enabled)_ | Set `0` to disable dashboard auth |
-| `ZAMAN_DASHBOARD_ALLOW_IPS` | _(empty)_ | IP allowlist for dashboard |
-| `ZAMAN_CORE` | `http://127.0.0.1:9090` | Core URL (for dashboard) |
+| `ZAMAN_HEP_TLS_PORT` | `9061` | HEP/TLS port |
+| `ZAMAN_HEP_TLS_CERT` | empty | HEP/TLS certificate path |
+| `ZAMAN_HEP_TLS_KEY` | empty | HEP/TLS key path |
+| `ZAMAN_HEP_PASSWORD` | empty | Optional HEP auth |
+| `ZAMAN_HEP_ALLOW` | empty | Optional HEP peer allowlist |
+| `ZAMAN_AUTH` | enabled | Set `0` to disable dashboard auth |
+| `ZAMAN_DASHBOARD_ALLOW_IPS` | empty | Optional dashboard IP allowlist |
+| `ZAMAN_CORE` | `http://127.0.0.1:9090` | Core URL for dashboard |
+| `ZAMAN_BRAND_NAME` | `Zaman` | Dashboard title |
 
 ---
 
-## 11. Data files (in `data/`, gitignored)
+## 9. Runtime Data Files
+
+Runtime state lives in `data/` or the configured data directory and must not be
+committed.
 
 | File | Purpose |
 |------|---------|
-| `zaman.db` | SQLite database (when using sqlite backend) |
-| `zaman-users.json` | User accounts (username, hashed password, role) |
-| `zaman-api-tokens.json` | API tokens (SHA-256 hashes, labels) |
+| `zaman.db` | SQLite database when using the sqlite backend |
+| `zaman-users.json` | User accounts with username, password hash, and role |
+| `zaman-api-tokens.json` | API token hashes and labels |
 | `zaman-alerts.json` | Alert rules and notification channels |
-| `zaman-alert-history.json` | Fired alert history (last 100) |
+| `zaman-alert-history.json` | Fired alert history |
 | `zaman-searches.json` | Saved search profiles |
-| `zaman-audit.jsonl` | Audit log (append-only JSONL) |
-| `recordings/` | Call recordings (WAV/MP3, named by Call-ID) |
+| `zaman-node-names.json` | Runtime node display names |
+| `zaman-site-labels.json` | Runtime IP/site labels |
+| `zaman-audit.jsonl` | Append-only audit log |
+| `recordings/` | Call recordings named by Call-ID |
 | `tls/` | HEP TLS certificates |
 
 ---
 
-## 12. Security posture
+## 10. Security Model
 
-Authoritative review: `SECURITY_REVIEW.md`.
-
-| Control | Default |
-|---------|---------|
-| Dashboard auth | RBAC enabled (admin/operator/viewer) |
-| Probe API | Off (`ZAMAN_PROBE=1` to enable) |
-| Echo | OPTIONS only; REGISTER → 401 |
-| Auth headers | Redacted before store/export |
-| Probe timeout | ≤ 5s; private ranges blocked by default |
-| API key | Optional (`ZAMAN_API_KEY`) |
-| HEP password/allowlist | Optional |
-| Password policy | Min 8 chars + digit |
-| Audit log | All auth/admin actions logged |
-| IP allowlisting | Optional (`ZAMAN_DASHBOARD_ALLOW_IPS`) |
-| Session tokens | HMAC-signed, 24h expiry, per-process secret |
+- Dashboard users are admin, operator, or viewer.
+- Operators can run probes and manage alerts.
+- Admins manage users, tokens, and audit views.
+- API tokens are stored as hashes and shown once.
+- SIP auth headers are redacted before storage.
+- Optional dashboard IP allowlisting checks proxy-aware client addresses.
+- Production API deployments should set `ZAMAN_API_KEY`.
+- HEP deployments should restrict senders with firewall rules, allowlists, or
+  HEP/TLS.
 
 ---
 
-## 13. Build & test
+## 11. Build and Test
 
 ```bash
-make doctor   # check toolchain (makori + weft)
-make build    # → bin/zaman-core
-make smoke    # e2e: SIP echo, probe, HEP UDP/TCP/TLS, metrics
-make demo     # core + dashboard on high ports
-make clean    # rm -rf bin .mako
+make doctor
+make build
+make check
+make smoke
+make demo
+```
+
+Direct checks:
+
+```bash
+makori check core/main.mko
+weft check web/main.weft
 ```

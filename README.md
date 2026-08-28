@@ -1,16 +1,17 @@
 # Zaman
 
-SIP monitoring that installs in one command. Capture, call ladders, metrics,
-alerting, and dashboards — one binary pair instead of four separate tools wired
-together over a weekend.
+Zaman is a SIP and HEP monitoring stack built with Makori and Weft. It captures
+SIP signaling, receives HEP3 from SIP infrastructure, stores the data, and
+serves a realtime operations UI for troubleshooting calls, peers, KPIs, reports,
+SLA, and alerts.
 
-Named after the friend who pointed out the obvious: VoIP teams shouldn't need
-Homer + Prometheus + Grafana + custom scripts just to see what's happening on
-their network.
+**Status: v0.3.** Production-track. The current release focuses on realtime
+visibility, PostgreSQL-ready deployments, active calls, dedicated SIP ladders,
+IP history, report exports, and RBAC-backed operations.
 
-**Status: v0.2.** Works, handles real traffic, has auth and alerting. Not
-battle-tested at carrier scale yet. SQLite out of the box; PostgreSQL and
-ClickHouse when you outgrow it.
+No deployment-specific hosts, keys, or server names are required in source. Use
+environment variables, `/etc/zaman/*.env`, nginx, and runtime labels for local
+site-specific configuration.
 
 ---
 
@@ -21,16 +22,18 @@ ClickHouse when you outgrow it.
 curl -fsSL https://raw.githubusercontent.com/loreste/zaman/main/install.sh | sudo bash
 ```
 
-The installer detects your distro, installs dependencies, builds the binary,
-sets up systemd services, picks a database, and prints the dashboard URL. It
-asks before doing anything destructive. Non-interactive:
+The installer detects the distro, installs dependencies, builds the core and
+web services, configures systemd, optionally sets up PostgreSQL, and can place
+nginx in front of the dashboard for ports 80 and 443.
+
+Non-interactive examples:
 
 ```bash
-# SQLite, no TLS
-curl -fsSL .../install.sh | sudo ZAMAN_DB=sqlite bash
+# Lab mode: SQLite, no TLS
+curl -fsSL https://raw.githubusercontent.com/loreste/zaman/main/install.sh | sudo ZAMAN_DB=sqlite bash
 
-# PostgreSQL with HTTPS
-curl -fsSL .../install.sh | sudo ZAMAN_DB=postgres ZAMAN_TLS=1 ZAMAN_DOMAIN=sip.company.com bash
+# Production mode: PostgreSQL and HTTPS
+curl -fsSL https://raw.githubusercontent.com/loreste/zaman/main/install.sh | sudo ZAMAN_DB=postgres ZAMAN_TLS=1 ZAMAN_DOMAIN=your-dashboard-domain bash
 ```
 
 Docker:
@@ -41,134 +44,169 @@ docker compose --profile pg up        # PostgreSQL
 docker compose --profile ch up        # ClickHouse
 ```
 
-Manual build (needs [Makori](https://mako-lang.dev) ≥ 0.6.1 and Weft):
+Manual build:
 
 ```bash
-make build && ./scripts/demo.sh       # → http://127.0.0.1:3000
+make build
+./scripts/demo.sh
 ```
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for sizing, cloud instances, and
-post-install checklists.
+Manual builds require Makori >= 0.6.1 and Weft >= 0.6.0.
 
 ---
 
-## What it does
+## What It Does
 
-**Capture.** SIP over UDP with configurable echo (OPTIONS by default, REGISTER
-always returns 401). HEPv3 over UDP, TCP, and TLS — works with Kamailio,
-OpenSIPS, FreeSWITCH, heplify, captagent. Auth headers are redacted before
-storage.
+**Capture.** Receives SIP over UDP and HEPv3 over UDP, TCP, and TLS. It parses
+SIP requests and responses, redacts sensitive auth headers, and stores capture
+records with Call-ID, source/destination, CSeq, method, status, transport, HEP
+agent, timestamps, and raw SIP payload.
 
-**Dashboard.** Overview with live KPIs (active calls, ASR, error rate). NOC
-view with node health. Message search with multi-field filtering and
-JSON/CSV/PCAP export. Call ladders with directional arrows, PCAP download,
-recording upload + playback, and shareable links. Probe page for active OPTIONS
-RTT tests. Metrics page with Prometheus scrape config. Reports with ASR/NER
-gauges, response code breakdown, top talkers, HEP agent inventory, and daily
-rollups. SLA tracking per agent and destination. Alert rules with Slack,
-webhook, and email delivery.
+**Realtime overview.** Shows live CPS, concurrent calls, message rate, attempts,
+failures, ASR, node health, live feed, active calls, recent sites, charts, and
+notifications. Realtime counters are based on recent capture windows rather
+than all-history totals.
 
-**QoS.** RTCP packets via HEP are parsed for jitter, packet loss, R-factor
-(E-model), and MOS. QoS data is attached to capture records and queryable
-via API.
+**Messages.** Groups messages by Call-ID, supports drilldown to all messages for
+that call, and filters by Call-ID, method, transport, HEP agent, IP address,
+from number, to number, status, and timestamp/date range.
 
-**Federation.** Remote Zaman instances push captures to a central aggregator
-over the API.
+**SIP ladder.** `/ladder?call_id=...` opens a dedicated ladder page for a single
+Call-ID. The page includes summary facts, PCAP export, media/recording controls,
+a chronological SIP table, directional ladder visualization, related call legs,
+and links to raw SIP messages.
 
-**Auth.** RBAC with admin/operator/viewer roles. HMAC-SHA256 signed sessions.
-API tokens for automation. Rate limiting. IP allowlisting. Audit log. LDAP
-bind proxy for SSO.
+**Calls.** `/calls` is the operations view for realtime call activity. It shows
+active calls, CPS, concurrent calls, attempts, failures, recent dialogs, source
+and destination IPs, and quick links into messages and the dedicated ladder.
+
+**IP history.** `/ip` searches historical SIP/HEP records by source or
+destination IP. Operators can label peers, carriers, customers, sites, and SIP
+nodes at runtime without hardcoding those names in source.
+
+**Reports.** `/report` supports filtered report building across messages, calls,
+methods, transports, agents, IPs, numbers, status codes, and time ranges. Reports
+include telecom KPIs, ASR/NER, response-code breakdowns, source/destination IP
+breakdowns, routes, top talkers, agents, daily rollups, and CSV/JSON export.
+
+**Metrics and SLA.** `/metrics` exposes operational breakdowns, source and
+destination analysis, Prometheus guidance, CPS, concurrent calls, response
+codes, and node health. `/sla` tracks service levels with configurable targets
+for availability, ASR, failures, CPS, and destinations.
+
+**Auth and audit.** Dashboard RBAC supports admin, operator, and viewer roles.
+The app includes signed sessions, API tokens, rate limits, optional IP
+allowlisting, LDAP bind proxy support, and audit trails.
+
+**Alerts.** Operators can configure Slack, webhook, and email notifications for
+SIP and platform conditions such as low ASR, timeout spikes, 4xx/5xx errors,
+node degradation, high CPS, and auth failures.
 
 ---
 
 ## Database
 
 | Backend | When to use it | Config |
-|---------|---------------|--------|
-| SQLite | Lab, single instance, small deployments | default — nothing to configure |
-| PostgreSQL | Production, existing Postgres | `ZAMAN_DB_DRIVER=postgres` |
-| ClickHouse | High volume, long retention | `ZAMAN_DB_DRIVER=clickhouse` |
+|---------|----------------|--------|
+| SQLite | Lab, demos, single-node small deployments | default |
+| PostgreSQL | Production deployments and persistent history | `ZAMAN_DB_DRIVER=postgres` |
+| ClickHouse | Very high volume or long retention | `ZAMAN_DB_DRIVER=clickhouse` |
 
-Tables and indexes are created on first run. Schema is the same across all
-three backends. Retention is configurable (`ZAMAN_DB_RETENTION_DAYS`, default
-14).
-
----
-
-## Concurrency
-
-The core uses Makori's structured concurrency — `crew` / `kick` / `chan`. Workers
-for SIP, HEP (UDP/TCP/TLS), and HTTP are kicked from one crew block. A single
-`db_writer` drains a typed string channel (`for j in range ch`) and owns the
-database connection. TLS sessions run inline (handshake serialized, then
-read → close → parse) to avoid OpenSSL threading issues.
-
-No goroutines, no free threads, no thread pools. Every spawned task has an
-owner.
+Tables and indexes are created on startup. Retention is controlled by
+`ZAMAN_DB_RETENTION_DAYS` and defaults to 14 days.
 
 ---
 
-## API
+## Key Routes
 
-The core exposes a JSON API on port 9090 (configurable). All endpoints except
-`/health` require an API key when `ZAMAN_API_KEY` is set.
-
-Health, metrics, message search, single message, report summary, KPIs,
-response codes, top calls, top talkers, agent inventory, daily rollup, CPS,
-realtime window, node health, anomalies, QoS, SLA, related calls, export,
-probe, bulk delete, federation push/health, and Grafana datasource.
-
-Full endpoint list in the [spec](spec.md).
+| Route | Purpose |
+|-------|---------|
+| `/` | Realtime overview dashboard |
+| `/noc` | HEP/SIP node health and server naming |
+| `/messages` | Message search, grouping, and export |
+| `/messages/:id` | Raw SIP message detail |
+| `/ladder?call_id=...` | Dedicated SIP ladder for one Call-ID |
+| `/calls` | Realtime and historical call operations |
+| `/ip` | IP history, labels, source/destination analysis |
+| `/metrics` | Operational metrics and Prometheus guidance |
+| `/report` | Report builder, telecom KPIs, export |
+| `/sla` | SLA targets and service-level reporting |
+| `/alerts` | Alert rules, channels, and history |
+| `/admin/users` | RBAC user management |
+| `/admin/tokens` | API token management |
+| `/admin/audit` | Audit log |
 
 ---
 
 ## Configuration
 
-Core settings via environment variables or CLI args. Key ones:
+Core settings are environment variables or CLI arguments. Common variables:
 
-| Variable | Default | What it does |
-|----------|---------|-------------|
-| `ZAMAN_DB_DRIVER` | `sqlite` | Database backend |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ZAMAN_DB_DRIVER` | `sqlite` | `sqlite`, `postgres`, or `clickhouse` |
+| `ZAMAN_DB_DSN` | backend-specific | SQL database connection string |
 | `ZAMAN_SIP_PORT` | `5060` | SIP UDP listen port |
 | `ZAMAN_HEP_PORT` | `9060` | HEP UDP listen port |
-| `ZAMAN_API_PORT` | `9090` | HTTP API port |
-| `ZAMAN_API_KEY` | _(empty)_ | Require auth on API |
-| `ZAMAN_HEP_PASSWORD` | _(empty)_ | HEP password check |
-| `ZAMAN_HEP_ALLOW` | _(empty)_ | HEP peer IP allowlist |
+| `ZAMAN_API_PORT` | `9090` | Core API port |
+| `ZAMAN_API_KEY` | empty | Require API key when set |
+| `ZAMAN_HEP_PASSWORD` | empty | Optional HEP auth check |
+| `ZAMAN_HEP_ALLOW` | empty | Optional HEP peer allowlist |
 | `ZAMAN_HEP_TLS` | `0` | Enable HEP over TLS |
 | `ZAMAN_ECHO_METHODS` | `OPTIONS` | SIP methods to echo |
 | `ZAMAN_PROBE` | `0` | Enable active probe API |
 | `ZAMAN_DB_RETENTION_DAYS` | `14` | Auto-delete old captures |
 
-Full list in the [spec](spec.md).
+Dashboard settings live in the web environment and runtime JSON state. Labels
+for nodes and IPs are managed from the UI and are not committed to source.
 
 ---
 
-## Project layout
+## Project Layout
 
-```
+```text
 zaman/
-  core/main.mko           # capture, HEP, echo, API, metrics, QoS (Makori)
-  web/main.weft            # dashboard, auth, alerting, SLA (Weft/HTMX)
-  install.sh               # one-command Linux installer
-  Dockerfile               # multi-stage container build
-  docker-compose.yml       # SQLite / Postgres / ClickHouse profiles
-  deploy/                  # systemd units, bare-metal installer
-  scripts/                 # smoke tests, demo, CLI, HEP/SIP test clients
-  docs/DEPLOYMENT.md       # sizing, architecture, cloud setup
-  spec.md                  # engineering spec (source of truth)
-  SECURITY_REVIEW.md       # threat model and hardening status
+  core/main.mko           # zaman-core: capture, HEP, echo, API, DB, metrics
+  web/main.weft           # zaman-web: dashboard, RBAC, reports, ladder, alerts
+  install.sh              # Linux installer
+  Dockerfile              # multi-stage container build
+  docker-compose.yml      # SQLite / PostgreSQL / ClickHouse profiles
+  deploy/                 # systemd units and deployment helpers
+  scripts/                # smoke tests, demo, CLI, SIP/HEP clients
+  docs/DEPLOYMENT.md      # deployment guide
+  spec.md                 # engineering spec
+  SECURITY_REVIEW.md      # threat model and hardening status
 ```
 
-## What's not done
+---
 
-- Password hashing uses SHA-256 (should be bcrypt/scrypt/Argon2id)
-- Session secret is regenerated on restart (should be persisted)
-- ClickHouse queries use string interpolation (should be parameterized)
-- No public package in any package manager yet
-- Not tested at carrier scale (millions of calls/day)
+## Validation
 
-Full list in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
+```bash
+make check
+make test
+```
+
+Useful direct checks:
+
+```bash
+makori check core/main.mko
+weft check web/main.weft
+./scripts/smoke.sh
+```
+
+---
+
+## Known Gaps
+
+- Password hashing uses SHA-256 and should move to Argon2id, scrypt, or bcrypt.
+- Session secret should be persisted instead of regenerated on restart.
+- ClickHouse query paths should be fully parameterized.
+- RTP audio reconstruction is not a full media recorder; SIP PCAP export is
+  supported, and audio playback depends on captured/uploaded media artifacts.
+- Not yet proven at multi-million-call-per-day carrier scale.
+
+See [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for the current hardening status.
 
 ## License
 

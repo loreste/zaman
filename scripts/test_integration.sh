@@ -140,7 +140,7 @@ run_tests() {
     echo "  Health:"
     local health=$(curl -s "http://127.0.0.1:${api_port}/api/health")
     assert "health returns ok" "True" "$(echo "$health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["ok"])' 2>/dev/null)"
-    assert "version is 0.2.0" "0.2.0" "$(echo "$health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])' 2>/dev/null)"
+    assert "version is 0.3.0" "0.3.0" "$(echo "$health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])' 2>/dev/null)"
     assert_contains "health has db info" "driver" "$health"
     assert_contains "health has channel_capacity" "channel_capacity" "$health"
 

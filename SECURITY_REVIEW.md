@@ -1,6 +1,6 @@
 # Zaman Security Review
 
-**Scope:** `core/main.mko` (v0.2.0), `web/main.weft`, `install.sh`
+**Scope:** `core/main.mko` (v0.3.0), `web/main.weft`, `install.sh`
 **Date:** 2026-08-27 (v3 audit)
 **Status:** All 17 findings from v2 + 6 findings from v3 audit have been remediated.
 
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Zaman v0.2 was audited for authentication/authorization bypasses, injection, session security, network exposure, file upload risks, federation trust, installer supply chain, cryptographic issues, DoS vectors, and data leakage.
+Zaman v0.3 was audited for authentication/authorization bypasses, injection, session security, network exposure, file upload risks, federation trust, installer supply chain, cryptographic issues, DoS vectors, and data leakage.
 
 v2: 17 findings (2 critical, 4 high, 6 medium, 5 low). All fixed.
 v3: 6 additional findings (1 high, 4 medium, 1 low). All fixed.
