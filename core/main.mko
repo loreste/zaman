@@ -1,8 +1,8 @@
 // Zaman core — integrated SIP capture, echo, HEP, metrics, and JSON API.
 // Ports (defaults): SIP 5060/udp · HEP 9060/udp · API 9090/tcp
 //
-//   mako run core/main.mko
-//   mako build --release core/main.mko -o bin/zaman-core
+//   makori run core/main.mko
+//   makori build --release core/main.mko -o bin/zaman-core
 
 const RING = 512
 const VERSION = "0.2.0"
@@ -13,37 +13,35 @@ const DB_CH_CAP = 1024
 // ---- small helpers ----
 
 fn jesc(s: string) -> string {
-    // Full-ish JSON string escape (controls → \u00XX). SIP headers are untrusted.
-    let mut o = ""
+    // JSON string escape via str_builder (makori 0.6+). SIP headers are untrusted.
+    let buf = str_builder()
+    let hex = "0123456789abcdef"
     let mut i = 0
     let n = len(s)
     while i < n {
         let b = int(s[i])
         if b == 34 {
-            o = o + "\\\""
+            builder_write(buf, "\\\"")
         } else if b == 92 {
-            o = o + "\\\\"
+            builder_write(buf, "\\\\")
         } else if b == 8 {
-            o = o + "\\b"
+            builder_write(buf, "\\b")
         } else if b == 12 {
-            o = o + "\\f"
+            builder_write(buf, "\\f")
         } else if b == 10 {
-            o = o + "\\n"
+            builder_write(buf, "\\n")
         } else if b == 13 {
-            o = o + "\\r"
+            builder_write(buf, "\\r")
         } else if b == 9 {
-            o = o + "\\t"
+            builder_write(buf, "\\t")
         } else if b < 32 {
-            let hi = b / 16
-            let lo = b % 16
-            let hex = "0123456789abcdef"
-            o = o + "\\u00" + hex[hi:hi + 1] + hex[lo:lo + 1]
+            builder_write(buf, "\\u00" + hex[b / 16:b / 16 + 1] + hex[b % 16:b % 16 + 1])
         } else {
-            o = o + s[i:i + 1]
+            builder_write(buf, s[i:i + 1])
         }
         i = i + 1
     }
-    return o
+    return builder_string(buf)
 }
 
 // Strip credential-bearing headers before store/export.
@@ -177,23 +175,9 @@ fn api_key_configured() -> string {
     return env_get_or("ZAMAN_API_KEY", "")
 }
 
-// Constant-time string comparison to prevent timing attacks.
+// Constant-time string comparison (crypto_eq builtin, makori 0.6+).
 fn ct_str_eq(a: string, b: string) -> int {
-    let la = len(a)
-    let lb = len(b)
-    if la != lb {
-        return 0
-    }
-    let mut diff = 0
-    let mut i = 0
-    while i < la {
-        diff = diff | (int(a[i]) ^ int(b[i]))
-        i = i + 1
-    }
-    if diff == 0 {
-        return 1
-    }
-    return 0
+    return crypto_eq(a, b)
 }
 
 fn api_request_authorized(c: int) -> int {
@@ -485,6 +469,8 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method ON captures(method)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport ON captures(transport)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent ON captures(agent)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_from ON captures(from_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_to ON captures(to_h)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -523,6 +509,8 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method ON captures(method)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport ON captures(transport)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent ON captures(agent)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_from ON captures(from_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_to ON captures(to_h)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -668,9 +656,14 @@ fn db_insert_json(db: SqlDB, record_json: string) -> int {
     if str_eq(tr, "") {
         tr = "UDP"
     }
+    let up_expr = if db_is_postgres() == 1 {
+        "cnt = report_daily.cnt + 1"
+    } else {
+        "cnt = cnt + 1"
+    }
     let up = "INSERT INTO report_daily(day, method, transport, cnt) VALUES (" +
         sql_quote(day) + "," + sql_quote(m) + "," + sql_quote(tr) + ",1) " +
-        "ON CONFLICT(day, method, transport) DO UPDATE SET cnt = cnt + 1"
+        "ON CONFLICT(day, method, transport) DO UPDATE SET " + up_expr
     let _ = sql_exec_plain(db, up)
     // opportunistic retention
     if id % 64 == 0 {
@@ -736,11 +729,11 @@ fn ch_writer(ch: chan[string], metrics: CMap) -> int {
 }
 
 fn db_messages_json(limit: int, call_id_filter: string, transport_filter: string) -> string {
-    return db_messages_json_full(limit, call_id_filter, transport_filter, "", "", "")
+    return db_messages_json_full(limit, call_id_filter, transport_filter, "", "", "", "", "", "", 0, 0)
 }
 
 // ClickHouse query helper: returns JSON array from a SELECT that includes record_json.
-fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string) -> string {
+fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 50
@@ -763,6 +756,21 @@ fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string
     }
     if not str_eq(src_filter, "") {
         sql = sql + " AND (src LIKE " + sql_quote("%" + src_filter + "%") + " OR dst LIKE " + sql_quote("%" + src_filter + "%") + ")"
+    }
+    if not str_eq(from_filter, "") {
+        sql = sql + " AND from_h LIKE " + sql_quote("%" + from_filter + "%")
+    }
+    if not str_eq(to_filter, "") {
+        sql = sql + " AND to_h LIKE " + sql_quote("%" + to_filter + "%")
+    }
+    if not str_eq(status_filter, "") {
+        sql = sql + " AND status = " + status_filter
+    }
+    if since_ms > 0 {
+        sql = sql + " AND ts_ms >= " + string(since_ms)
+    }
+    if until_ms > 0 {
+        sql = sql + " AND ts_ms <= " + string(until_ms)
     }
     sql = sql + " ORDER BY ts_ms DESC LIMIT " + string(lim)
     // ClickHouse returns JSONEachRow — one JSON object per line
@@ -794,7 +802,7 @@ fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string
     return out + "]"
 }
 
-fn db_messages_json_full(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string) -> string {
+fn db_messages_json_full(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 50
@@ -821,6 +829,21 @@ fn db_messages_json_full(limit: int, call_id_filter: string, transport_filter: s
     }
     if not str_eq(src_filter, "") {
         sql = sql + " AND (src LIKE " + sql_quote("%" + src_filter + "%") + " OR dst LIKE " + sql_quote("%" + src_filter + "%") + ")"
+    }
+    if not str_eq(from_filter, "") {
+        sql = sql + " AND from_h LIKE " + sql_quote("%" + from_filter + "%")
+    }
+    if not str_eq(to_filter, "") {
+        sql = sql + " AND to_h LIKE " + sql_quote("%" + to_filter + "%")
+    }
+    if not str_eq(status_filter, "") {
+        sql = sql + " AND status = " + status_filter
+    }
+    if since_ms > 0 {
+        sql = sql + " AND ts_ms >= " + string(since_ms)
+    }
+    if until_ms > 0 {
+        sql = sql + " AND ts_ms <= " + string(until_ms)
     }
     sql = sql + " ORDER BY id DESC LIMIT " + string(lim)
     let rows = sql_query_rows(db, sql, [])
@@ -983,6 +1006,7 @@ fn db_report_top_calls_json(limit: int) -> string {
     let rows = sql_query_rows(db,
         "SELECT call_id, COUNT(*) AS c, MIN(ts_ms) AS t0, MAX(ts_ms) AS t1 " +
         "FROM captures WHERE call_id IS NOT NULL AND call_id != '' " +
+        "AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO') " +
         "GROUP BY call_id ORDER BY c DESC LIMIT " + string(lim),
         [])
     let mut out = "["
@@ -1219,8 +1243,9 @@ fn db_realtime_json(window_min: int) -> string {
     }
     let cs = string(cutoff)
     let total = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs, [])
-    let invites = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'", [])
-    let byes = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'BYE' AND kind = 'request'", [])
+    let invite_msgs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'", [])
+    let invites = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'INVITE' AND kind = 'request'", [])
+    let byes = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'BYE' AND kind = 'request'", [])
     let regs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND kind = 'request'", [])
     let opts = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'OPTIONS' AND kind = 'request'", [])
     let resp_2xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 200 AND status < 300", [])
@@ -1231,11 +1256,15 @@ fn db_realtime_json(window_min: int) -> string {
     let err_404 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 404", [])
     let err_486 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 486", [])
     let err_503 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 503", [])
-    // Active calls: INVITE seen but no BYE yet (approximate)
+    // Live-window open dialogs: distinct INVITE Call-IDs in this realtime window
+    // with no later BYE/CANCEL or final failed INVITE response.
     let active = sql_query_int(db,
-        "SELECT COUNT(DISTINCT c1.call_id) FROM captures c1 " +
-        "WHERE c1.ts_ms > " + cs + " AND c1.method = 'INVITE' AND c1.kind = 'request' " +
-        "AND NOT EXISTS (SELECT 1 FROM captures c2 WHERE c2.call_id = c1.call_id AND c2.method = 'BYE')", [])
+        "SELECT COUNT(DISTINCT inv.call_id) FROM captures inv " +
+        "WHERE inv.ts_ms > " + cs + " AND inv.call_id IS NOT NULL AND inv.call_id != '' " +
+        "AND inv.method = 'INVITE' AND inv.kind = 'request' " +
+        "AND NOT EXISTS (SELECT 1 FROM captures term WHERE term.call_id = inv.call_id AND term.ts_ms >= inv.ts_ms " +
+        "AND ((term.method = 'BYE' AND term.kind = 'request') OR (term.method = 'CANCEL' AND term.kind = 'request') " +
+        "OR (term.method = 'INVITE' AND term.kind = 'response' AND term.status >= 300)))", [])
     // Unique agents seen in window
     let agents_active = sql_query_int(db,
         "SELECT COUNT(DISTINCT agent) FROM captures WHERE ts_ms > " + cs, [])
@@ -1263,6 +1292,7 @@ fn db_realtime_json(window_min: int) -> string {
     return "{\"window_min\":" + string(win) +
         ",\"total\":" + string(total) +
         ",\"invites\":" + string(invites) +
+        ",\"invite_messages\":" + string(invite_msgs) +
         ",\"byes\":" + string(byes) +
         ",\"registers\":" + string(regs) +
         ",\"options\":" + string(opts) +
@@ -1384,7 +1414,7 @@ fn db_anomalies_json() -> string {
     let scan_rows = sql_query_rows(db,
         "SELECT src, COUNT(DISTINCT call_id) AS cids FROM captures " +
         "WHERE ts_ms > " + string(five_min) + " AND method = 'INVITE' AND kind = 'request' " +
-        "GROUP BY src HAVING cids > 20 LIMIT 5", [])
+        "GROUP BY src HAVING COUNT(DISTINCT call_id) > 20 LIMIT 5", [])
     if sql_rows_ok(scan_rows) == 1 {
         while sql_rows_next(scan_rows) == 1 {
             let scan_src = sql_rows_str(scan_rows, 0)
@@ -1784,27 +1814,48 @@ fn make_record_ex(
     }
     let raw_b64 = base64_encode(safe)
 
-    let mut j = "{"
-    j = j + "\"ts_ms\":" + string(ts)
-    j = j + ",\"src\":\"" + jesc(src) + "\""
-    j = j + ",\"dst\":\"" + jesc(dst) + "\""
-    j = j + ",\"transport\":\"" + jesc(transport) + "\""
-    j = j + ",\"proto\":\"" + jesc(proto) + "\""
-    j = j + ",\"agent\":\"" + jesc(agent) + "\""
-    j = j + ",\"kind\":\"" + jesc(kind) + "\""
-    j = j + ",\"method\":\"" + jesc(method) + "\""
-    j = j + ",\"status\":" + string(status)
-    j = j + ",\"ruri\":\"" + jesc(ruri) + "\""
-    j = j + ",\"call_id\":\"" + jesc(cid) + "\""
-    j = j + ",\"from\":\"" + jesc(from_h) + "\""
-    j = j + ",\"to\":\"" + jesc(to_h) + "\""
-    j = j + ",\"cseq\":\"" + jesc(cseq) + "\""
-    j = j + ",\"hep_node_id\":" + string(hep_node_id)
-    j = j + ",\"hep_node\":\"" + jesc(hep_node_name) + "\""
-    j = j + ",\"hep_cid\":\"" + jesc(hep_correlation) + "\""
-    j = j + ",\"size\":" + string(len(safe))
-    j = j + ",\"raw_b64\":\"" + raw_b64 + "\""
-    j = j + "}"
+    // Hot path: str_builder avoids O(n^2) string concat (makori 0.6+).
+    let buf = str_builder()
+    builder_write(buf, "{\"ts_ms\":")
+    builder_write(buf, string(ts))
+    builder_write(buf, ",\"src\":\"")
+    builder_write(buf, jesc(src))
+    builder_write(buf, "\",\"dst\":\"")
+    builder_write(buf, jesc(dst))
+    builder_write(buf, "\",\"transport\":\"")
+    builder_write(buf, jesc(transport))
+    builder_write(buf, "\",\"proto\":\"")
+    builder_write(buf, jesc(proto))
+    builder_write(buf, "\",\"agent\":\"")
+    builder_write(buf, jesc(agent))
+    builder_write(buf, "\",\"kind\":\"")
+    builder_write(buf, jesc(kind))
+    builder_write(buf, "\",\"method\":\"")
+    builder_write(buf, jesc(method))
+    builder_write(buf, "\",\"status\":")
+    builder_write(buf, string(status))
+    builder_write(buf, ",\"ruri\":\"")
+    builder_write(buf, jesc(ruri))
+    builder_write(buf, "\",\"call_id\":\"")
+    builder_write(buf, jesc(cid))
+    builder_write(buf, "\",\"from\":\"")
+    builder_write(buf, jesc(from_h))
+    builder_write(buf, "\",\"to\":\"")
+    builder_write(buf, jesc(to_h))
+    builder_write(buf, "\",\"cseq\":\"")
+    builder_write(buf, jesc(cseq))
+    builder_write(buf, "\",\"hep_node_id\":")
+    builder_write(buf, string(hep_node_id))
+    builder_write(buf, ",\"hep_node\":\"")
+    builder_write(buf, jesc(hep_node_name))
+    builder_write(buf, "\",\"hep_cid\":\"")
+    builder_write(buf, jesc(hep_correlation))
+    builder_write(buf, "\",\"size\":")
+    builder_write(buf, string(len(safe)))
+    builder_write(buf, ",\"raw_b64\":\"")
+    builder_write(buf, raw_b64)
+    builder_write(buf, "\"}")
+    let j = builder_string(buf)
     // Durable store: enqueue JSON to single kicked writer (serialized SQLite).
     // Ring still used for live UI via cap_push at the call site.
     db_enqueue(db_ch, j)
@@ -2273,46 +2324,27 @@ fn metrics_json(metrics: CMap, store: CMap) -> string {
     let status_4xx_5xx = cmap_i(metrics, "status_4xx_5xx")
     let db_ok = cmap_i(metrics, "db_ok")
     let db_err = cmap_i(metrics, "db_err")
-    let mut j = "{"
-    j = j + "\"service\":\"zaman-core\""
-    j = j + ",\"version\":\"" + VERSION + "\""
-    j = j + ",\"uptime_ms\":" + string(uptime)
-    j = j + ",\"msgs_total\":" + string(msgs)
-    j = j + ",\"db_ok\":" + string(db_ok)
-    j = j + ",\"db_err\":" + string(db_err)
-    j = j + ",\"requests\":" + string(reqs)
-    j = j + ",\"responses\":" + string(resps)
-    j = j + ",\"echoes\":" + string(echoes)
-    j = j + ",\"hep_total\":" + string(hep_total)
-    j = j + ",\"hep_udp\":" + string(hep_udp)
-    j = j + ",\"hep_tcp\":" + string(hep_tcp)
-    j = j + ",\"hep_tls\":" + string(hep_tls)
-    j = j + ",\"hep_err\":" + string(hep_err)
-    j = j + ",\"hep_auth_fail\":" + string(hep_auth_fail)
-    j = j + ",\"hep_deny\":" + string(hep_deny)
-    j = j + ",\"hep_sip\":" + string(hep_sip)
-    j = j + ",\"hep_rtcp\":" + string(hep_rtcp)
-    j = j + ",\"hep_other\":" + string(hep_other)
-    j = j + ",\"parse_err\":" + string(parse_err)
-    j = j + ",\"probes_ok\":" + string(probes_ok)
-    j = j + ",\"probes_fail\":" + string(probes_fail)
-    j = j + ",\"probe_rtt_ms\":" + string(probe_rtt_ms)
-    j = j + ",\"ring_size\":" + string(RING)
-    j = j + ",\"ring_idx\":" + string(msgs)
-    j = j + ",\"methods\":{"
-    j = j + "\"INVITE\":" + string(m_invite)
-    j = j + ",\"OPTIONS\":" + string(m_options)
-    j = j + ",\"REGISTER\":" + string(m_register)
-    j = j + ",\"BYE\":" + string(m_bye)
-    j = j + ",\"ACK\":" + string(m_ack)
-    j = j + ",\"INFO\":" + string(m_info)
-    j = j + ",\"MESSAGE\":" + string(m_message)
-    j = j + ",\"UNKNOWN\":" + string(m_unknown)
-    j = j + "}"
-    j = j + ",\"status_2xx\":" + string(status_2xx)
-    j = j + ",\"status_4xx_5xx\":" + string(status_4xx_5xx)
-    j = j + "}"
-    return j
+    let buf = str_builder()
+    builder_write(buf, "{\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"")
+    builder_write(buf, ",\"uptime_ms\":" + string(uptime))
+    builder_write(buf, ",\"msgs_total\":" + string(msgs))
+    builder_write(buf, ",\"db_ok\":" + string(db_ok) + ",\"db_err\":" + string(db_err))
+    builder_write(buf, ",\"requests\":" + string(reqs) + ",\"responses\":" + string(resps))
+    builder_write(buf, ",\"echoes\":" + string(echoes))
+    builder_write(buf, ",\"hep_total\":" + string(hep_total))
+    builder_write(buf, ",\"hep_udp\":" + string(hep_udp) + ",\"hep_tcp\":" + string(hep_tcp) + ",\"hep_tls\":" + string(hep_tls))
+    builder_write(buf, ",\"hep_err\":" + string(hep_err) + ",\"hep_auth_fail\":" + string(hep_auth_fail) + ",\"hep_deny\":" + string(hep_deny))
+    builder_write(buf, ",\"hep_sip\":" + string(hep_sip) + ",\"hep_rtcp\":" + string(hep_rtcp) + ",\"hep_other\":" + string(hep_other))
+    builder_write(buf, ",\"parse_err\":" + string(parse_err))
+    builder_write(buf, ",\"probes_ok\":" + string(probes_ok) + ",\"probes_fail\":" + string(probes_fail) + ",\"probe_rtt_ms\":" + string(probe_rtt_ms))
+    builder_write(buf, ",\"ring_size\":" + string(RING) + ",\"ring_idx\":" + string(msgs))
+    builder_write(buf, ",\"methods\":{\"INVITE\":" + string(m_invite) + ",\"OPTIONS\":" + string(m_options))
+    builder_write(buf, ",\"REGISTER\":" + string(m_register) + ",\"BYE\":" + string(m_bye))
+    builder_write(buf, ",\"ACK\":" + string(m_ack) + ",\"INFO\":" + string(m_info))
+    builder_write(buf, ",\"MESSAGE\":" + string(m_message) + ",\"UNKNOWN\":" + string(m_unknown) + "}")
+    builder_write(buf, ",\"status_2xx\":" + string(status_2xx))
+    builder_write(buf, ",\"status_4xx_5xx\":" + string(status_4xx_5xx) + "}")
+    return builder_string(buf)
 }
 
 fn metrics_prom(metrics: CMap, store: CMap) -> string {
@@ -2376,19 +2408,19 @@ fn metrics_prom(metrics: CMap, store: CMap) -> string {
 // ---- messages list / filter (prefer SQLite; fall back to ring) ----
 
 fn messages_json(store: CMap, limit: int, call_id_filter: string) -> string {
-    return messages_json_ex(store, limit, call_id_filter, "")
+    return messages_json_ex(store, limit, call_id_filter, "", "", "", "", "", "", "", 0, 0)
 }
 
-fn messages_json_ex(store: CMap, limit: int, call_id_filter: string, transport_filter: string) -> string {
+fn messages_json_ex(store: CMap, limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int) -> string {
     // ClickHouse path
     if db_is_clickhouse() == 1 {
-        let from_ch = ch_messages_json(limit, call_id_filter, transport_filter, "", "", "")
+        let from_ch = ch_messages_json(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms)
         if not str_eq(from_ch, "[]") {
             return from_ch
         }
     }
     // Prefer durable DB when available
-    let from_db = db_messages_json(limit, call_id_filter, transport_filter)
+    let from_db = db_messages_json_full(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms)
     if not str_eq(from_db, "[]") {
         return from_db
     }
@@ -2416,6 +2448,46 @@ fn messages_json_ex(store: CMap, limit: int, call_id_filter: string, transport_f
             }
             if keep == 1 && not str_eq(transport_filter, "") {
                 if not str_contains(rec, "\"transport\":\"" + jesc(transport_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(agent_filter, "") {
+                if not str_contains(rec, "\"agent\":\"" + jesc(agent_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(method_filter, "") {
+                if not str_contains(rec, "\"method\":\"" + jesc(method_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(src_filter, "") {
+                if not str_contains(rec, src_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(from_filter, "") {
+                if not str_contains(rec, "\"from\":\"") || not str_contains(rec, from_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(to_filter, "") {
+                if not str_contains(rec, "\"to\":\"") || not str_contains(rec, to_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(status_filter, "") {
+                if not str_contains(rec, "\"status\":" + status_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && since_ms > 0 {
+                if json_get_int(rec, "ts_ms") < since_ms {
+                    keep = 0
+                }
+            }
+            if keep == 1 && until_ms > 0 {
+                if json_get_int(rec, "ts_ms") > until_ms {
                     keep = 0
                 }
             }
@@ -2784,33 +2856,30 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
         let path = path_only(raw_path)
         let q = path_query(raw_path)
 
-        // Deep health check: verifies DB connectivity + listener status.
+        // Health check: minimal for unauthenticated, detailed for authenticated.
         if str_eq(path, "/health") || str_eq(path, "/api/health") {
-            let mut auth_flag = "false"
-            if not str_eq(key, "") {
-                auth_flag = "true"
-            }
-            let db_ok = cmap_i(metrics, "db_ok")
-            let db_err = cmap_i(metrics, "db_err")
-            let msgs = cmap_i(metrics, "msgs_total")
-            let uptime = now_ms() - cmap_i(metrics, "started_ms")
-            let mut db_status = "ok"
-            if db_is_clickhouse() == 1 {
-                db_status = "clickhouse"
-            } else if db_is_postgres() == 1 {
-                db_status = "postgres"
+            if api_request_authorized(c) == 1 {
+                // Authenticated: full detail
+                let db_ok = cmap_i(metrics, "db_ok")
+                let db_err = cmap_i(metrics, "db_err")
+                let msgs = cmap_i(metrics, "msgs_total")
+                let uptime = now_ms() - cmap_i(metrics, "started_ms")
+                let mut db_status = "sqlite"
+                if db_is_clickhouse() == 1 {
+                    db_status = "clickhouse"
+                } else if db_is_postgres() == 1 {
+                    db_status = "postgres"
+                }
+                let body = "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"" +
+                    ",\"uptime_ms\":" + string(uptime) +
+                    ",\"db\":{\"driver\":\"" + db_status + "\",\"writes_ok\":" + string(db_ok) + ",\"writes_err\":" + string(db_err) + "}" +
+                    ",\"captures\":" + string(msgs) +
+                    "}"
+                let _ = http_respond_json(c, 200, body)
             } else {
-                db_status = "sqlite"
+                // Unauthenticated: liveness only
+                let _ = http_respond_json(c, 200, "{\"ok\":true}")
             }
-            let ch_cap = DB_CH_CAP
-            let body = "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"" +
-                ",\"api_auth\":" + auth_flag +
-                ",\"uptime_ms\":" + string(uptime) +
-                ",\"db\":{\"driver\":\"" + db_status + "\",\"writes_ok\":" + string(db_ok) + ",\"writes_err\":" + string(db_err) + "}" +
-                ",\"captures\":" + string(msgs) +
-                ",\"channel_capacity\":" + string(ch_cap) +
-                "}"
-            let _ = http_respond_json(c, 200, body)
         } else if api_request_authorized(c) == 0 {
             let _ = http_respond_json(c, 401, "{\"error\":\"unauthorized\",\"hint\":\"X-API-Key or Authorization: Bearer\"}")
         } else if str_eq(path, "/api/metrics") {
@@ -2825,13 +2894,22 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let tr = query_get(q, "transport")
             let agent = query_get(q, "agent")
             let method = query_get(q, "method")
-            let src = query_get(q, "src")
+            let mut src = query_get(q, "ip")
+            if str_eq(src, "") {
+                src = query_get(q, "src")
+            }
+            let fromq = query_get(q, "from_number")
+            let toq = query_get(q, "to_number")
+            let status_i = parse_int_or(query_get(q, "status"), 0)
+            let statusq = if status_i > 0 { string(status_i) } else { "" }
+            let since_ms = parse_int_or(query_get(q, "since_ms"), 0)
+            let until_ms = parse_int_or(query_get(q, "until_ms"), 0)
             let body = if db_is_clickhouse() == 1 {
-                ch_messages_json(lim, cid, tr, agent, method, src)
-            } else if str_eq(agent, "") && str_eq(method, "") && str_eq(src, "") {
-                messages_json_ex(store, lim, cid, tr)
+                ch_messages_json(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms)
+            } else if str_eq(agent, "") && str_eq(method, "") && str_eq(src, "") && str_eq(fromq, "") && str_eq(toq, "") && str_eq(statusq, "") && since_ms <= 0 && until_ms <= 0 {
+                messages_json_ex(store, lim, cid, tr, "", "", "", "", "", "", 0, 0)
             } else {
-                db_messages_json_full(lim, cid, tr, agent, method, src)
+                db_messages_json_full(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms)
             }
             let _ = http_respond_json(c, 200, body)
         } else if str_has_prefix(path, "/api/messages/") {
@@ -2910,13 +2988,31 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             // Available metrics
             let _ = http_respond_json(c, 200, "[\"messages_total\",\"requests\",\"responses\",\"echoes\",\"hep_total\",\"asr\",\"ner\",\"active_calls\",\"err_rate\"]")
         } else if str_eq(path, "/api/grafana/query") && str_eq(method, "POST") {
-            // Return current metric values as Grafana time-series
-            let body = http_body(c)
-            let mj = metrics_json(metrics, store)
-            let kj = db_report_kpi_json()
+            // Return current metric values as Grafana SimpleJSON time-series
+            let _ = http_body(c)
+            let ts = string(now_ms())
+            let msgs = string(cmap_i(metrics, "msgs_total"))
+            let reqs = string(cmap_i(metrics, "requests"))
+            let resps = string(cmap_i(metrics, "responses"))
+            let echs = string(cmap_i(metrics, "echoes"))
+            let htot = string(cmap_i(metrics, "hep_total"))
+            // Fetch KPI + realtime for ASR/NER/active_calls/err_rate
+            let kpi = db_report_kpi_json()
             let rt = db_realtime_json(5)
-            let _ = http_respond_json(c, 200, "[{\"target\":\"overview\",\"datapoints\":[[" +
-                string(cmap_i(metrics, "msgs_total")) + "," + string(now_ms()) + "]]}]")
+            let asr_v = string(json_get_int(kpi, "asr"))
+            let ner_v = string(json_get_int(kpi, "ner"))
+            let active = string(json_get_int(rt, "active_calls"))
+            let errr = string(json_get_int(rt, "err_rate"))
+            let _ = http_respond_json(c, 200,
+                "[{\"target\":\"messages_total\",\"datapoints\":[[" + msgs + "," + ts + "]]}," +
+                "{\"target\":\"requests\",\"datapoints\":[[" + reqs + "," + ts + "]]}," +
+                "{\"target\":\"responses\",\"datapoints\":[[" + resps + "," + ts + "]]}," +
+                "{\"target\":\"echoes\",\"datapoints\":[[" + echs + "," + ts + "]]}," +
+                "{\"target\":\"hep_total\",\"datapoints\":[[" + htot + "," + ts + "]]}," +
+                "{\"target\":\"asr\",\"datapoints\":[[" + asr_v + "," + ts + "]]}," +
+                "{\"target\":\"ner\",\"datapoints\":[[" + ner_v + "," + ts + "]]}," +
+                "{\"target\":\"active_calls\",\"datapoints\":[[" + active + "," + ts + "]]}," +
+                "{\"target\":\"err_rate\",\"datapoints\":[[" + errr + "," + ts + "]]}]")
         // ── Federation: remote Zaman instances push captures here ──
         // ── QoS / MOS for a call ──
         } else if str_eq(path, "/api/qos") {
@@ -3018,7 +3114,7 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let lim = parse_int_or(query_get(q, "limit"), 100)
             let cid = query_get(q, "call_id")
             let tr = query_get(q, "transport")
-            let body = messages_json_ex(store, lim, cid, tr)
+            let body = messages_json_ex(store, lim, cid, tr, "", "", "", "", "", "", 0, 0)
             let _ = http_respond_ct(c, 200, "application/json", body)
         } else if str_eq(path, "/api/probe") && str_eq(method, "POST") {
             let body = http_body(c)

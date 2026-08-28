@@ -1,5 +1,5 @@
 # Zaman — multi-stage build
-# Stage 1: build the Mako core binary
+# Stage 1: build the Makori core binary
 # Stage 2: runtime with core + weft dashboard
 
 FROM ubuntu:24.04 AS builder
@@ -8,19 +8,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates clang make && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Mako
-ARG MAKO_VERSION=0.4.18
+# Install Makori
+ARG MAKORI_VERSION=0.6.1
 RUN curl -fsSL https://mako-lang.dev/install.sh | bash || \
     (mkdir -p /root/.local/bin && \
-     curl -fsSL -o /root/.local/bin/mako https://mako-lang.dev/dl/mako-linux-amd64 && \
-     chmod +x /root/.local/bin/mako)
+     curl -fsSL -o /root/.local/bin/makori https://mako-lang.dev/dl/makori-linux-amd64 && \
+     chmod +x /root/.local/bin/makori)
 ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /build
 COPY mako.toml main.mko ./
 COPY core/ core/
 
-RUN mako build --release core/main.mko -o bin/zaman-core
+RUN makori build --release core/main.mko -o bin/zaman-core
 
 # Stage 2: runtime
 FROM ubuntu:24.04

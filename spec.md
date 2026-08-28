@@ -1,8 +1,8 @@
 # Zaman — Product & Engineering Spec
 
-**Status:** v0.2 (production-track)  
-**Stack:** Mako core (`core/main.mko`) + Weft dashboard (`web/main.weft`)  
-**Verified on:** Mako ≥ **0.4.19**, Weft ≥ **0.3.30**  
+**Status:** v0.2 (production-track)
+**Stack:** Makori core (`core/main.mko`) + Weft dashboard (`web/main.weft`)
+**Verified on:** Makori >= **0.6.1**, Weft >= **0.6.0**
 **License:** Apache-2.0
 
 This document is the source of truth. When behaviour is ambiguous, spec wins over README.
@@ -27,7 +27,7 @@ Integrated SIP monitoring: capture, metrics, dashboards, alerting, and echo — 
 10. Per-agent and per-destination SLA tracking with configurable thresholds.
 11. Prometheus-compatible `/metrics` endpoint and Grafana datasource API.
 12. Dashboard TLS via nginx reverse proxy (auto-configured by installer).
-13. Structured concurrency via Mako `crew` / `kick` / `chan`.
+13. Structured concurrency via Makori `crew` / `kick` / `chan`.
 
 ### 1.2 Non-goals
 
@@ -45,7 +45,7 @@ zaman/
   SECURITY_REVIEW.md    # threat model + hardening
   LICENSE               # Apache-2.0
   Makefile              # build / smoke / demo / doctor
-  mako.toml             # Mako package manifest
+  mako.toml             # Makori package manifest
   main.mko              # stub → build core/
   core/
     main.mko            # zaman-core (capture, echo, HEP, API, DB)
@@ -65,12 +65,12 @@ zaman/
 
 ## 3. Runtime components
 
-### 3.1 zaman-core (Mako)
+### 3.1 zaman-core (Makori)
 
 Single native binary. Captures SIP/HEP, stores to database, serves JSON/Prometheus API.
 
 ```bash
-mako build --release core/main.mko -o bin/zaman-core
+makori build --release core/main.mko -o bin/zaman-core
 ./bin/zaman-core [sip_port] [hep_port] [api_port]
 ```
 
@@ -133,7 +133,7 @@ Selected via `ZAMAN_DB_DRIVER` (default: `sqlite`).
 
 ## 5. Concurrency model
 
-1. Concurrency uses Mako's structured primitives: `crew`, `kick`, `join`, `drain`, `chan`.
+1. Concurrency uses Makori's structured primitives: `crew`, `kick`, `join`, `drain`, `chan`.
 2. Capture producers enqueue JSON via `chan[string]` — they do not open the database directly.
 3. A single `db_writer` job owns the database connection (or ClickHouse HTTP client).
 4. Optional TCP/TLS collectors are started only when enabled.
@@ -312,7 +312,7 @@ Authoritative review: `SECURITY_REVIEW.md`.
 ## 13. Build & test
 
 ```bash
-make doctor   # check toolchain
+make doctor   # check toolchain (makori + weft)
 make build    # → bin/zaman-core
 make smoke    # e2e: SIP echo, probe, HEP UDP/TCP/TLS, metrics
 make demo     # core + dashboard on high ports

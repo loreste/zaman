@@ -17,9 +17,9 @@ all: build
 # ---- toolchain ----
 
 doctor:
-	@command -v mako >/dev/null || (echo "mako not found — https://mako-lang.dev"; exit 1)
+	@command -v makori >/dev/null || (echo "makori not found — https://mako-lang.dev"; exit 1)
 	@command -v weft >/dev/null || (echo "weft not found — https://weft.dev"; exit 1)
-	@mako version
+	@makori version
 	@weft version
 
 # ---- build ----
@@ -28,7 +28,7 @@ build: bin/zaman-core
 
 bin/zaman-core: core/main.mko
 	mkdir -p bin
-	mako build --release core/main.mko -o bin/zaman-core
+	makori build --release core/main.mko -o bin/zaman-core
 
 core: bin/zaman-core
 
@@ -65,4 +65,4 @@ test-load: bin/zaman-core
 # ---- clean ----
 
 clean:
-	rm -rf bin .mako
+	rm -rf bin .mako .makori

@@ -95,15 +95,15 @@ install_deps() {
     fi
 }
 
-# ── Install Mako ──
+# ── Install Makori ──
 install_mako() {
-    if command -v mako >/dev/null 2>&1; then
-        MAKO_VER=$(mako version 2>/dev/null | head -1)
-        log "Mako already installed: ${MAKO_VER}"
+    if command -v makori >/dev/null 2>&1; then
+        MAKO_VER=$(makori version 2>/dev/null | head -1)
+        log "Makori already installed: ${MAKO_VER}"
         return
     fi
 
-    log "Installing Mako language..."
+    log "Installing Makori language..."
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64|amd64) MAKO_ARCH="amd64" ;;
@@ -114,33 +114,33 @@ install_mako() {
     mkdir -p /usr/local/bin
 
     # Try official install script first
-    if curl -fsSL https://mako-lang.dev/install.sh -o /tmp/mako-install.sh 2>/dev/null; then
-        bash /tmp/mako-install.sh 2>/dev/null && {
+    if curl -fsSL https://mako-lang.dev/install.sh -o /tmp/makori-install.sh 2>/dev/null; then
+        bash /tmp/makori-install.sh 2>/dev/null && {
             # Move to system path if installed to ~/.local/bin
-            [ -f "$HOME/.local/bin/mako" ] && cp "$HOME/.local/bin/mako" /usr/local/bin/mako
-            rm -f /tmp/mako-install.sh
+            [ -f "$HOME/.local/bin/makori" ] && cp "$HOME/.local/bin/makori" /usr/local/bin/makori
+            rm -f /tmp/makori-install.sh
         }
     fi
 
     # Fallback: direct binary download
-    if ! command -v mako >/dev/null 2>&1; then
+    if ! command -v makori >/dev/null 2>&1; then
         for url in \
-            "https://mako-lang.dev/dl/mako-linux-${MAKO_ARCH}" \
-            "https://github.com/mako-lang/mako/releases/latest/download/mako-linux-${MAKO_ARCH}" \
-            "https://mako-lang.com/dl/mako-linux-${MAKO_ARCH}"; do
-            if curl -fsSL "$url" -o /usr/local/bin/mako 2>/dev/null; then
-                chmod +x /usr/local/bin/mako
+            "https://mako-lang.dev/dl/makori-linux-${MAKO_ARCH}" \
+            "https://github.com/mako-lang/mako/releases/latest/download/makori-linux-${MAKO_ARCH}" \
+            "https://mako-lang.dev/dl/mako-linux-${MAKO_ARCH}"; do
+            if curl -fsSL "$url" -o /usr/local/bin/makori 2>/dev/null; then
+                chmod +x /usr/local/bin/makori
                 break
             fi
         done
     fi
 
     # Verify
-    if ! command -v mako >/dev/null 2>&1; then
-        err "Failed to install Mako. Install manually from https://mako-lang.dev and re-run."
+    if ! command -v makori >/dev/null 2>&1; then
+        err "Failed to install Makori. Install manually from https://mako-lang.dev and re-run."
     fi
 
-    log "Mako installed: $(mako version 2>/dev/null | head -1)"
+    log "Makori installed: $(makori version 2>/dev/null | head -1)"
 }
 
 # ── Install Weft ──
@@ -276,7 +276,7 @@ install_zaman() {
     # Build
     log "Building zaman-core..."
     mkdir -p bin
-    mako build --release core/main.mko -o bin/zaman-core
+    makori build --release core/main.mko -o bin/zaman-core
     log "Built: bin/zaman-core"
 
     # Create directories
@@ -623,12 +623,12 @@ main() {
 
     # Verify toolchain before proceeding — validates binaries are genuine executables
     log "Verifying toolchain..."
-    command -v mako >/dev/null 2>&1 || err "Mako not found after install"
+    command -v makori >/dev/null 2>&1 || err "Makori not found after install"
     command -v weft >/dev/null 2>&1 || err "Weft not found after install"
     command -v clang >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || err "C compiler not found (need clang or gcc)"
     command -v git >/dev/null 2>&1 || err "git not found"
     command -v openssl >/dev/null 2>&1 || err "openssl not found"
-    log "Toolchain OK: mako=$(mako version 2>/dev/null | head -1), weft=$(weft version 2>/dev/null | head -1)"
+    log "Toolchain OK: makori=$(makori version 2>/dev/null | head -1), weft=$(weft version 2>/dev/null | head -1)"
 
     install_database
     install_zaman

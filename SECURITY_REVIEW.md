@@ -1,8 +1,8 @@
 # Zaman Security Review
 
-**Scope:** `core/main.mko` (v0.2.0), `web/main.weft`, `install.sh`  
-**Date:** 2026-07-27  
-**Status:** All 17 findings from the v2 audit have been remediated.
+**Scope:** `core/main.mko` (v0.2.0), `web/main.weft`, `install.sh`
+**Date:** 2026-08-27 (v3 audit)
+**Status:** All 17 findings from v2 + 6 findings from v3 audit have been remediated.
 
 ---
 
@@ -10,7 +10,8 @@
 
 Zaman v0.2 was audited for authentication/authorization bypasses, injection, session security, network exposure, file upload risks, federation trust, installer supply chain, cryptographic issues, DoS vectors, and data leakage.
 
-17 findings were identified (2 critical, 4 high, 6 medium, 5 low). All have been fixed.
+v2: 17 findings (2 critical, 4 high, 6 medium, 5 low). All fixed.
+v3: 6 additional findings (1 high, 4 medium, 1 low). All fixed.
 
 ---
 
@@ -35,6 +36,17 @@ Zaman v0.2 was audited for authentication/authorization bypasses, injection, ses
 | F15 | Low | Installer downloads without checksum | **Mitigated** | Binaries verified by running `mako version` / `weft version` after download |
 | F16 | Low | Partials endpoints skipped auth | **Fixed** | Auth check on `/partials/messages`, returns empty without session |
 | F17 | Low | CSRF protection relied on SameSite only | **Fixed** | CSRF token derived from HMAC(secret, session), embedded in forms, verified on POST |
+
+### v3 Findings (2026-08-27)
+
+| # | Severity | Finding | Status | Fix |
+|---|----------|---------|--------|-----|
+| F18 | High | XSS in Call-ID copy button — Call-ID injected into JS string literal in onclick handler | **Fixed** | Moved value to `data-v` HTML attribute (h()-escaped), read via `this.dataset.v` |
+| F19 | Medium | 6 POST routes missing CSRF validation (/probe, /share/create, /preferences, /searches/save, /searches/:id/delete, /recordings/upload) | **Fixed** | Added `csrf_valid()` check to all 6 handlers |
+| F20 | Medium | 3 HTMX partial endpoints skipped auth (/partials/charts, /partials/nodes, /partials/alerts) | **Fixed** | Added `auth_enabled() && get_user()` check, returns empty on failure |
+| F21 | Medium | /api/health leaked db driver type, write counts, auth flag, uptime to unauthenticated callers | **Fixed** | Unauthenticated: returns `{"ok":true}` only. Authenticated: full detail |
+| F22 | Medium | API token shown in URL query string (?new_token=) — cached in browser history, referrer, logs | **Fixed** | Token now rendered inline from POST handler, never in URL |
+| F23 | Low | `ct_str_eq` hand-rolled constant-time comparison could drift from correct implementation | **Fixed** | Replaced with `crypto_eq` builtin (makori 0.6+) |
 
 ---
 

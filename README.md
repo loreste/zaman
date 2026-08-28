@@ -41,7 +41,7 @@ docker compose --profile pg up        # PostgreSQL
 docker compose --profile ch up        # ClickHouse
 ```
 
-Manual build (needs [Mako](https://mako-lang.com) ≥ 0.4.19 and Weft):
+Manual build (needs [Makori](https://mako-lang.dev) ≥ 0.6.1 and Weft):
 
 ```bash
 make build && ./scripts/demo.sh       # → http://127.0.0.1:3000
@@ -97,7 +97,7 @@ three backends. Retention is configurable (`ZAMAN_DB_RETENTION_DAYS`, default
 
 ## Concurrency
 
-The core uses Mako's structured concurrency — `crew` / `kick` / `chan`. Workers
+The core uses Makori's structured concurrency — `crew` / `kick` / `chan`. Workers
 for SIP, HEP (UDP/TCP/TLS), and HTTP are kicked from one crew block. A single
 `db_writer` drains a typed string channel (`for j in range ch`) and owns the
 database connection. TLS sessions run inline (handshake serialized, then
@@ -148,7 +148,7 @@ Full list in the [spec](spec.md).
 
 ```
 zaman/
-  core/main.mko           # capture, HEP, echo, API, metrics, QoS (Mako)
+  core/main.mko           # capture, HEP, echo, API, metrics, QoS (Makori)
   web/main.weft            # dashboard, auth, alerting, SLA (Weft/HTMX)
   install.sh               # one-command Linux installer
   Dockerfile               # multi-stage container build
