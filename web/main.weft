@@ -764,6 +764,8 @@ fn call_groups_table(items) {
                 state_cls = "text-[#fbbf24] border-[rgba(251,191,36,.25)] bg-[rgba(251,191,36,.08)]"
             }
 
+            origin_ip := call_origin_ip(call_id, items)
+            if origin_ip != "" { src = origin_ip }
             src_ip := endpoint_ip(src)
             dst_ip := endpoint_ip(dst)
             src_s := endpoint_display(src, site_labels)
@@ -796,7 +798,7 @@ fn call_groups_table(items) {
     "<table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#a1a1aa] border-b border-[#1e1e22]\">" +
     "<th class=\"py-2 px-3 font-semibold\">Call-ID</th><th class=\"py-2 px-3 font-semibold\">State</th>" +
     "<th class=\"py-2 px-3 font-semibold text-right\">Msgs</th><th class=\"py-2 px-3 font-semibold text-right hide-mobile\">Req / Resp</th>" +
-    "<th class=\"py-2 px-3 font-semibold hide-mobile\">Last</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Source IP</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Destination IP</th>" +
+    "<th class=\"py-2 px-3 font-semibold hide-mobile\">Last</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Origin IP</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Destination IP</th>" +
     "<th class=\"py-2 px-3 font-semibold hide-mobile\">Transport</th><th class=\"py-2 px-3 font-semibold\">Last Seen</th>" +
     "<th class=\"py-2 px-3 font-semibold\"></th></tr></thead>" +
     "<tbody class=\"divide-y divide-[#27272a]\">" + rows + "</tbody></table></div>"
@@ -1015,6 +1017,41 @@ fn endpoint_display(endpoint, labels) {
         return h(endpoint)
     }
     h(label) + " <span class=\"mono text-[10px] text-[#52525b]\">" + h(endpoint) + "</span>"
+}
+
+fn call_id_origin_ip(call_id) {
+    if call_id == null || call_id == "" { return "" }
+    parts := str.split(call_id, "@")
+    if len(parts) < 2 { return "" }
+    mut host := parts[len(parts) - 1]
+    semi := str.split(host, ";")
+    if len(semi) > 0 { host = semi[0] }
+    gt := str.split(host, ">")
+    if len(gt) > 0 { host = gt[0] }
+    lt := str.split(host, "<")
+    if len(lt) > 0 { host = lt[len(lt) - 1] }
+    if str.contains(host, ".") || str.contains(host, ":") { return host }
+    ""
+}
+
+fn call_origin_ip(call_id, items) {
+    cid_ip := call_id_origin_ip(call_id)
+    if cid_ip != "" { return cid_ip }
+    mut origin := ""
+    mut origin_ts := 0
+    for m in items {
+        if (m["call_id"] ?? "") != call_id { continue }
+        if (m["method"] ?? "") != "INVITE" { continue }
+        if (m["kind"] ?? "") == "response" { continue }
+        ip := endpoint_ip(m["src"] ?? "")
+        if ip == "" || ip == "0.0.0.0" { continue }
+        ts_ms := m["ts_ms"] ?? 0
+        if origin == "" || ts_ms < origin_ts {
+            origin = ip
+            origin_ts = ts_ms
+        }
+    }
+    origin
 }
 
 fn node_age_label(age_sec) {
@@ -1629,6 +1666,61 @@ fn report_endpoint_rows(items, field, max_rows) {
     rows
 }
 
+fn report_origin_rows(items, max_rows) {
+    labels := load_site_labels()
+    mut keys := []
+    mut calls := []
+    for m in items {
+        call_id := m["call_id"] ?? ""
+        if call_id == "" { continue }
+        ip := call_origin_ip(call_id, items)
+        if ip == "" { continue }
+        mut seen_ip := false
+        for k in keys {
+            if k == ip { seen_ip = true }
+        }
+        if !seen_ip { keys = list_append(keys, ip) }
+        call_key := ip + "|" + call_id
+        mut seen_call := false
+        for c in calls {
+            if c == call_key { seen_call = true }
+        }
+        if !seen_call { calls = list_append(calls, call_key) }
+    }
+    mut rows := ""
+    mut used := []
+    mut rank := 0
+    while rank < max_rows && rank < len(keys) {
+        mut best := ""
+        mut best_count := 0
+        for ip in keys {
+            mut already := false
+            for u in used {
+                if u == ip { already = true }
+            }
+            if already { continue }
+            mut count := 0
+            for c in calls {
+                cparts := str.split(c, "|")
+                if len(cparts) > 0 && cparts[0] == ip { count = count + 1 }
+            }
+            if count > best_count {
+                best = ip
+                best_count = count
+            }
+        }
+        if best == "" { break }
+        used = list_append(used, best)
+        label := labels[best]
+        name := if label != null && label != "" { h(label) } else { h(best) }
+        rows = rows + "<tr><td class=\"py-2 px-3 text-sm\"><a class=\"hover:underline text-[#a78bfa]\" href=\"/ip?addr=" + h(best) + "\">" + name + "</a><div class=\"mono text-[10px] text-[#52525b]\">" + h(best) + "</div></td>" +
+            "<td class=\"py-2 px-3 mono text-sm text-right\">" + ("" + (best_count)) + "</td></tr>"
+        rank = rank + 1
+    }
+    if rows == "" { rows = "<tr><td colspan=\"2\" class=\"py-6 text-center text-[#71717a] text-sm\">No call origins in this result.</td></tr>" }
+    rows
+}
+
 fn report_route_rows(items, max_rows) {
     labels := load_site_labels()
     mut routes := []
@@ -1790,6 +1882,8 @@ fn call_summary_panel(call_id, items) {
     endpoints := ladder_endpoints(items)
     s := call_state_summary(items)
     state := s["state"] ?? "active"
+    origin_ip := call_origin_ip(call_id, items)
+    origin_label := if origin_ip != "" { origin_ip } else { "unknown" }
     state_cls := if state == "ended" { "text-[#a1a1aa] border-[#27272a] bg-[#18181b]" } else if state == "canceled" { "text-[#f87171] border-[rgba(248,113,113,.25)] bg-[rgba(248,113,113,.08)]" } else if state == "ringing" { "text-[#fbbf24] border-[rgba(251,191,36,.25)] bg-[rgba(251,191,36,.08)]" } else { "text-[#34d399] border-[rgba(52,211,153,.25)] bg-[rgba(52,211,153,.08)]" }
     mut ep_rows := ""
     for ep in endpoints {
@@ -1802,8 +1896,9 @@ fn call_summary_panel(call_id, items) {
     "<div class=\"flex flex-wrap items-start justify-between gap-4 mb-4\">" +
     "<div><div class=\"text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Selected Call-ID</div><div class=\"mono text-sm break-all\">" + h(call_id) + "</div></div>" +
     "<span class=\"rounded-full border px-2.5 py-1 text-xs font-semibold " + state_cls + "\">" + h(state) + "</span></div>" +
-    "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3 mb-4\">" +
+    "<div class=\"grid grid-cols-2 md:grid-cols-6 gap-3 mb-4\">" +
     call_fact("Messages", "" + (len(items)), "captured packets", "#e4e4e7") +
+    call_fact("Origin IP", origin_label, "caller/site source", "#38bdf8") +
     call_fact("Duration", "" + (s["duration"] ?? 0) + "s", "first to last seen", "#38bdf8") +
     call_fact("Requests", "" + (s["requests"] ?? 0), "SIP requests", "#a78bfa") +
     call_fact("Responses", "" + (s["responses"] ?? 0), "SIP responses", "#34d399") +
@@ -3405,8 +3500,8 @@ fn main {
             call_fact("OPTIONS", "" + (options), "keepalive/probe", "#71717a") +
             "</div>" +
             "<div class=\"grid xl:grid-cols-3 gap-4\">" +
-            "<div class=\"card overflow-x-auto\"><div class=\"p-4 border-b border-[#1e1e22]\"><div class=\"section-title mb-0\">Who Is Sending Calls</div><div class=\"text-[11px] text-[#71717a] mt-1\">Top INVITE source IPs.</div></div>" +
-            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\"><th class=\"py-2 px-3\">Source</th><th class=\"py-2 px-3 text-right\">INVITEs</th></tr></thead><tbody class=\"divide-y divide-[#1e1e22]/50\">" + report_endpoint_rows(invite_items, "src", 10) + "</tbody></table></div>" +
+            "<div class=\"card overflow-x-auto\"><div class=\"p-4 border-b border-[#1e1e22]\"><div class=\"section-title mb-0\">Who Is Sending Calls</div><div class=\"text-[11px] text-[#71717a] mt-1\">Top caller origin IPs by distinct Call-ID.</div></div>" +
+            "<table class=\"w-full text-left\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\"><th class=\"py-2 px-3\">Origin</th><th class=\"py-2 px-3 text-right\">Calls</th></tr></thead><tbody class=\"divide-y divide-[#1e1e22]/50\">" + report_origin_rows(invite_items, 10) + "</tbody></table></div>" +
             "<div class=\"card overflow-x-auto\"><div class=\"p-4 border-b border-[#1e1e22]\"><div class=\"section-title mb-0\">Where Calls Are Going</div><div class=\"text-[11px] text-[#71717a] mt-1\">Top INVITE destination IPs.</div></div>" +
             "<table class=\"w-full text-left\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\"><th class=\"py-2 px-3\">Destination</th><th class=\"py-2 px-3 text-right\">INVITEs</th></tr></thead><tbody class=\"divide-y divide-[#1e1e22]/50\">" + report_endpoint_rows(invite_items, "dst", 10) + "</tbody></table></div>" +
             "<div class=\"card overflow-x-auto\"><div class=\"p-4 border-b border-[#1e1e22]\"><div class=\"section-title mb-0\">Call Paths</div><div class=\"text-[11px] text-[#71717a] mt-1\">Most common INVITE source-to-destination paths.</div></div>" +
