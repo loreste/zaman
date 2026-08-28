@@ -19,7 +19,7 @@ v3: 6 additional findings (1 high, 4 medium, 1 low). All fixed.
 
 | # | Severity | Finding | Status | Fix |
 |---|----------|---------|--------|-----|
-| F1 | Critical | Password hashing used plain SHA-256 | **Fixed** | 1000-round HMAC-SHA256 key stretching with per-user salt |
+| F1 | Critical | Password hashing used plain SHA-256 | **Fixed** | Versioned 25k-round HMAC-SHA256 key stretching with per-user salt and legacy migration |
 | F2 | Critical | Token HMAC comparison not constant-time | **Fixed** | `crypto.equal()` for session and share token verification |
 | F3 | High | Federation push accepted arbitrary JSON | **Fixed** | Required field validation (ts_ms, src, call_id, method) + `federated:true` tag |
 | F4 | High | Recording upload had no size limit | **Fixed** | 50 MB file size cap |
@@ -72,7 +72,7 @@ v3: 6 additional findings (1 high, 4 medium, 1 low). All fixed.
 
 ### Authentication
 - HMAC-SHA256 signed stateless session cookies (24h expiry)
-- 1000-round HMAC-SHA256 password hashing with per-user salt
+- Versioned 25k-round HMAC-SHA256 password hashing with per-user salt and legacy migration
 - API tokens stored as SHA-256 hashes
 - Login brute-force protection (5 attempts/60s per IP)
 - LDAP/SSO support via HTTP bind proxy

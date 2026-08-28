@@ -47,15 +47,53 @@ fn users_path() {
     dir + "/zaman-users.json"
 }
 
-fn hash_pw(salt, password) {
-    // Key stretching: 1000 rounds of HMAC-SHA256 (Weft has no bcrypt/Argon2)
+fn password_hash_rounds() {
+    25000
+}
+
+fn hash_pw_rounds(salt, password, rounds) {
     mut h := crypto.hmac_sha256(salt, password)
     mut i := 0
-    while i < 999 {
+    target := if rounds > 1 { rounds - 1 } else { 0 }
+    while i < target {
         h = crypto.hmac_sha256(salt, h)
         i = i + 1
     }
     h
+}
+
+fn hash_pw(salt, password) {
+    hash_pw_rounds(salt, password, password_hash_rounds())
+}
+
+fn verify_pw(user, password) {
+    salt := user["salt"] ?? ""
+    stored := user["pw_hash"] ?? ""
+    rounds := user["pw_rounds"] ?? 1000
+    if salt == "" || stored == "" { return false }
+    expected := hash_pw_rounds(salt, password, rounds)
+    if crypto.equal(expected, stored) { return true }
+    // Backward compatibility for legacy users that predate pw_rounds.
+    if (user["pw_rounds"] ?? 0) == 0 {
+        legacy := hash_pw_rounds(salt, password, 1000)
+        return crypto.equal(legacy, stored)
+    }
+    false
+}
+
+fn password_needs_upgrade(user) {
+    (user["pw_rounds"] ?? 0) < password_hash_rounds()
+}
+
+fn upgrade_user_password(user_id, password) {
+    users := load_users()
+    old := find_user_by_id(users, user_id)
+    if old == null { return }
+    salt := secrets.token_hex(16)
+    hp := hash_pw(salt, password)
+    without := list_remove(users, "id", user_id)
+    updated_user := {"id": user_id, "username": old["username"], "pw_hash": hp, "salt": salt, "pw_algo": "hmac-sha256", "pw_rounds": password_hash_rounds(), "role": old["role"]}
+    save_users(list_append(without, updated_user))
 }
 
 fn load_users() {
@@ -122,7 +160,7 @@ fn auth_init(token_secret) {
         pw := secrets.token_hex(8)
         salt := secrets.token_hex(16)
         hp := hash_pw(salt, pw)
-        admin := {"id": 1, "username": "admin", "pw_hash": hp, "salt": salt, "role": "admin"}
+        admin := {"id": 1, "username": "admin", "pw_hash": hp, "salt": salt, "pw_algo": "hmac-sha256", "pw_rounds": password_hash_rounds(), "role": "admin"}
         save_users([admin])
         say("")
         say("  ┌──────────────────────────────────────────────┐")
@@ -358,8 +396,10 @@ fn do_login(token_secret, username, password) {
     users := load_users()
     user := find_user_by_name(users, username)
     if user == null { return null }
-    expected := hash_pw(user["salt"], password)
-    if expected != (user["pw_hash"] ?? "") { return null }
+    if !verify_pw(user, password) { return null }
+    if password_needs_upgrade(user) {
+        upgrade_user_password(user["id"] ?? 0, password)
+    }
     make_token(token_secret, user)
 }
 
@@ -377,7 +417,7 @@ fn create_user(username, password, role) {
     if find_user_by_name(users, username) != null { return "username already exists" }
     salt := secrets.token_hex(16)
     hp := hash_pw(salt, password)
-    new_user := {"id": next_user_id(users), "username": username, "pw_hash": hp, "salt": salt, "role": role}
+    new_user := {"id": next_user_id(users), "username": username, "pw_hash": hp, "salt": salt, "pw_algo": "hmac-sha256", "pw_rounds": password_hash_rounds(), "role": role}
     save_users(list_append(users, new_user))
     ""
 }
@@ -398,7 +438,7 @@ fn change_password(user_id, new_password) {
     old := find_user_by_id(users, user_id)
     if old == null { return "user not found" }
     without := list_remove(users, "id", user_id)
-    updated_user := {"id": user_id, "username": old["username"], "pw_hash": hp, "salt": salt, "role": old["role"]}
+    updated_user := {"id": user_id, "username": old["username"], "pw_hash": hp, "salt": salt, "pw_algo": "hmac-sha256", "pw_rounds": password_hash_rounds(), "role": old["role"]}
     save_users(list_append(without, updated_user))
     ""
 }

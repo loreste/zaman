@@ -52,17 +52,9 @@ SLA, and alerts.
 
 ### zaman-core
 
-Makori service responsible for:
-
-- SIP UDP capture and safe echo behavior.
-- HEP3 UDP/TCP/TLS ingest.
-- SIP parsing and redaction.
-- Database writes and migrations.
-- JSON API and Prometheus metrics.
-- Realtime window metrics.
-- Report, export, SLA, QoS, anomaly, probe, and federation APIs.
-
-Default ports:
+Makori service responsible for SIP capture, HEP ingest, SIP parsing/redaction,
+database writes, schema migration, JSON APIs, Prometheus metrics, realtime
+windows, reports, exports, SLA, QoS, anomaly detection, probes, and federation.
 
 | Service | Default |
 |---------|---------|
@@ -74,14 +66,9 @@ Default ports:
 
 ### zaman-web
 
-Weft dashboard responsible for:
-
-- Login and RBAC enforcement.
-- Overview, NOC, messages, calls, ladder, IP history, metrics, reports, SLA,
-  alerts, users, tokens, and audit pages.
-- HTMX realtime partials for KPIs, live feed, active calls, charts, alerts, and
-  NOC tables.
-- Runtime labels for nodes and IPs.
+Weft dashboard responsible for login, RBAC, overview, NOC, messages, calls,
+ladder, IP history, metrics, reports, SLA, alerts, users, tokens, audit pages,
+HTMX realtime partials, and runtime labels.
 
 Default port: 3000 behind nginx.
 
@@ -93,7 +80,7 @@ Default port: 3000 behind nginx.
 |---------|----------|-------|
 | SQLite | lab, demo, very small deployments | zero-config, local file |
 | PostgreSQL | production deployments | persistent history and better concurrency |
-| ClickHouse | very high volume / long retention | append-heavy analytics |
+| ClickHouse | very high volume or long retention | append-heavy analytics |
 
 Primary capture fields:
 
@@ -238,6 +225,8 @@ views.
 | `ZAMAN_CORE` | `http://127.0.0.1:9090` | Core URL for dashboard |
 | `ZAMAN_BRAND_NAME` | `Zaman` | Dashboard title |
 
+Deployment-specific values must stay in runtime configuration, not source.
+
 ---
 
 ## 9. Runtime Data Files
@@ -248,7 +237,7 @@ committed.
 | File | Purpose |
 |------|---------|
 | `zaman.db` | SQLite database when using the sqlite backend |
-| `zaman-users.json` | User accounts with username, password hash, and role |
+| `zaman-users.json` | User accounts with username, password hash, role, algorithm, and rounds |
 | `zaman-api-tokens.json` | API token hashes and labels |
 | `zaman-alerts.json` | Alert rules and notification channels |
 | `zaman-alert-history.json` | Fired alert history |
@@ -266,12 +255,18 @@ committed.
 - Dashboard users are admin, operator, or viewer.
 - Operators can run probes and manage alerts.
 - Admins manage users, tokens, and audit views.
+- Local passwords use versioned 25k-round HMAC-SHA256 key stretching with
+  per-user salt and constant-time verification.
+- Legacy password hashes are upgraded after successful login.
+- The session signing secret is persisted and chmod 600.
 - API tokens are stored as hashes and shown once.
 - SIP auth headers are redacted before storage.
 - Optional dashboard IP allowlisting checks proxy-aware client addresses.
 - Production API deployments should set `ZAMAN_API_KEY`.
 - HEP deployments should restrict senders with firewall rules, allowlists, or
   HEP/TLS.
+- ClickHouse string filters are SQL-quoted/escaped and numeric filters are
+  parsed before query construction.
 
 ---
 

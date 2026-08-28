@@ -197,14 +197,19 @@ weft check web/main.weft
 
 ---
 
-## Known Gaps
+## Production Notes
 
-- Password hashing uses SHA-256 and should move to Argon2id, scrypt, or bcrypt.
-- Session secret should be persisted instead of regenerated on restart.
-- ClickHouse query paths should be fully parameterized.
-- RTP audio reconstruction is not a full media recorder; SIP PCAP export is
-  supported, and audio playback depends on captured/uploaded media artifacts.
-- Not yet proven at multi-million-call-per-day carrier scale.
+- Local passwords use versioned, per-user salted HMAC-SHA256 key stretching with
+  constant-time verification. Legacy hashes are upgraded after successful login.
+- Session signing secrets are persisted in the runtime data directory so users
+  are not logged out on every restart.
+- ClickHouse uses the HTTP SQL interface; string filters are quoted/escaped and
+  numeric filters are parsed before query construction.
+- RTP audio reconstruction is intentionally not a full media recorder. SIP PCAP
+  export is supported, and audio playback depends on captured or uploaded media
+  artifacts.
+- Carrier-scale sizing should be validated with the target call volume,
+  retention period, database backend, and storage profile.
 
 See [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for the current hardening status.
 
