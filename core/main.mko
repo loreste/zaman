@@ -510,7 +510,10 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_answered ON call_state(first_ts_ms DESC, answered)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_src_last ON call_state(src, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_from_last ON call_state(from_h, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_to_last ON call_state(to_h, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_state_lookup ON call_state(open, answered, last_status, last_method, invite_id, call_id)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
@@ -591,7 +594,10 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_answered ON call_state(first_ts_ms DESC, answered)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_src_last ON call_state(src, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_from_last ON call_state(from_h, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_to_last ON call_state(to_h, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_state_lookup ON call_state(open, answered, last_status, last_method, invite_id, call_id)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
@@ -1210,7 +1216,7 @@ fn db_report_daily_json(limit: int) -> string {
     return out
 }
 
-fn db_report_top_calls_json(limit: int, agent_filter: string, state_filter: string) -> string {
+fn db_report_top_calls_json(limit: int, agent_filter: string, state_filter: string, src_filter: string, dst_filter: string, from_filter: string, to_filter: string) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 20
@@ -1227,8 +1233,20 @@ fn db_report_top_calls_json(limit: int, agent_filter: string, state_filter: stri
         where_sql = where_sql + " AND agent = " + sql_quote(agent_filter)
     }
     where_sql = where_sql + call_state_where_sql(state_filter)
+    if not str_eq(src_filter, "") {
+        where_sql = where_sql + " AND src LIKE " + sql_quote(src_filter + "%")
+    }
+    if not str_eq(dst_filter, "") {
+        where_sql = where_sql + " AND dst LIKE " + sql_quote(dst_filter + "%")
+    }
+    if not str_eq(from_filter, "") {
+        where_sql = where_sql + " AND from_h LIKE " + sql_quote("%" + from_filter + "%")
+    }
+    if not str_eq(to_filter, "") {
+        where_sql = where_sql + " AND to_h LIKE " + sql_quote("%" + to_filter + "%")
+    }
     let rows = sql_query_rows(db,
-        "SELECT call_id, (SELECT COUNT(*) FROM captures c WHERE c.call_id = call_state.call_id) AS c, first_ts_ms, last_ts_ms, open, answered, last_status, last_method " +
+        "SELECT call_id, (SELECT COUNT(*) FROM captures c WHERE c.call_id = call_state.call_id) AS c, first_ts_ms, last_ts_ms, open, answered, last_status, last_method, from_h, to_h " +
         "FROM call_state" + where_sql + " ORDER BY last_ts_ms DESC LIMIT " + string(lim),
         [])
     let mut out = "["
@@ -1243,6 +1261,8 @@ fn db_report_top_calls_json(limit: int, agent_filter: string, state_filter: stri
             let answered_v = sql_rows_int(rows, 5)
             let last_status = sql_rows_int(rows, 6)
             let last_method = sql_rows_str(rows, 7)
+            let from_h = sql_rows_str(rows, 8)
+            let to_h = sql_rows_str(rows, 9)
             let state = if open_v == 1 && answered_v == 0 { "ringing" } else if open_v == 1 && answered_v == 1 { "answered" } else if str_eq(last_method, "CANCEL") { "canceled" } else if answered_v == 1 { "ended" } else if last_status >= 300 { "failed" } else { "active" }
             if first == 1 {
                 first = 0
@@ -1250,7 +1270,8 @@ fn db_report_top_calls_json(limit: int, agent_filter: string, state_filter: stri
                 out = out + ","
             }
             out = out + "{\"call_id\":\"" + jesc(cid) + "\",\"messages\":" + string(c) +
-                ",\"ts_first\":" + string(t0) + ",\"ts_last\":" + string(t1) + ",\"state\":\"" + state + "\"}"
+                ",\"ts_first\":" + string(t0) + ",\"ts_last\":" + string(t1) + ",\"state\":\"" + state + "\"" +
+                ",\"from\":\"" + jesc(from_h) + "\",\"to\":\"" + jesc(to_h) + "\"}"
         }
         let _ = sql_rows_close(rows)
     }
@@ -1855,7 +1876,7 @@ fn db_realtime_json(window_min: int, agent_filter: string) -> string {
         "}"
 }
 
-fn db_active_calls_json(limit: int, agent_filter: string, state_filter: string) -> string {
+fn db_active_calls_json(limit: int, agent_filter: string, state_filter: string, src_filter: string, dst_filter: string, from_filter: string, to_filter: string) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 50
@@ -1873,6 +1894,18 @@ fn db_active_calls_json(limit: int, agent_filter: string, state_filter: string) 
     }
     if not str_eq(agent_filter, "") {
         where_sql = where_sql + " AND agent = " + sql_quote(agent_filter)
+    }
+    if not str_eq(src_filter, "") {
+        where_sql = where_sql + " AND src LIKE " + sql_quote(src_filter + "%")
+    }
+    if not str_eq(dst_filter, "") {
+        where_sql = where_sql + " AND dst LIKE " + sql_quote(dst_filter + "%")
+    }
+    if not str_eq(from_filter, "") {
+        where_sql = where_sql + " AND from_h LIKE " + sql_quote("%" + from_filter + "%")
+    }
+    if not str_eq(to_filter, "") {
+        where_sql = where_sql + " AND to_h LIKE " + sql_quote("%" + to_filter + "%")
     }
     let rows = sql_query_rows(db,
         "SELECT last_id, record_json FROM call_state" + where_sql +
@@ -3531,7 +3564,11 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let lim = parse_int_or(query_get(q, "limit"), 20)
             let agent = query_get(q, "agent")
             let state = query_get(q, "state")
-            let _ = http_respond_json(c, 200, db_report_top_calls_json(lim, agent, state))
+            let src = query_get(q, "src")
+            let dst = query_get(q, "dst")
+            let from_number = query_get(q, "from_number")
+            let to_number = query_get(q, "to_number")
+            let _ = http_respond_json(c, 200, db_report_top_calls_json(lim, agent, state, src, dst, from_number, to_number))
         } else if str_eq(path, "/api/report/response-codes") {
             let _ = http_respond_json(c, 200, db_report_response_codes_json())
         } else if str_eq(path, "/api/report/top-talkers") {
@@ -3552,7 +3589,11 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let lim = parse_int_or(query_get(q, "limit"), 50)
             let agent = query_get(q, "agent")
             let state = query_get(q, "state")
-            let _ = http_respond_json(c, 200, db_active_calls_json(lim, agent, state))
+            let src = query_get(q, "src")
+            let dst = query_get(q, "dst")
+            let from_number = query_get(q, "from_number")
+            let to_number = query_get(q, "to_number")
+            let _ = http_respond_json(c, 200, db_active_calls_json(lim, agent, state, src, dst, from_number, to_number))
         } else if str_eq(path, "/api/nodes") {
             let _ = http_respond_json(c, 200, db_node_health_json())
         } else if str_eq(path, "/api/sla/agents") {
