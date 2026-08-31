@@ -962,8 +962,9 @@ fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string
     if lim <= 0 {
         lim = 50
     }
-    if lim > 500 {
-        lim = 500
+    let max_lim = if not str_eq(call_id_filter, "") { 5000 } else { 500 }
+    if lim > max_lim {
+        lim = max_lim
     }
     let mut sql = "SELECT id, record_json FROM captures WHERE 1=1"
     if not str_eq(call_id_filter, "") {
@@ -1031,8 +1032,9 @@ fn db_messages_json_full(limit: int, call_id_filter: string, transport_filter: s
     if lim <= 0 {
         lim = 50
     }
-    if lim > 500 {
-        lim = 500
+    let max_lim = if not str_eq(call_id_filter, "") { 5000 } else { 500 }
+    if lim > max_lim {
+        lim = max_lim
     }
     let db = db_open()
     if sql_ok(db) == 0 {

@@ -30,7 +30,7 @@ services:
       - zaman-data:/app/data
     environment:
       ZAMAN_DB_DRIVER: postgres
-      ZAMAN_DB_DSN: "host=postgres dbname=zaman user=zaman password=zaman sslmode=disable"
+      ZAMAN_DB_DSN: "host=postgres dbname=zaman user=zaman password=${ZAMAN_PG_PASSWORD:?set ZAMAN_PG_PASSWORD} sslmode=disable"
       ZAMAN_PROBE: "1"
     depends_on:
       postgres:
@@ -43,7 +43,7 @@ services:
     environment:
       POSTGRES_DB: zaman
       POSTGRES_USER: zaman
-      POSTGRES_PASSWORD: zaman
+      POSTGRES_PASSWORD: "${ZAMAN_PG_PASSWORD:?set ZAMAN_PG_PASSWORD}"
     volumes:
       - pg-data:/var/lib/postgresql/data
     healthcheck:

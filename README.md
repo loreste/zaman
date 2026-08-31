@@ -40,7 +40,7 @@ Docker:
 
 ```bash
 docker compose up                     # SQLite
-docker compose --profile pg up        # PostgreSQL
+ZAMAN_PG_PASSWORD='change-me' docker compose --profile pg up  # PostgreSQL
 docker compose --profile ch up        # ClickHouse
 ```
 

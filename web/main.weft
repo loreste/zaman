@@ -2206,7 +2206,7 @@ fn call_summary_panel(call_id, items) {
     "<div class=\"flex flex-wrap gap-2 mb-4\">" + ep_rows + "</div>" +
     "<div class=\"flex flex-wrap gap-2\">" +
     "<a href=\"/messages?call_id=" + q(call_id) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Messages</a>" +
-    "<a href=\"/pcap?call_id=" + q(call_id) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">PCAP</a>" +
+    "<a href=\"/pcap?call_id=" + q(call_id) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Export PCAP</a>" +
     "<button onclick=\"navigator.clipboard.writeText(window.location.href).then(()=>this.textContent='Copied')\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Copy URL</button>" +
     "</div></div>"
 }
@@ -2278,7 +2278,7 @@ fn call_media_panel(call_id, all_items, sip_count) {
     call_fact("Recording", if has_audio { "yes" } else { "no" }, audio_note, media_color) +
     "</div>" +
     "<div class=\"flex flex-wrap gap-2\">" +
-    "<a href=\"/pcap?call_id=" + q(call_id) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Download SIP PCAP</a>" +
+    "<a href=\"/pcap?call_id=" + q(call_id) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Export SIP PCAP</a>" +
             "<a " + nav_main_attrs(messages_url("call_id=" + q(call_id))) + " class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">All HEP records</a>" +
     (if has_audio { "<a href=\"/recordings/" + h(sanitize_cid(call_id)) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Download audio</a>" } else { "" }) +
     "</div></div>"
@@ -2574,7 +2574,7 @@ fn ladder_html_from_items(call_id, all_items) {
     "<div class=\"text-[11px] text-[#52525b] mt-1\">" + ("" + (len(ordered))) + " messages · " + ("" + (ncols)) + " endpoints</div></div>" +
     "<div class=\"flex gap-2 shrink-0\">" +
     "<a href=\"/pcap?call_id=" + q(call_id) + "\" class=\"rounded-lg px-3 py-1.5 text-[11px] border border-[#1e1e22] bg-[#131316] text-[#a1a1aa] hover:text-[#e4e4e7] transition-colors\" title=\"Download as Wireshark PCAP\">" +
-    "<svg class=\"w-3.5 h-3.5 inline mr-1\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z\"/></svg>PCAP</a>" +
+    "<svg class=\"w-3.5 h-3.5 inline mr-1\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z\"/></svg>Export PCAP</a>" +
     "<button onclick=\"navigator.clipboard.writeText(window.location.href).then(()=>this.textContent='Copied!')\" class=\"rounded-lg px-3 py-1.5 text-[11px] border border-[#1e1e22] bg-[#131316] text-[#a1a1aa] hover:text-[#e4e4e7] transition-colors\">Copy URL</button>" +
     "<form hx-post=\"/share/create\" hx-target=\"#share-result\" hx-swap=\"innerHTML\" class=\"inline\"><input type=\"hidden\" name=\"call_id\" value=\"" + h(call_id) + "\"/>" +
     "<button type=\"submit\" class=\"rounded-lg px-3 py-1.5 text-[11px] border border-[#1e1e22] bg-[#131316] text-[#a1a1aa] hover:text-[#e4e4e7] transition-colors\">Public link</button></form>" +
@@ -5489,7 +5489,7 @@ fn main {
         if user == null { return login_redirect() }
         cid := req.query_map["call_id"] ?? ""
         if cid == "" { return web.status(400) }
-        messages := fetch_messages(500, cid)
+    messages := fetch_messages(5000, cid)
         // Sort chronological
         mut ordered := []
         mut i := len(messages) - 1
@@ -5500,7 +5500,7 @@ fn main {
         if len(ordered) == 0 { return web.status(404) }
         pcap := build_pcap(ordered)
         fname := sanitize_cid(cid) + ".pcap"
-        {"status": 200, "headers": {"Content-Type": "application/vnd.tcpdump.pcap", "Content-Disposition": "attachment; filename=\"" + fname + "\""}, "body": pcap}
+    {"status": 200, "headers": {"Content-Type": "application/vnd.tcpdump.pcap", "Content-Disposition": "attachment; filename=\"" + fname + "\"", "X-Zaman-Message-Count": "" + (len(ordered))}, "body": pcap}
     })
 
     // ---- JSON export route ----
