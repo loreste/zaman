@@ -2183,8 +2183,7 @@ fn active_calls_panel() {
     active_calls_panel_agent("")
 }
 
-fn ladder_html(call_id) {
-    all_items := fetch_messages(200, call_id)
+fn ladder_html_from_items(call_id, all_items) {
     items := call_messages_only(all_items)
     // Reverse to chronological
     mut ordered := []
@@ -2352,10 +2351,9 @@ fn ladder_html(call_id) {
     }
 
     // QoS panel — show RTCP data if any exists for this call
-    rtcp_messages := fetch_messages_ex(50, call_id, "", "", "", "", "", "", "")
     mut qos_html := ""
     mut has_rtcp := false
-    for rm in rtcp_messages {
+    for rm in all_items {
         if (rm["proto"] ?? "") == "rtcp" { has_rtcp = true }
     }
     if has_rtcp {
@@ -2394,6 +2392,10 @@ fn ladder_html(call_id) {
     "<div class=\"divide-y divide-[#27272a]/50\">" + rows + "</div>" +
     "</div></div>" +
     related_html + qos_html + player + upload
+}
+
+fn ladder_html(call_id) {
+    ladder_html_from_items(call_id, fetch_messages(300, call_id))
 }
 
 // ---- recordings ----
@@ -4176,7 +4178,7 @@ fn main {
         if cid != "" {
             all_call_items := fetch_messages(200, cid)
             call_items := call_messages_only(all_call_items)
-            content = call_summary_panel(cid, call_items) + call_media_panel(cid, all_call_items, len(call_items)) + ladder_html(cid)
+            content = call_summary_panel(cid, call_items) + call_media_panel(cid, all_call_items, len(call_items)) + ladder_html_from_items(cid, all_call_items)
         } else {
             content = "<div class=\"card p-6 mb-5\">" +
                 "<div class=\"text-sm font-medium mb-1\">Paste a Call-ID to open the SIP ladder.</div>" +
@@ -4201,10 +4203,16 @@ fn main {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         cid := req.query_map["call_id"] ?? ""
+        agent := req.query_map["agent"] ?? ""
         tops := fetch_top_calls()
         cid_h := h(cid)
-        rt1 := fetch_realtime(1)
-        rt5 := fetch_realtime(5)
+        agent_h := h(agent)
+        nodes := fetch_nodes()
+        names := load_node_names()
+        node_opts := node_select_options(nodes, names, agent)
+        calls_agent_qs := if agent != "" { "?agent=" + q(agent) } else { "" }
+        rt1 := fetch_realtime_agent(1, agent)
+        rt5 := fetch_realtime_agent(5, agent)
         failures_5m := (rt5["resp_4xx"] ?? 0) + (rt5["resp_5xx"] ?? 0)
         call_kpis := "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3 mb-5\">" +
             call_fact("Concurrent calls", "" + (rt1["active_calls"] ?? rt5["active_calls"] ?? 0), "open dialogs in the live window", "#f472b6") +
@@ -4217,7 +4225,7 @@ fn main {
         if cid != "" {
             all_call_items := fetch_messages(200, cid)
             call_items := call_messages_only(all_call_items)
-            selected = call_summary_panel(cid, call_items) + call_media_panel(cid, all_call_items, len(call_items)) + ladder_html(cid)
+            selected = call_summary_panel(cid, call_items) + call_media_panel(cid, all_call_items, len(call_items)) + ladder_html_from_items(cid, all_call_items)
         } else {
             selected = "<div class=\"card p-6 mb-5\">" +
                 "<div class=\"text-sm font-medium mb-1\">Pick a recent call or search by Call-ID.</div>" +
@@ -4229,18 +4237,19 @@ fn main {
             calls_recent_list(tops, cid, true) + "</div>"
         body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
             "<div><h1 class=\"text-2xl font-bold\">Calls</h1><p class=\"text-sm text-[#71717a] mt-1\">Investigate SIP dialogs by Call-ID, endpoint, status, and message flow.</p></div>" +
-            "<div class=\"flex gap-2\"><a href=\"/messages?method=OPTIONS\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">SIP OPTIONS</a>" +
+            "<div class=\"flex items-center gap-2\"><form method=\"get\" action=\"/calls\"><select name=\"agent\" class=\"rounded-md bg-[#0a0a0c] border border-[#27272a] px-2 py-1.5 text-xs\" onchange=\"this.form.submit()\">" + node_opts + "</select></form><a href=\"/messages?method=OPTIONS\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">SIP OPTIONS</a>" +
             "<a href=\"/ip\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">IP history</a></div></div>" +
             call_kpis +
         "<form class=\"card p-4 mb-5\" action=\"/ladder\" method=\"get\">" +
             "<div class=\"grid md:grid-cols-[1fr_auto_auto] gap-3 items-end\">" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Paste or enter Call-ID\" class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono\"/></div>" +
+            (if agent != "" { "<input type=\"hidden\" name=\"agent\" value=\"" + agent_h + "\"/>" } else { "" }) +
             "<button class=\"rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Show ladder</button>" +
             "<a href=\"/calls\" class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7] text-center\">Recent</a></div></form>" +
             "<div id=\"live-calls\" hx-get=\"/partials/live-calls\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"><div class=\"card p-5 mb-5 text-sm text-[#71717a]\">Loading realtime calls...</div></div>" +
             "<div class=\"section\"><div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Active Calls</div><span class=\"text-[10px] text-[#52525b]\">live sample, refreshes every 3s</span></div>" +
-            "<div id=\"active-calls\" hx-get=\"/partials/active-calls\" hx-trigger=\"load, every 3s\" hx-swap=\"innerHTML\"><div class=\"card p-5 text-sm text-[#71717a]\">Loading active calls...</div></div></div>" +
+            "<div id=\"active-calls\" hx-get=\"/partials/active-calls" + calls_agent_qs + "\" hx-trigger=\"load, every 3s\" hx-swap=\"innerHTML\"><div class=\"card p-5 text-sm text-[#71717a]\">Loading active calls...</div></div></div>" +
             "<div class=\"grid xl:grid-cols-[360px_1fr] gap-5\">" +
             "<div>" + recent_sidebar + "</div><div>" + selected + "</div></div>"
         web.html(layout("Calls", body, user))
@@ -4699,6 +4708,9 @@ fn main {
 
         cid_h := h(cid)
         agent_h := h(agent)
+        nodes := fetch_nodes()
+        names := load_node_names()
+        node_opts := node_select_options(nodes, names, agent)
         method_h := h(method)
         transport_h := h(transport)
         src_h := h(src)
@@ -4713,15 +4725,15 @@ fn main {
 
         mut parts := []
         if cid != "" { parts = list_append(parts, "call_id=" + q(cid)) }
-        if agent != "" { parts = list_append(parts, "agent=" + agent_h) }
-        if method != "" { parts = list_append(parts, "method=" + method_h) }
-        if transport != "" { parts = list_append(parts, "transport=" + transport_h) }
-        if src != "" { parts = list_append(parts, "ip=" + src_h) }
-        if from_number != "" { parts = list_append(parts, "from_number=" + from_h) }
-        if to_number != "" { parts = list_append(parts, "to_number=" + to_h) }
-        if status != "" { parts = list_append(parts, "status=" + status_h) }
-        if since_ms != "" { parts = list_append(parts, "since_ms=" + since_h) }
-        if until_ms != "" { parts = list_append(parts, "until_ms=" + until_h) }
+        if agent != "" { parts = list_append(parts, "agent=" + q(agent)) }
+        if method != "" { parts = list_append(parts, "method=" + q(method)) }
+        if transport != "" { parts = list_append(parts, "transport=" + q(transport)) }
+        if src != "" { parts = list_append(parts, "ip=" + q(src)) }
+        if from_number != "" { parts = list_append(parts, "from_number=" + q(from_number)) }
+        if to_number != "" { parts = list_append(parts, "to_number=" + q(to_number)) }
+        if status != "" { parts = list_append(parts, "status=" + q(status)) }
+        if since_ms != "" { parts = list_append(parts, "since_ms=" + q(since_ms)) }
+        if until_ms != "" { parts = list_append(parts, "until_ms=" + q(until_ms)) }
         mut qs := ""
         mut pi := 0
         while pi < len(parts) {
@@ -4812,7 +4824,7 @@ fn main {
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">From Number</label><input name=\"from_number\" value=\"" + from_h + "\" placeholder=\"caller\" class=\"w-full " + inp + "\"/></div>" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">To Number</label><input name=\"to_number\" value=\"" + to_h + "\" placeholder=\"callee\" class=\"w-full " + inp + "\"/></div>" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">IP Address</label><input name=\"ip\" value=\"" + src_h + "\" placeholder=\"source or destination\" class=\"w-full " + inp + "\"/></div>" +
-            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Agent</label><input name=\"agent\" value=\"" + agent_h + "\" placeholder=\"Agent name\" class=\"w-full " + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Server</label><select name=\"agent\" class=\"w-full " + inp + "\">" + node_opts + "</select></div>" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Method</label><input name=\"method\" value=\"" + method_h + "\" placeholder=\"INVITE\" class=\"w-full " + inp + "\"/></div>" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Transport</label><input name=\"transport\" value=\"" + transport_h + "\" placeholder=\"HEP3\" class=\"w-full " + inp + "\"/></div>" +
             "</div><div class=\"mt-3 flex flex-wrap items-end gap-3\">" +

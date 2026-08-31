@@ -479,6 +479,11 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_status_id ON captures(agent, status, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_ts_id ON captures(agent, ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_id_desc ON captures(call_id, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_id ON captures(status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_id ON captures(method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport_id ON captures(transport, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts_id ON captures(ts_ms DESC, id DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
             "call_id TEXT NOT NULL," +
             "agent TEXT NOT NULL DEFAULT ''," +
@@ -498,6 +503,11 @@ fn db_init() -> int {
             "PRIMARY KEY(call_id, agent)" +
             ")")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_open_agent_last ON call_state(open, agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first ON call_state(first_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_answered ON call_state(first_ts_ms DESC, answered)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -546,6 +556,11 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_status_id ON captures(agent, status, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_ts_id ON captures(agent, ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_id_desc ON captures(call_id, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_id ON captures(status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_id ON captures(method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport_id ON captures(transport, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts_id ON captures(ts_ms DESC, id DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
             "call_id TEXT NOT NULL," +
             "agent TEXT NOT NULL DEFAULT ''," +
@@ -565,6 +580,11 @@ fn db_init() -> int {
             "PRIMARY KEY(call_id, agent)" +
             ")")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_open_agent_last ON call_state(open, agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first ON call_state(first_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_answered ON call_state(first_ts_ms DESC, answered)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -1384,6 +1404,283 @@ fn db_report_agents_json() -> string {
     return out
 }
 
+
+fn db_report_summary_fast_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "{\"error\":\"db unavailable\"}"
+    }
+    let total = sql_query_int(db, "SELECT COALESCE(SUM(cnt),0) FROM report_daily", [])
+    let calls = sql_query_int(db, "SELECT COUNT(*) FROM call_state", [])
+    let hep = sql_query_int(db, "SELECT COALESCE(SUM(cnt),0) FROM report_daily WHERE transport LIKE 'HEP%'", [])
+    let sip_udp = sql_query_int(db, "SELECT COALESCE(SUM(cnt),0) FROM report_daily WHERE transport = 'UDP'", [])
+    let min_ts = sql_query_int(db, "SELECT COALESCE(MIN(ts_ms),0) FROM captures", [])
+    let max_ts = sql_query_int(db, "SELECT COALESCE(MAX(ts_ms),0) FROM captures", [])
+    let rows = sql_query_rows(db, "SELECT method, COALESCE(SUM(cnt),0) AS c FROM report_daily GROUP BY method ORDER BY c DESC LIMIT 20", [])
+    let mut methods = "{"
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let m = sql_rows_str(rows, 0)
+            let c = sql_rows_int(rows, 1)
+            if first == 1 {
+                first = 0
+            } else {
+                methods = methods + ","
+            }
+            methods = methods + "\"" + jesc(m) + "\":" + string(c)
+        }
+        let _ = sql_rows_close(rows)
+    }
+    methods = methods + "}"
+    let rows2 = sql_query_rows(db, "SELECT transport, COALESCE(SUM(cnt),0) AS c FROM report_daily GROUP BY transport ORDER BY c DESC", [])
+    let mut transports = "{"
+    first = 1
+    if sql_rows_ok(rows2) == 1 {
+        while sql_rows_next(rows2) == 1 {
+            let tr = sql_rows_str(rows2, 0)
+            let c = sql_rows_int(rows2, 1)
+            if first == 1 {
+                first = 0
+            } else {
+                transports = transports + ","
+            }
+            transports = transports + "\"" + jesc(tr) + "\":" + string(c)
+        }
+        let _ = sql_rows_close(rows2)
+    }
+    transports = transports + "}"
+    let _ = sql_close(db)
+    return "{\"total\":" + string(total) +
+        ",\"unique_call_ids\":" + string(calls) +
+        ",\"hep\":" + string(hep) +
+        ",\"sip_udp\":" + string(sip_udp) +
+        ",\"ts_min\":" + string(min_ts) +
+        ",\"ts_max\":" + string(max_ts) +
+        ",\"db\":\"" + jesc(db_path()) + "\"" +
+        ",\"methods\":" + methods +
+        ",\"transports\":" + transports +
+        ",\"source\":\"rollup\"}"
+}
+
+fn db_report_top_talkers_fast_json(limit: int) -> string {
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 20
+    }
+    if lim > 100 {
+        lim = 100
+    }
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let sample = lim * 1000
+    let rows = sql_query_rows(db,
+        "SELECT src, COUNT(*) AS c, COUNT(DISTINCT call_id) AS calls, COUNT(DISTINCT method) AS methods FROM (" +
+        "SELECT src, call_id, method FROM captures WHERE src IS NOT NULL AND src != '' ORDER BY id DESC LIMIT " + string(sample) + ") recent " +
+        "GROUP BY src ORDER BY c DESC LIMIT " + string(lim),
+        [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let src = sql_rows_str(rows, 0)
+            let c = sql_rows_int(rows, 1)
+            let calls = sql_rows_int(rows, 2)
+            let methods = sql_rows_int(rows, 3)
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"src\":\"" + jesc(src) + "\",\"messages\":" + string(c) +
+                ",\"calls\":" + string(calls) + ",\"methods\":" + string(methods) + ",\"source\":\"recent\"}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
+fn db_report_kpi_fast_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "{}"
+    }
+    let mut window_min = parse_int_or(env_get_or("ZAMAN_KPI_WINDOW_MIN", "1440"), 1440)
+    if window_min <= 0 {
+        window_min = 1440
+    }
+    if window_min > 10080 {
+        window_min = 10080
+    }
+    let cutoff = now_ms() - window_min * 60 * 1000
+    let cs = string(cutoff)
+    let total_messages = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs, [])
+    let total_calls = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE first_ts_ms > " + cs, [])
+    let total_invites = total_calls
+    let answered = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE first_ts_ms > " + cs + " AND answered = 1", [])
+    let failed = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE first_ts_ms > " + cs + " AND answered = 0 AND open = 0 AND last_status >= 300", [])
+    let total_registers = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND kind = 'request'", [])
+    let reg_ok = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND status >= 200 AND status < 300", [])
+    let reg_fail = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND status >= 400", [])
+    let mut asr = 0
+    if total_invites > 0 {
+        asr = answered * 100 / total_invites
+    }
+    let mut ner = 0
+    if total_invites > 0 {
+        ner = (total_invites - failed) * 100 / total_invites
+    }
+    let _ = sql_close(db)
+    return "{\"total_invites\":" + string(total_invites) +
+        ",\"answered\":" + string(answered) +
+        ",\"failed\":" + string(failed) +
+        ",\"asr\":" + string(asr) +
+        ",\"ner\":" + string(ner) +
+        ",\"total_registers\":" + string(total_registers) +
+        ",\"reg_ok\":" + string(reg_ok) +
+        ",\"reg_fail\":" + string(reg_fail) +
+        ",\"total_calls\":" + string(total_calls) +
+        ",\"total_messages\":" + string(total_messages) +
+        ",\"window_min\":" + string(window_min) +
+        ",\"source\":\"call_state\"}"
+}
+
+fn db_report_agents_fast_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let rows = sql_query_rows(db,
+        "SELECT agent, COUNT(*) AS c, MIN(ts_ms) AS first_seen, MAX(ts_ms) AS last_seen, COUNT(DISTINCT call_id) AS calls FROM (" +
+        "SELECT agent, ts_ms, call_id FROM captures WHERE agent IS NOT NULL AND agent != '' ORDER BY id DESC LIMIT 50000) recent " +
+        "GROUP BY agent ORDER BY c DESC",
+        [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let agent = sql_rows_str(rows, 0)
+            let c = sql_rows_int(rows, 1)
+            let t0 = sql_rows_int(rows, 2)
+            let t1 = sql_rows_int(rows, 3)
+            let calls = sql_rows_int(rows, 4)
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"agent\":\"" + jesc(agent) + "\",\"messages\":" + string(c) +
+                ",\"calls\":" + string(calls) +
+                ",\"first_seen\":" + string(t0) + ",\"last_seen\":" + string(t1) + ",\"source\":\"recent\"}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
+fn db_sla_by_agent_fast_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let rows = sql_query_rows(db,
+        "SELECT agent, COUNT(*) AS invites, " +
+        "SUM(CASE WHEN answered = 1 THEN 1 ELSE 0 END) AS ok_2xx, " +
+        "SUM(CASE WHEN answered = 0 AND open = 0 AND last_status >= 300 THEN 1 ELSE 0 END) AS errors, " +
+        "COUNT(*) AS total, MIN(first_ts_ms) AS first_seen, MAX(last_ts_ms) AS last_seen " +
+        "FROM call_state WHERE agent IS NOT NULL AND agent != '' " +
+        "GROUP BY agent ORDER BY total DESC",
+        [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let agent = sql_rows_str(rows, 0)
+            let invites = sql_rows_int(rows, 1)
+            let ok2 = sql_rows_int(rows, 2)
+            let errors = sql_rows_int(rows, 3)
+            let total = sql_rows_int(rows, 4)
+            let t0 = sql_rows_int(rows, 5)
+            let t1 = sql_rows_int(rows, 6)
+            let mut asr = 0
+            if invites > 0 {
+                asr = ok2 * 100 / invites
+            }
+            let mut err_rate = 0
+            if total > 0 {
+                err_rate = errors * 100 / total
+            }
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"agent\":\"" + jesc(agent) + "\",\"invites\":" + string(invites) +
+                ",\"ok_2xx\":" + string(ok2) + ",\"errors\":" + string(errors) +
+                ",\"total\":" + string(total) + ",\"asr\":" + string(asr) +
+                ",\"err_rate\":" + string(err_rate) +
+                ",\"first_seen\":" + string(t0) + ",\"last_seen\":" + string(t1) +
+                ",\"source\":\"call_state\"}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
+
+fn db_sla_by_dest_fast_json() -> string {
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let rows = sql_query_rows(db,
+        "SELECT dst, COUNT(*) AS invites, " +
+        "SUM(CASE WHEN answered = 1 THEN 1 ELSE 0 END) AS ok_2xx, " +
+        "SUM(CASE WHEN answered = 0 AND open = 0 AND last_status >= 300 THEN 1 ELSE 0 END) AS errors, " +
+        "COUNT(*) AS total " +
+        "FROM call_state WHERE dst IS NOT NULL AND dst != '' " +
+        "GROUP BY dst ORDER BY total DESC LIMIT 30",
+        [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let dst = sql_rows_str(rows, 0)
+            let invites = sql_rows_int(rows, 1)
+            let ok2 = sql_rows_int(rows, 2)
+            let errors = sql_rows_int(rows, 3)
+            let total = sql_rows_int(rows, 4)
+            let mut asr = 0
+            if invites > 0 {
+                asr = ok2 * 100 / invites
+            }
+            let mut err_rate = 0
+            if total > 0 {
+                err_rate = errors * 100 / total
+            }
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + "{\"dst\":\"" + jesc(dst) + "\",\"invites\":" + string(invites) +
+                ",\"ok_2xx\":" + string(ok2) + ",\"errors\":" + string(errors) +
+                ",\"total\":" + string(total) + ",\"asr\":" + string(asr) +
+                ",\"err_rate\":" + string(err_rate) + ",\"source\":\"call_state\"}"
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
+}
 
 // Real-time dashboard: windowed stats for the last N minutes.
 fn db_realtime_json(window_min: int, agent_filter: string) -> string {
@@ -3125,7 +3422,7 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                 let _ = http_respond_json(c, 200, one)
             }
         } else if str_eq(path, "/api/report") || str_eq(path, "/api/report/summary") {
-            let _ = http_respond_json(c, 200, db_report_summary_json())
+            let _ = http_respond_json(c, 200, db_report_summary_fast_json())
         } else if str_eq(path, "/api/report/daily") {
             let lim = parse_int_or(query_get(q, "limit"), 30)
             let _ = http_respond_json(c, 200, db_report_daily_json(lim))
@@ -3136,14 +3433,14 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let _ = http_respond_json(c, 200, db_report_response_codes_json())
         } else if str_eq(path, "/api/report/top-talkers") {
             let lim = parse_int_or(query_get(q, "limit"), 20)
-            let _ = http_respond_json(c, 200, db_report_top_talkers_json(lim))
+            let _ = http_respond_json(c, 200, db_report_top_talkers_fast_json(lim))
         } else if str_eq(path, "/api/report/kpi") {
-            let _ = http_respond_json(c, 200, db_report_kpi_json())
+            let _ = http_respond_json(c, 200, db_report_kpi_fast_json())
         } else if str_eq(path, "/api/report/cps") {
             let mins = parse_int_or(query_get(q, "minutes"), 60)
             let _ = http_respond_json(c, 200, db_report_cps_json(mins))
         } else if str_eq(path, "/api/report/agents") {
-            let _ = http_respond_json(c, 200, db_report_agents_json())
+            let _ = http_respond_json(c, 200, db_report_agents_fast_json())
         } else if str_eq(path, "/api/realtime") {
             let win = parse_int_or(query_get(q, "window"), 5)
             let agent = query_get(q, "agent")
@@ -3155,9 +3452,9 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
         } else if str_eq(path, "/api/nodes") {
             let _ = http_respond_json(c, 200, db_node_health_json())
         } else if str_eq(path, "/api/sla/agents") {
-            let _ = http_respond_json(c, 200, db_sla_by_agent_json())
+            let _ = http_respond_json(c, 200, db_sla_by_agent_fast_json())
         } else if str_eq(path, "/api/sla/destinations") {
-            let _ = http_respond_json(c, 200, db_sla_by_dest_json())
+            let _ = http_respond_json(c, 200, db_sla_by_dest_fast_json())
         } else if str_eq(path, "/api/anomalies") {
             let _ = http_respond_json(c, 200, db_anomalies_json())
         } else if str_eq(path, "/api/delete") && str_eq(method, "POST") {
