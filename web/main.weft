@@ -42,6 +42,21 @@ fn ladder_nav_attrs(call_id) {
     "href=\"" + url + "\" hx-get=\"" + url + "\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\""
 }
 
+fn nav_main_attrs(url) {
+    "href=\"" + url + "\" hx-get=\"" + url + "\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\""
+}
+
+fn message_url(id) {
+    "/messages/" + ("" + (id))
+}
+
+fn messages_url(query) {
+    if query == "" {
+        return "/messages"
+    }
+    "/messages?" + query
+}
+
 // ---- RBAC (JSON file + signed cookie tokens) ----
 // Users: data/zaman-users.json   Sessions: stateless HMAC-signed cookies
 // ponytail: Weft closures can't mutate captured state; signed tokens avoid server-side sessions entirely.
@@ -679,7 +694,7 @@ fn msg_row(m, site_labels) {
     "</td>" +
     "<td class=\"py-2 px-3 text-[10px] text-[#52525b] hide-mobile\">" + time_ago(ts_sec) + "</td>" +
     "<td class=\"py-2 px-3 text-xs\">" +
-    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/messages/" + ("" + (id)) + "\">view</a> · " +
+    "<a class=\"text-[#a78bfa] hover:underline\" " + nav_main_attrs(message_url(id)) + ">view</a> · " +
     "<a class=\"text-[#a78bfa] hover:underline\" " + ladder_nav_attrs(call_id) + ">ladder</a>" +
     "</td></tr>"
 }
@@ -784,7 +799,7 @@ fn call_groups_table(items) {
 
             rows = rows + "<tr class=\"hover:bg-white/[0.02]\">" +
                 "<td class=\"py-2 px-3 mono text-xs max-w-[22rem] truncate\" title=\"" + cid + "\">" +
-                "<a href=\"/messages?call_id=" + q(call_id) + "\" class=\"text-[#a78bfa] hover:underline\">" + cid + "</a>" +
+                "<a " + nav_main_attrs(messages_url("call_id=" + q(call_id))) + " class=\"text-[#a78bfa] hover:underline\">" + cid + "</a>" +
                 " <button onclick=\"navigator.clipboard.writeText(this.dataset.v).then(()=>{this.textContent='\\u2713';setTimeout(()=>this.textContent='\\u2398',1000)})\" data-v=\"" + cid + "\" class=\"text-[#3f3f46] hover:text-[#a1a1aa] cursor-pointer\" title=\"Copy Call-ID\">&#x2398;</button></td>" +
                 "<td class=\"py-2 px-3 text-xs\"><span class=\"px-1.5 py-0.5 rounded border " + state_cls + "\">" + state + "</span></td>" +
                 "<td class=\"py-2 px-3 mono text-xs text-right\">" + ("" + (count)) + "</td>" +
@@ -796,7 +811,7 @@ fn call_groups_table(items) {
                 (if dst != "" { "<a class=\"hover:text-[#e4e4e7] hover:underline\" href=\"/ip?addr=" + h(dst_ip) + "\">" + dst_s + "</a>" } else { "<span class=\"text-[#52525b]\">unknown</span>" }) + "</td>" +
                 "<td class=\"py-2 px-3 text-xs hide-mobile\"><span class=\"px-1.5 py-0.5 rounded border border-[#1e1e22] text-[#a1a1aa]\">" + h(transport) + "</span></td>" +
                 "<td class=\"py-2 px-3 text-[10px] text-[#52525b]\">" + age + "</td>" +
-                "<td class=\"py-2 px-3 text-xs\"><a class=\"text-[#a78bfa] hover:underline\" href=\"/messages?call_id=" + q(call_id) + "\">messages</a> · " +
+                "<td class=\"py-2 px-3 text-xs\"><a class=\"text-[#a78bfa] hover:underline\" " + nav_main_attrs(messages_url("call_id=" + q(call_id))) + ">messages</a> · " +
                 "<a class=\"text-[#a78bfa] hover:underline\" " + ladder_nav_attrs(call_id) + ">ladder</a></td></tr>"
         }
     }
@@ -2115,7 +2130,7 @@ fn call_media_panel(call_id, all_items, sip_count) {
     "</div>" +
     "<div class=\"flex flex-wrap gap-2\">" +
     "<a href=\"/pcap?call_id=" + q(call_id) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Download SIP PCAP</a>" +
-    "<a href=\"/messages?call_id=" + q(call_id) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">All HEP records</a>" +
+            "<a " + nav_main_attrs(messages_url("call_id=" + q(call_id))) + " class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">All HEP records</a>" +
     (if has_audio { "<a href=\"/recordings/" + h(sanitize_cid(call_id)) + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Download audio</a>" } else { "" }) +
     "</div></div>"
 }
@@ -3942,7 +3957,7 @@ fn main {
             "<p class=\"text-sm text-[#71717a] mt-1\">" + (if cid != "" { "All SIP/HEP messages for the selected Call-ID." } else { "SIP/HEP captures grouped by Call-ID." }) + "</p></div>" +
             export_btns + "</div>" +
             saved_html +
-            "<form class=\"card p-4 mb-5\" method=\"get\" action=\"/messages\">" +
+            "<form class=\"card p-4 mb-5\" method=\"get\" action=\"/messages\" hx-boost=\"true\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\">" +
             "<div class=\"grid grid-cols-2 md:grid-cols-4 xl:grid-cols-10 gap-3\">" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"any\" class=\"w-full " + inp + "\"/></div>" +
