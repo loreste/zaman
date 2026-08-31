@@ -719,6 +719,68 @@ fn messages_table(items) {
     "<tbody class=\"divide-y divide-[#27272a]\">" + rows + "</tbody></table></div>"
 }
 
+fn call_message_payloads(items) {
+    if items == null || len(items) == 0 {
+        return ""
+    }
+    mut rows := ""
+    mut i := len(items) - 1
+    while i >= 0 {
+        m := items[i]
+        raw_b64 := m["raw_b64"] ?? ""
+        if raw_b64 != "" {
+            dec := base64.decode(raw_b64)
+            mut raw_txt := ""
+            if dec.ok {
+                raw_txt = h(dec.value)
+            } else {
+                raw_txt = h(raw_b64)
+            }
+            id := m["id"] ?? 0
+            method := m["method"] ?? ""
+            status := m["status"] ?? 0
+            kind := m["kind"] ?? ""
+            ts_ms := m["ts_ms"] ?? 0
+            ts_sec := if ts_ms > 0 { ts_ms / 1000 } else { 0 }
+            src := m["src"] ?? ""
+            dst := m["dst"] ?? ""
+            rows = rows + "<details class=\"rounded-lg border border-[#1e1e22] bg-[#0a0a0c] overflow-hidden\">" +
+                "<summary class=\"cursor-pointer px-3 py-2 flex flex-wrap items-center gap-3 text-xs hover:bg-white/[0.02]\">" +
+                method_badge(method, status, kind) +
+                "<span class=\"mono text-[#a1a1aa]\">#" + ("" + (id)) + "</span>" +
+                "<span class=\"mono text-[#71717a] truncate max-w-[18rem]\">" + h(src) + "</span>" +
+                "<span class=\"text-[#52525b]\">to</span>" +
+                "<span class=\"mono text-[#71717a] truncate max-w-[18rem]\">" + h(dst) + "</span>" +
+                "<span class=\"ml-auto text-[10px] text-[#52525b]\">" + time_ago(ts_sec) + "</span></summary>" +
+                "<pre class=\"mono text-xs whitespace-pre-wrap break-all text-[#d4d4d8] px-3 py-3 border-t border-[#1e1e22] max-h-[36rem] overflow-auto\">" + raw_txt + "</pre></details>"
+        }
+        i = i - 1
+    }
+    if rows == "" {
+        return ""
+    }
+    "<div class=\"card p-4 mt-5\">" +
+    "<div class=\"flex flex-wrap items-center justify-between gap-3 mb-3\">" +
+    "<div><div class=\"section-title mb-1\">Full SIP Messages</div><div class=\"text-xs text-[#71717a]\">Decoded raw SIP payloads for this Call-ID, oldest first.</div></div>" +
+    "<span class=\"text-[10px] text-[#71717a]\">" + ("" + (len(items))) + " records</span></div>" +
+    "<div class=\"space-y-3\">" + rows + "</div></div>"
+}
+
+fn sip_payload_pre(m) {
+    raw_b64 := m["raw_b64"] ?? ""
+    if raw_b64 == "" {
+        return "<div class=\"rounded-lg border border-[#1e1e22] bg-[#0a0a0c] px-3 py-3 text-xs text-[#71717a]\">No raw SIP payload stored for this message.</div>"
+    }
+    dec := base64.decode(raw_b64)
+    mut raw_txt := ""
+    if dec.ok {
+        raw_txt = h(dec.value)
+    } else {
+        raw_txt = h(raw_b64)
+    }
+    "<pre class=\"mono text-xs whitespace-pre-wrap break-all text-[#d4d4d8] rounded-lg border border-[#1e1e22] bg-[#0a0a0c] px-3 py-3 max-h-[36rem] overflow-auto\">" + raw_txt + "</pre>"
+}
+
 fn call_groups_table(items) {
     site_labels := load_site_labels()
     mut rows := ""
@@ -2465,15 +2527,21 @@ fn ladder_html_from_items(call_id, all_items) {
             g = g + 1
         }
 
-        rows = rows + "<a href=\"/messages/" + ("" + (id)) + "\" class=\"block group relative hover:bg-[#27272a]/30 rounded-lg transition-colors\">" +
+        rows = rows + "<details class=\"group relative hover:bg-[#27272a]/30 rounded-lg transition-colors\">" +
+            "<summary class=\"list-none cursor-pointer\">" +
             guides +
             "<div class=\"relative grid gap-0 py-4 px-1\" style=\"grid-template-columns:repeat(" + ("" + (ncols)) + ",1fr)\">" + cells + "</div>" +
             "<div class=\"text-[10px] text-[#52525b] group-hover:text-[#71717a] px-3 pb-1 mono flex gap-3\">" +
             "<span>#" + ("" + (id)) + "</span>" +
             "<span>" + h(cseq) + "</span>" +
             "<span>" + h(transport) + "</span>" +
+            "<span class=\"text-[#71717a]\">click for SIP</span>" +
             "<span class=\"ml-auto\">" + time_ago(msg_ts_sec) + "</span>" +
-            "</div></a>"
+            "</div></summary>" +
+            "<div class=\"px-3 pb-3\">" +
+            sip_payload_pre(m) +
+            "<div class=\"mt-2 flex flex-wrap gap-3 text-xs\"><a class=\"text-[#a78bfa] hover:underline\" href=\"/messages/" + ("" + (id)) + "\">single message</a>" +
+            "<a class=\"text-[#a78bfa] hover:underline\" " + nav_main_attrs(messages_url("call_id=" + q(call_id))) + ">all call messages</a></div></div></details>"
     }
 
     related_html := "<div id=\"related-calls\" hx-get=\"/partials/related-calls?call_id=" + q(call_id) + "\" hx-trigger=\"load\" hx-swap=\"innerHTML\"></div>"
@@ -3888,7 +3956,9 @@ fn main {
         since_ms := req.query_map["since_ms"] ?? ""
         until_ms := req.query_map["until_ms"] ?? ""
         items := fetch_messages_time_state(lim, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms, state)
-        if cid != "" || method == "OPTIONS" {
+        if cid != "" {
+            web.htmx(messages_table(items) + call_message_payloads(items))
+        } else if method == "OPTIONS" {
             web.htmx(messages_table(items))
         } else {
             web.htmx(call_groups_table(items))
@@ -4085,6 +4155,7 @@ fn main {
             "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Live Calls</div><span class=\"text-[10px] text-[#34d399]\">live</span></div>" +
             "<div id=\"messages-live-calls\" hx-get=\"/partials/active-calls" + live_qs + "\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
             active_calls_panel_agent(agent) + "</div></div>"
+        msg_refresh_attrs := if cid != "" { "" } else { " hx-get=\"/partials/messages?" + qs + "\" hx-trigger=\"every 4s\" hx-swap=\"innerHTML\"" }
 
         inp := "rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
         body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
@@ -4118,8 +4189,8 @@ fn main {
             "</div>" + save_form + "</form>" +
             active +
             live_calls +
-            "<div id=\"msg-table\" hx-get=\"/partials/messages?" + qs + "\" hx-trigger=\"every 4s\" hx-swap=\"innerHTML\">" +
-            (if cid != "" || method == "OPTIONS" { messages_table(items) } else { call_groups_table(items) }) + "</div>"
+            "<div id=\"msg-table\"" + msg_refresh_attrs + ">" +
+            (if cid != "" { messages_table(items) + call_message_payloads(items) } else if method == "OPTIONS" { messages_table(items) } else { call_groups_table(items) }) + "</div>"
         web.html(layout("Messages", body, user))
     })
 
