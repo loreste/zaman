@@ -484,6 +484,8 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_id ON captures(method, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport_id ON captures(transport, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts_id ON captures(ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_hep_cid_call ON captures(hep_cid, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_invite_from_to_ts ON captures(from_h, to_h, ts_ms DESC, call_id) WHERE method = 'INVITE'")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
             "call_id TEXT NOT NULL," +
             "agent TEXT NOT NULL DEFAULT ''," +
@@ -561,6 +563,8 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_id ON captures(method, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport_id ON captures(transport, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts_id ON captures(ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_hep_cid_call ON captures(hep_cid, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_invite_from_to_ts ON captures(from_h, to_h, ts_ms DESC, call_id) WHERE method = 'INVITE'")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
             "call_id TEXT NOT NULL," +
             "agent TEXT NOT NULL DEFAULT ''," +

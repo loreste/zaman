@@ -33,6 +33,15 @@ fn q(s) {
     v
 }
 
+fn ladder_url(call_id) {
+    "/ladder?call_id=" + q(call_id)
+}
+
+fn ladder_nav_attrs(call_id) {
+    url := ladder_url(call_id)
+    "href=\"" + url + "\" hx-get=\"" + url + "\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\""
+}
+
 // ---- RBAC (JSON file + signed cookie tokens) ----
 // Users: data/zaman-users.json   Sessions: stateless HMAC-signed cookies
 // ponytail: Weft closures can't mutate captured state; signed tokens avoid server-side sessions entirely.
@@ -566,7 +575,7 @@ fn layout_inner(title, body, user, csrf) {
     "<a data-cmd=\"SLA availability targets\" href=\"/sla\" class=\"flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-[#a1a1aa] hover:bg-[#27272a] hover:text-[#e4e4e7]\">SLA</a>" +
     "<a data-cmd=\"Alerts rules notifications\" href=\"/alerts\" class=\"flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-[#a1a1aa] hover:bg-[#27272a] hover:text-[#e4e4e7]\">Alerts</a>" +
     "<div class=\"border-t border-[#1e1e22] my-1\"></div>" +
-    "<form data-cmd=\"Call-ID trace lookup\" action=\"/calls\" method=\"get\" class=\"flex items-center gap-2 px-3 py-2\">" +
+    "<form data-cmd=\"Call-ID trace lookup\" action=\"/ladder\" method=\"get\" hx-boost=\"true\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\" class=\"flex items-center gap-2 px-3 py-2\">" +
     "<input name=\"call_id\" placeholder=\"Jump to Call-ID…\" class=\"flex-1 bg-[#0a0a0c] border border-[#1e1e22] rounded-lg px-2.5 py-1.5 text-xs mono\"/>" +
     "<button class=\"rounded-lg px-2.5 py-1.5 text-xs bg-[#a78bfa] text-[#0a0a0c] font-medium\">Go</button></form>" +
     "</div>" +
@@ -671,7 +680,7 @@ fn msg_row(m, site_labels) {
     "<td class=\"py-2 px-3 text-[10px] text-[#52525b] hide-mobile\">" + time_ago(ts_sec) + "</td>" +
     "<td class=\"py-2 px-3 text-xs\">" +
     "<a class=\"text-[#a78bfa] hover:underline\" href=\"/messages/" + ("" + (id)) + "\">view</a> · " +
-    "<a class=\"text-[#a78bfa] hover:underline\" href=\"/ladder?call_id=" + q(call_id) + "\">ladder</a>" +
+    "<a class=\"text-[#a78bfa] hover:underline\" " + ladder_nav_attrs(call_id) + ">ladder</a>" +
     "</td></tr>"
 }
 
@@ -788,7 +797,7 @@ fn call_groups_table(items) {
                 "<td class=\"py-2 px-3 text-xs hide-mobile\"><span class=\"px-1.5 py-0.5 rounded border border-[#1e1e22] text-[#a1a1aa]\">" + h(transport) + "</span></td>" +
                 "<td class=\"py-2 px-3 text-[10px] text-[#52525b]\">" + age + "</td>" +
                 "<td class=\"py-2 px-3 text-xs\"><a class=\"text-[#a78bfa] hover:underline\" href=\"/messages?call_id=" + q(call_id) + "\">messages</a> · " +
-                "<a class=\"text-[#a78bfa] hover:underline\" href=\"/ladder?call_id=" + q(call_id) + "\">ladder</a></td></tr>"
+                "<a class=\"text-[#a78bfa] hover:underline\" " + ladder_nav_attrs(call_id) + ">ladder</a></td></tr>"
         }
     }
     if rows == "" {
@@ -969,6 +978,29 @@ fn fetch_related(call_id) {
     if !r.ok { return [] }
     p := json.parse(r.value.body)
     if p.ok { p.value } else { [] }
+}
+
+fn related_calls_panel(call_id) {
+    related := fetch_related(call_id)
+    if len(related) == 0 {
+        return ""
+    }
+    mut rlinks := ""
+    for rel in related {
+        rcid := h(rel["call_id"] ?? "")
+        rmsgs := rel["messages"] ?? 0
+        reason := rel["reason"] ?? ""
+        reason_label := if reason == "hep_correlation" { "HEP correlation" } else { "From/To match" }
+        rlinks = rlinks + "<a " + ladder_nav_attrs(rel["call_id"] ?? "") + " class=\"flex items-center justify-between rounded-lg px-3 py-2 text-xs hover:bg-[#27272a]/50 transition-colors\">" +
+            "<span class=\"mono truncate max-w-[20rem]\">" + rcid + "</span>" +
+            "<span class=\"text-[10px] text-[#52525b] shrink-0 ml-2\">" + reason_label + " · " + ("" + (rmsgs)) + " msgs</span></a>"
+    }
+    "<div class=\"card mt-4 overflow-hidden\">" +
+        "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center gap-2\">" +
+        "<svg class=\"w-4 h-4 text-[#a78bfa]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1\"/></svg>" +
+        "<span class=\"text-sm font-semibold\">Related calls (B2BUA)</span>" +
+        "<span class=\"text-[10px] text-[#52525b]\">" + ("" + (len(related))) + " legs</span></div>" +
+        "<div class=\"p-2\">" + rlinks + "</div></div>"
 }
 
 fn fetch_anomalies() {
@@ -2029,7 +2061,7 @@ fn calls_recent_list(tops, selected, compact) {
             cnt := row["messages"] ?? 0
             t1 := row["last_seen"] ?? row["t1"] ?? 0
             sel := if rc == selected { " border-[#a78bfa]/50 bg-[rgba(167,139,250,.08)]" } else { " border-[#27272a] bg-[#0a0a0c] hover:border-[#3f3f46]" }
-            rows = rows + "<a href=\"/ladder?call_id=" + q(rc) + "\" class=\"block rounded-md border " + sel + " p-3 transition-colors\">" +
+            rows = rows + "<a " + ladder_nav_attrs(rc) + " class=\"block rounded-md border " + sel + " p-3 transition-colors\">" +
                 "<div class=\"mono text-xs truncate text-[#e4e4e7]\">" + rc_h + "</div>" +
                 "<div class=\"mt-2 flex items-center justify-between text-[11px] text-[#71717a]\"><span><span class=\"mono text-[#a1a1aa]\">" + ("" + (cnt)) + "</span> messages</span><span>" + time_ago(t1 / 1000) + "</span></div></a>"
         }
@@ -2328,27 +2360,7 @@ fn ladder_html_from_items(call_id, all_items) {
             "</div></a>"
     }
 
-    // Related calls (B2BUA correlation)
-    related := fetch_related(call_id)
-    mut related_html := ""
-    if len(related) > 0 {
-        mut rlinks := ""
-        for rel in related {
-            rcid := h(rel["call_id"] ?? "")
-            rmsgs := rel["messages"] ?? 0
-            reason := rel["reason"] ?? ""
-            reason_label := if reason == "hep_correlation" { "HEP correlation" } else { "From/To match" }
-            rlinks = rlinks + "<a href=\"/ladder?call_id=" + q(rel["call_id"] ?? "") + "\" class=\"flex items-center justify-between rounded-lg px-3 py-2 text-xs hover:bg-[#27272a]/50 transition-colors\">" +
-                "<span class=\"mono truncate max-w-[20rem]\">" + rcid + "</span>" +
-                "<span class=\"text-[10px] text-[#52525b] shrink-0 ml-2\">" + reason_label + " · " + ("" + (rmsgs)) + " msgs</span></a>"
-        }
-        related_html = "<div class=\"card mt-4 overflow-hidden\">" +
-            "<div class=\"px-5 py-3 border-b border-[#1e1e22] flex items-center gap-2\">" +
-            "<svg class=\"w-4 h-4 text-[#a78bfa]\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" d=\"M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1\"/></svg>" +
-            "<span class=\"text-sm font-semibold\">Related calls (B2BUA)</span>" +
-            "<span class=\"text-[10px] text-[#52525b]\">" + ("" + (len(related))) + " legs</span></div>" +
-            "<div class=\"p-2\">" + rlinks + "</div></div>"
-    }
+    related_html := "<div id=\"related-calls\" hx-get=\"/partials/related-calls?call_id=" + q(call_id) + "\" hx-trigger=\"load\" hx-swap=\"innerHTML\"></div>"
 
     // QoS panel — show RTCP data if any exists for this call
     mut qos_html := ""
@@ -3690,6 +3702,13 @@ fn main {
         web.htmx(sla_detail_tables(load_sla_targets()))
     })
 
+    app.get("/partials/related-calls", fn(req) {
+        if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
+        cid := req.query_map["call_id"] ?? ""
+        if cid == "" { return web.htmx("") }
+        web.htmx(related_calls_panel(cid))
+    })
+
     app.get("/partials/report-telecom-kpis", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
         kpi := fetch_kpi()
@@ -4173,7 +4192,7 @@ fn main {
                 "<div class=\"rounded-2xl border border-[#1e1e22] bg-[#111114] p-4\">" +
                 "<div class=\"text-xs text-[#a1a1aa] mb-2\">Raw SIP</div>" +
                 "<pre class=\"mono text-xs whitespace-pre-wrap break-all text-[#d4d4d8]\">" + raw_txt + "</pre></div>" +
-                "<div class=\"mt-4\"><a class=\"text-[#a78bfa] text-sm hover:underline\" href=\"/ladder?call_id=" + q(m["call_id"] ?? "") + "\">Open call ladder →</a></div>"
+            "<div class=\"mt-4\"><a class=\"text-[#a78bfa] text-sm hover:underline\" " + ladder_nav_attrs(m["call_id"] ?? "") + ">Open call ladder →</a></div>"
             web.html(layout("Message " + ("" + (id)), body, user))
         }
     })
@@ -4198,7 +4217,7 @@ fn main {
             "<div><h1 class=\"text-2xl font-bold\">SIP Ladder</h1><p class=\"text-sm text-[#71717a] mt-1\">Chronological SIP signaling for one Call-ID.</p></div>" +
             "<div class=\"flex gap-2\"><a href=\"/calls\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">Calls</a>" +
             "<a href=\"/messages\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">Messages</a></div></div>" +
-            "<form class=\"card p-4 mb-5\" action=\"/ladder\" method=\"get\">" +
+            "<form class=\"card p-4 mb-5\" action=\"/ladder\" method=\"get\" hx-boost=\"true\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\">" +
             "<div class=\"grid md:grid-cols-[1fr_auto_auto] gap-3 items-end\">" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Paste or enter Call-ID\" class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono\"/></div>" +
@@ -4249,7 +4268,7 @@ fn main {
             "<div class=\"flex items-center gap-2\"><form method=\"get\" action=\"/calls\"><select name=\"agent\" class=\"rounded-md bg-[#0a0a0c] border border-[#27272a] px-2 py-1.5 text-xs\" onchange=\"this.form.submit()\">" + node_opts + "</select></form><a href=\"/messages?method=OPTIONS\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">SIP OPTIONS</a>" +
             "<a href=\"/ip\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">IP history</a></div></div>" +
             call_kpis +
-        "<form class=\"card p-4 mb-5\" action=\"/ladder\" method=\"get\">" +
+            "<form class=\"card p-4 mb-5\" action=\"/ladder\" method=\"get\" hx-boost=\"true\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\">" +
             "<div class=\"grid md:grid-cols-[1fr_auto_auto] gap-3 items-end\">" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Paste or enter Call-ID\" class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono\"/></div>" +
@@ -4843,7 +4862,7 @@ fn main {
             "<button class=\"rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Build report</button>" +
             "<a href=\"/report\" class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7]\">Clear</a>" +
             "<a href=\"" + open_messages + "\" class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7]\">Open in Messages</a>" +
-            (if cid != "" { "<a href=\"/ladder?call_id=" + q(cid) + "\" class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7]\">Call ladder</a>" } else { "" }) +
+            (if cid != "" { "<a " + ladder_nav_attrs(cid) + " class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7]\">Call ladder</a>" } else { "" }) +
             "</div></form>"
 
         quick := "<div class=\"grid md:grid-cols-2 xl:grid-cols-4 gap-3 mb-5\">" +
@@ -5110,7 +5129,7 @@ fn main {
             "<td class=\"py-2 px-4 mono text-xs max-w-[22rem] truncate\" title=\"" + cid + "\">" + cid + "</td>" +
             "<td class=\"py-2 px-4 mono text-sm text-right\">" + ("" + (msgs)) + "</td>" +
             "<td class=\"py-2 px-4 text-right\">" +
-                    "<a class=\"text-[11px] text-[#a78bfa] hover:underline\" href=\"/ladder?call_id=" + q(raw_cid) + "\">ladder</a>" +
+                    "<a class=\"text-[11px] text-[#a78bfa] hover:underline\" " + ladder_nav_attrs(raw_cid) + ">ladder</a>" +
             " <a class=\"text-[11px] text-[#52525b] hover:text-[#a1a1aa]\" href=\"/pcap?call_id=" + q(raw_cid) + "\">pcap</a></td></tr>"
     }
         if top_rows == "" { top_rows = "<tr><td colspan=\"3\" class=\"py-8 text-center text-[#52525b] text-sm\">No calls captured yet.</td></tr>" }
