@@ -718,7 +718,7 @@ fn db_update_call_state(db: SqlDB, id: int, record_json: string) -> int {
         "invite_id=CASE WHEN excluded.invite_id > 0 THEN excluded.invite_id ELSE call_state.invite_id END," +
         "last_method=excluded.last_method,last_status=excluded.last_status," +
         "answered=CASE WHEN excluded.answered = 1 THEN 1 ELSE call_state.answered END," +
-        "open=CASE WHEN excluded.last_method = 'INVITE' AND excluded.last_status >= 300 AND call_state.answered = 1 THEN call_state.open ELSE excluded.open END," +
+        "open=CASE WHEN excluded.last_method = 'INVITE' AND call_state.open = 0 THEN 0 WHEN excluded.last_method = 'INVITE' AND excluded.last_status >= 300 AND call_state.answered = 1 THEN call_state.open ELSE excluded.open END," +
         "src=CASE WHEN excluded.src != '' THEN excluded.src ELSE call_state.src END," +
         "dst=CASE WHEN excluded.dst != '' THEN excluded.dst ELSE call_state.dst END," +
         "from_h=CASE WHEN excluded.from_h != '' THEN excluded.from_h ELSE call_state.from_h END," +
@@ -726,7 +726,7 @@ fn db_update_call_state(db: SqlDB, id: int, record_json: string) -> int {
         "record_json=excluded.record_json"
     let _ = sql_exec_plain(db, up)
     if is_invite && str_eq(kind, "response") && status >= 200 && status < 300 {
-        let _ = sql_exec_plain(db, "UPDATE call_state SET answered = 1, open = 1, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = 'INVITE', last_status = " + string(status) + ", record_json = " + sql_quote(record_json) + " WHERE call_id = " + sql_quote(call_id))
+        let _ = sql_exec_plain(db, "UPDATE call_state SET answered = 1, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = 'INVITE', last_status = " + string(status) + ", record_json = " + sql_quote(record_json) + " WHERE call_id = " + sql_quote(call_id))
     } else if is_invite && str_eq(kind, "response") && status >= 300 {
         let _ = sql_exec_plain(db, "UPDATE call_state SET open = 0, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = 'INVITE', last_status = " + string(status) + ", record_json = " + sql_quote(record_json) + " WHERE call_id = " + sql_quote(call_id) + " AND answered = 0")
     } else if (is_bye || is_cancel) && str_eq(kind, "request") {
@@ -1786,12 +1786,17 @@ fn db_realtime_json(window_min: int, agent_filter: string) -> string {
     let agent_where = if str_eq(agent_filter, "") { "" } else { " AND agent = " + sql_quote(agent_filter) }
     let c1_agent_where = if str_eq(agent_filter, "") { "" } else { " AND c1.agent = " + sql_quote(agent_filter) + " " }
     let c2_agent_where = if str_eq(agent_filter, "") { "" } else { " AND c2.agent = " + sql_quote(agent_filter) }
+    let invite_method = "(method = 'INVITE' OR method LIKE '% INVITE')"
+    let bye_method = "(method = 'BYE' OR method LIKE '% BYE')"
+    let register_method = "(method = 'REGISTER' OR method LIKE '% REGISTER')"
+    let options_method = "(method = 'OPTIONS' OR method LIKE '% OPTIONS')"
+    let active_cutoff = now_ms() - parse_int_or(env_get_or("ZAMAN_ACTIVE_CALL_MAX_AGE_MIN", "360"), 360) * 60 * 1000
     let total = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + agent_where, [])
-    let invite_msgs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'" + agent_where, [])
-    let invites = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'INVITE' AND kind = 'request'" + agent_where, [])
-    let byes = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'BYE' AND kind = 'request'" + agent_where, [])
-    let regs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND kind = 'request'" + agent_where, [])
-    let opts = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'OPTIONS' AND kind = 'request'" + agent_where, [])
+    let invite_msgs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND " + invite_method + " AND kind = 'request'" + agent_where, [])
+    let invites = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND " + invite_method + " AND kind = 'request'" + agent_where, [])
+    let byes = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND " + bye_method + " AND kind = 'request'" + agent_where, [])
+    let regs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND " + register_method + " AND kind = 'request'" + agent_where, [])
+    let opts = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND " + options_method + " AND kind = 'request'" + agent_where, [])
     let resp_2xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 200 AND status < 300" + agent_where, [])
     let resp_4xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 400 AND status < 500" + agent_where, [])
     let resp_5xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 500" + agent_where, [])
@@ -1800,7 +1805,7 @@ fn db_realtime_json(window_min: int, agent_filter: string) -> string {
     let err_404 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 404" + agent_where, [])
     let err_486 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 486" + agent_where, [])
     let err_503 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 503" + agent_where, [])
-    let active = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE open = 1" + agent_where, [])
+    let active = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE open = 1 AND last_ts_ms > " + string(active_cutoff) + agent_where, [])
     // Unique agents seen in window
     let agents_active = sql_query_int(db,
         "SELECT COUNT(DISTINCT agent) FROM captures WHERE ts_ms > " + cs + agent_where, [])
@@ -1809,12 +1814,12 @@ fn db_realtime_json(window_min: int, agent_filter: string) -> string {
         "SELECT COUNT(DISTINCT src) FROM captures WHERE ts_ms > " + cs + agent_where, [])
     // ASR for window
     let win_inv = sql_query_int(db,
-        "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'" + agent_where, [])
+        "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND " + invite_method + " AND kind = 'request'" + agent_where, [])
     let win_ans = sql_query_int(db,
         "SELECT COUNT(DISTINCT c1.call_id) FROM captures c1 " +
-        "WHERE c1.ts_ms > " + cs + " AND c1.method = 'INVITE' AND c1.kind = 'request' " +
+        "WHERE c1.ts_ms > " + cs + " AND (c1.method = 'INVITE' OR c1.method LIKE '% INVITE') AND c1.kind = 'request' " +
         c1_agent_where +
-        "AND EXISTS (SELECT 1 FROM captures c2 WHERE c2.call_id = c1.call_id AND c2.status >= 200 AND c2.status < 300" + c2_agent_where + ")", [])
+        "AND EXISTS (SELECT 1 FROM captures c2 WHERE c2.call_id = c1.call_id AND (c2.method = 'INVITE' OR c2.method LIKE '% INVITE') AND c2.status >= 200 AND c2.status < 300" + c2_agent_where + ")", [])
     let mut win_asr = 0
     if win_inv > 0 {
         win_asr = win_ans * 100 / win_inv
