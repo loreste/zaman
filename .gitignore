@@ -11,6 +11,14 @@ data/
 # TLS certificates
 *.crt
 *.key
+*.pem
+
+# Local secrets / runtime environment
+.env
+.env.*
+*.env
+core.env
+web.env
 
 # IDE / tools
 .claude/
