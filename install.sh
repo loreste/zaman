@@ -27,6 +27,52 @@ log()  { echo -e "${GREEN}[zaman]${NC} $*"; }
 warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
 err()  { echo -e "${RED}[error]${NC} $*"; exit 1; }
 
+have() { command -v "$1" >/dev/null 2>&1; }
+
+pkg_install() {
+    if [ "$PKG_MGR" = "apt" ]; then
+        apt-get install -y -qq "$@" >/dev/null
+    elif [ "$PKG_MGR" = "dnf" ]; then
+        dnf install -y -q "$@" >/dev/null
+    else
+        yum install -y -q "$@" >/dev/null
+    fi
+}
+
+run_as_postgres() {
+    if have runuser; then
+        runuser -u postgres -- "$@"
+    elif have su; then
+        su -s /bin/sh postgres -c "$(printf '%q ' "$@")"
+    else
+        err "Need runuser or su to administer PostgreSQL"
+    fi
+}
+
+start_postgres_service() {
+    for svc in postgresql postgresql.service; do
+        if systemctl enable --now "$svc" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    svc="$(systemctl list-unit-files 'postgresql*.service' --no-legend 2>/dev/null | awk 'NR==1 {print $1}')"
+    if [ -n "$svc" ] && systemctl enable --now "$svc" >/dev/null 2>&1; then
+        return 0
+    fi
+    warn "Could not start PostgreSQL automatically; check systemctl status postgresql"
+    return 1
+}
+
+detect_nologin() {
+    if [ -x /usr/sbin/nologin ]; then
+        echo /usr/sbin/nologin
+    elif [ -x /sbin/nologin ]; then
+        echo /sbin/nologin
+    else
+        echo /bin/false
+    fi
+}
+
 # ── Detect distro ──
 detect_distro() {
     if [ -f /etc/os-release ]; then
@@ -42,11 +88,12 @@ detect_distro() {
 
     case "$DISTRO_ID" in
         ubuntu|debian|linuxmint|pop) PKG_MGR="apt" ;;
-        centos|rhel|rocky|almalinux|fedora|ol) PKG_MGR="yum" ;;
+        fedora) PKG_MGR="dnf" ;;
+        centos|rhel|rocky|almalinux|ol) PKG_MGR="$(have dnf && echo dnf || echo yum)" ;;
         *)
             case "$DISTRO_FAMILY" in
                 *debian*|*ubuntu*) PKG_MGR="apt" ;;
-                *rhel*|*fedora*|*centos*) PKG_MGR="yum" ;;
+                *rhel*|*fedora*|*centos*) PKG_MGR="$(have dnf && echo dnf || echo yum)" ;;
                 *) err "Unsupported distro: ${DISTRO_ID} (${DISTRO_FAMILY})" ;;
             esac
             ;;
@@ -61,44 +108,38 @@ install_deps() {
     if [ "$PKG_MGR" = "apt" ]; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq \
+        pkg_install \
             curl wget git make \
-            clang gcc libc-dev \
+            clang gcc libc6-dev \
             python3 \
+            gnupg \
             openssl libssl-dev \
             ca-certificates \
             sqlite3 libsqlite3-dev \
-            pkg-config \
-            >/dev/null 2>&1
+            pkg-config
         log "APT dependencies installed"
     else
         # RHEL/CentOS/Fedora/Rocky
-        yum install -y -q \
+        pkg_install \
             curl wget git make \
             clang gcc glibc-devel \
             python3 \
             openssl openssl-devel \
             ca-certificates \
             sqlite sqlite-devel \
-            pkgconfig \
-            >/dev/null 2>&1 || \
-        dnf install -y -q \
-            curl wget git make \
-            clang gcc glibc-devel \
-            python3 \
-            openssl openssl-devel \
-            ca-certificates \
-            sqlite sqlite-devel \
-            pkgconfig \
-            >/dev/null 2>&1
-        log "YUM/DNF dependencies installed"
+            pkgconfig
+        log "${PKG_MGR^^} dependencies installed"
     fi
 }
 
 # ── Install Makori ──
 install_mako() {
-    if command -v makori >/dev/null 2>&1; then
-        MAKO_VER=$(makori version 2>/dev/null | head -1)
+    if have makori || have mako; then
+        MAKO_BIN="$(command -v makori 2>/dev/null || command -v mako)"
+        MAKO_VER=$("$MAKO_BIN" version 2>/dev/null | head -1 || true)
+        if ! have makori && have mako; then
+            ln -sfn "$(command -v mako)" /usr/local/bin/makori
+        fi
         log "Makori already installed: ${MAKO_VER}"
         return
     fi
@@ -123,7 +164,7 @@ install_mako() {
     fi
 
     # Fallback: direct binary download
-    if ! command -v makori >/dev/null 2>&1; then
+    if ! have makori && ! have mako; then
         for url in \
             "https://mako-lang.dev/dl/makori-linux-${MAKO_ARCH}" \
             "https://github.com/mako-lang/mako/releases/latest/download/makori-linux-${MAKO_ARCH}" \
@@ -135,8 +176,12 @@ install_mako() {
         done
     fi
 
+    if ! have makori && have mako; then
+        ln -sfn "$(command -v mako)" /usr/local/bin/makori
+    fi
+
     # Verify
-    if ! command -v makori >/dev/null 2>&1; then
+    if ! have makori && ! have mako; then
         err "Failed to install Makori. Install manually from https://mako-lang.dev and re-run."
     fi
 
@@ -145,7 +190,7 @@ install_mako() {
 
 # ── Install Weft ──
 install_weft() {
-    if command -v weft >/dev/null 2>&1; then
+    if have weft; then
         WEFT_VER=$(weft version 2>/dev/null | head -1)
         log "Weft already installed: ${WEFT_VER}"
         return
@@ -170,7 +215,7 @@ install_weft() {
     fi
 
     # Fallback: direct binary download
-    if ! command -v weft >/dev/null 2>&1; then
+    if ! have weft; then
         for url in \
             "https://weft.dev/dl/weft-linux-${WEFT_ARCH}" \
             "https://github.com/loreste32/weft/releases/latest/download/weft-linux-${WEFT_ARCH}"; do
@@ -182,7 +227,7 @@ install_weft() {
     fi
 
     # Verify
-    if ! command -v weft >/dev/null 2>&1; then
+    if ! have weft; then
         err "Failed to install Weft. Install manually from https://weft.dev and re-run."
     fi
 
@@ -203,20 +248,25 @@ install_database() {
         postgres|postgresql)
             log "Installing PostgreSQL..."
             if [ "$PKG_MGR" = "apt" ]; then
-                apt-get install -y -qq postgresql postgresql-client >/dev/null
+                pkg_install postgresql postgresql-client
             else
-                yum install -y -q postgresql-server postgresql >/dev/null 2>&1 || \
-                dnf install -y -q postgresql-server postgresql >/dev/null 2>&1
-                postgresql-setup --initdb 2>/dev/null || true
+                pkg_install postgresql-server postgresql
+                if have postgresql-setup; then
+                    postgresql-setup --initdb 2>/dev/null || true
+                elif have postgresql-setup-$(postgres --version 2>/dev/null | awk '{print $3}' | cut -d. -f1); then
+                    "postgresql-setup-$(postgres --version | awk '{print $3}' | cut -d. -f1)" --initdb 2>/dev/null || true
+                fi
             fi
-            systemctl enable --now postgresql 2>/dev/null || true
+            start_postgres_service || true
+            sleep 2
             # Create database and user with generated password
             PG_PASS=$(openssl rand -hex 16)
-            sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='zaman'" | grep -q 1 || {
-                sudo -u postgres psql -c "CREATE USER zaman WITH PASSWORD '${PG_PASS}'" 2>/dev/null || true
-                sudo -u postgres createdb -O zaman zaman 2>/dev/null || true
-                log "Created PostgreSQL database 'zaman' (password generated)"
-            }
+            run_as_postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='zaman'" | grep -q 1 || \
+                run_as_postgres psql -c "CREATE USER zaman WITH PASSWORD '${PG_PASS}'" >/dev/null
+            run_as_postgres psql -c "ALTER USER zaman WITH PASSWORD '${PG_PASS}'" >/dev/null
+            run_as_postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='zaman'" | grep -q 1 || \
+                run_as_postgres createdb -O zaman zaman >/dev/null
+            log "PostgreSQL database 'zaman' and user are ready"
             # Store for DSN construction
             export ZAMAN_PG_PASS="${PG_PASS}"
             DB_CHOICE="postgres"
@@ -227,12 +277,15 @@ install_database() {
                 curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg 2>/dev/null || true
                 echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" > /etc/apt/sources.list.d/clickhouse.list
                 apt-get update -qq
-                apt-get install -y -qq clickhouse-server clickhouse-client >/dev/null
+                pkg_install clickhouse-server clickhouse-client
             else
-                yum install -y -q yum-utils >/dev/null 2>&1 || true
+                if [ "$PKG_MGR" = "dnf" ]; then
+                    pkg_install dnf-plugins-core 2>/dev/null || true
+                else
+                    pkg_install yum-utils 2>/dev/null || true
+                fi
                 yum-config-manager --add-repo https://packages.clickhouse.com/rpm/clickhouse.repo 2>/dev/null || true
-                yum install -y -q clickhouse-server clickhouse-client >/dev/null 2>&1 || \
-                dnf install -y -q clickhouse-server clickhouse-client >/dev/null 2>&1
+                pkg_install clickhouse-server clickhouse-client
             fi
             systemctl enable --now clickhouse-server 2>/dev/null || true
             sleep 2
@@ -251,7 +304,8 @@ install_zaman() {
     log "Installing Zaman to ${INSTALL_DIR}..."
 
     # Create user
-    id -u zaman >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d "$INSTALL_DIR" -m zaman
+    NOLOGIN="$(detect_nologin)"
+    id -u zaman >/dev/null 2>&1 || useradd -r -s "$NOLOGIN" -d "$INSTALL_DIR" -m zaman
 
     # Clone or update
     if [ -d "${INSTALL_DIR}/.git" ]; then
@@ -276,7 +330,9 @@ install_zaman() {
     # Build
     log "Building zaman-core..."
     mkdir -p bin
-    makori build --release core/main.mko -o bin/zaman-core
+    MAKO_BIN="$(command -v makori 2>/dev/null || command -v mako 2>/dev/null || true)"
+    [ -n "$MAKO_BIN" ] || err "Makori compiler not found"
+    "$MAKO_BIN" build --release core/main.mko -o bin/zaman-core
     log "Built: bin/zaman-core"
 
     # Create directories
@@ -343,11 +399,11 @@ setup_nginx_tls() {
     log "Setting up nginx TLS reverse proxy for ${DOMAIN}..."
 
     if [ "$PKG_MGR" = "apt" ]; then
-        apt-get install -y -qq nginx certbot python3-certbot-nginx >/dev/null 2>&1 || \
-        apt-get install -y -qq nginx >/dev/null
+        pkg_install nginx certbot python3-certbot-nginx 2>/dev/null || \
+        pkg_install nginx
     else
-        yum install -y -q nginx certbot python3-certbot-nginx >/dev/null 2>&1 || \
-        dnf install -y -q nginx >/dev/null 2>&1
+        pkg_install nginx certbot python3-certbot-nginx 2>/dev/null || \
+        pkg_install nginx
     fi
 
     # Write nginx config
@@ -541,11 +597,12 @@ print_summary() {
     echo -e "${CYAN}║${NC}  Database:   ${DB_CHOICE}                                ${CYAN}║${NC}"
     if [ -n "$ADMIN_PW" ]; then
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  Login:      admin / ${YELLOW}${ADMIN_PW}${NC}"
+    echo -e "${CYAN}║${NC}  Login:      admin / ${YELLOW}<generated>${NC}                         ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}              journalctl -u zaman-web | grep password    ${CYAN}║${NC}"
     fi
     API_KEY_SHOW=$(grep 'ZAMAN_API_KEY=' "$CONF_DIR/core.env" 2>/dev/null | grep -v '^#' | head -1 | cut -d= -f2)
     if [ -n "${API_KEY_SHOW:-}" ]; then
-    echo -e "${CYAN}║${NC}  API Key:    ${YELLOW}${API_KEY_SHOW}${NC}"
+    echo -e "${CYAN}║${NC}  API Key:    ${YELLOW}<stored in ${CONF_DIR}/core.env>${NC}"
     fi
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  Config:     /etc/zaman/core.env                         ${CYAN}║${NC}"
