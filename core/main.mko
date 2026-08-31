@@ -689,7 +689,7 @@ fn db_writer(ch: chan[string], metrics: CMap) -> int {
         return ch_writer(ch, metrics)
     }
     print("db   writer kick (chan[string] cap=" + string(DB_CH_CAP) + ")")
-    let db = db_open()
+    let mut db = db_open()
     if sql_ok(db) == 0 {
         print("db   writer open failed: " + db_path())
         for j in range ch {
@@ -698,12 +698,28 @@ fn db_writer(ch: chan[string], metrics: CMap) -> int {
         return 0
     }
     let mut n = 0
+    let mut fail_streak = 0
     for j in range ch {
         if db_insert_json(db, j) == 1 {
             n = n + 1
+            fail_streak = 0
             let _ = cmap_incr(metrics, "db_ok", 1)
         } else {
+            fail_streak = fail_streak + 1
             let _ = cmap_incr(metrics, "db_err", 1)
+            if db_is_postgres() == 1 && fail_streak >= 3 {
+                print("db   writer reconnect after " + string(fail_streak) + " failed inserts")
+                let _ = sql_close(db)
+                sleep_ms(250)
+                db = db_open()
+                fail_streak = 0
+                if sql_ok(db) == 0 {
+                    print("db   writer reconnect failed")
+                    sleep_ms(1000)
+                } else {
+                    print("db   writer reconnected")
+                }
+            }
         }
     }
     let _ = sql_close(db)
