@@ -1132,25 +1132,47 @@ fn db_report_kpi_json() -> string {
     if sql_ok(db) == 0 {
         return "{}"
     }
-    let total_invites = sql_query_int(db,
-        "SELECT COUNT(*) FROM captures WHERE method = 'INVITE' AND kind = 'request'", [])
-    let answered = sql_query_int(db,
-        "SELECT COUNT(DISTINCT c1.call_id) FROM captures c1 " +
-        "WHERE c1.method = 'INVITE' AND c1.kind = 'request' AND EXISTS " +
-        "(SELECT 1 FROM captures c2 WHERE c2.call_id = c1.call_id AND c2.status >= 200 AND c2.status < 300)", [])
-    let failed = sql_query_int(db,
-        "SELECT COUNT(DISTINCT c1.call_id) FROM captures c1 " +
-        "WHERE c1.method = 'INVITE' AND c1.kind = 'request' AND EXISTS " +
-        "(SELECT 1 FROM captures c2 WHERE c2.call_id = c1.call_id AND c2.status >= 400)", [])
-    let total_registers = sql_query_int(db,
-        "SELECT COUNT(*) FROM captures WHERE method = 'REGISTER' AND kind = 'request'", [])
-    let reg_ok = sql_query_int(db,
-        "SELECT COUNT(*) FROM captures WHERE method LIKE '%REGISTER%' AND status >= 200 AND status < 300", [])
-    let reg_fail = sql_query_int(db,
-        "SELECT COUNT(*) FROM captures WHERE method LIKE '%REGISTER%' AND status >= 400", [])
-    let total_calls = sql_query_int(db,
-        "SELECT COUNT(DISTINCT call_id) FROM captures WHERE call_id IS NOT NULL AND call_id != ''", [])
-    let total_messages = sql_query_int(db, "SELECT COUNT(*) FROM captures", [])
+    let mut window_min = parse_int_or(env_get_or("ZAMAN_KPI_WINDOW_MIN", "1440"), 1440)
+    if window_min <= 0 {
+        window_min = 1440
+    }
+    if window_min > 10080 {
+        window_min = 10080
+    }
+    let cutoff = now_ms() - window_min * 60 * 1000
+    let rows = sql_query_rows(db,
+        "SELECT " +
+        "COUNT(*) AS total_messages, " +
+        "COUNT(DISTINCT CASE WHEN call_id IS NOT NULL AND call_id != '' THEN call_id END) AS total_calls, " +
+        "COUNT(DISTINCT CASE WHEN method = 'INVITE' AND kind = 'request' AND call_id IS NOT NULL AND call_id != '' THEN call_id END) AS total_invites, " +
+        "COUNT(DISTINCT CASE WHEN status >= 200 AND status < 300 AND call_id IS NOT NULL AND call_id != '' THEN call_id END) AS answered, " +
+        "COUNT(DISTINCT CASE WHEN status >= 400 AND call_id IS NOT NULL AND call_id != '' THEN call_id END) AS failed, " +
+        "SUM(CASE WHEN method = 'REGISTER' AND kind = 'request' THEN 1 ELSE 0 END) AS total_registers, " +
+        "SUM(CASE WHEN method = 'REGISTER' AND status >= 200 AND status < 300 THEN 1 ELSE 0 END) AS reg_ok, " +
+        "SUM(CASE WHEN method = 'REGISTER' AND status >= 400 THEN 1 ELSE 0 END) AS reg_fail " +
+        "FROM captures WHERE ts_ms > " + string(cutoff),
+        [])
+    let mut total_messages = 0
+    let mut total_calls = 0
+    let mut total_invites = 0
+    let mut answered = 0
+    let mut failed = 0
+    let mut total_registers = 0
+    let mut reg_ok = 0
+    let mut reg_fail = 0
+    if sql_rows_ok(rows) == 1 {
+        if sql_rows_next(rows) == 1 {
+            total_messages = sql_rows_int(rows, 0)
+            total_calls = sql_rows_int(rows, 1)
+            total_invites = sql_rows_int(rows, 2)
+            answered = sql_rows_int(rows, 3)
+            failed = sql_rows_int(rows, 4)
+            total_registers = sql_rows_int(rows, 5)
+            reg_ok = sql_rows_int(rows, 6)
+            reg_fail = sql_rows_int(rows, 7)
+        }
+        let _ = sql_rows_close(rows)
+    }
     // ASR = answered / total_invites * 100
     let mut asr = 0
     if total_invites > 0 {
@@ -1172,6 +1194,7 @@ fn db_report_kpi_json() -> string {
         ",\"reg_fail\":" + string(reg_fail) +
         ",\"total_calls\":" + string(total_calls) +
         ",\"total_messages\":" + string(total_messages) +
+        ",\"window_min\":" + string(window_min) +
         "}"
 }
 
@@ -3190,6 +3213,20 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
 // ---- main ----
 
 fn main() {
+    if argc() > 1 {
+        let first_arg = arg_get(1)
+        if str_eq(first_arg, "--version") || str_eq(first_arg, "-V") || str_eq(first_arg, "version") {
+            print("zaman-core " + VERSION)
+            return
+        }
+        if str_eq(first_arg, "--help") || str_eq(first_arg, "-h") || str_eq(first_arg, "help") {
+            print("zaman-core " + VERSION)
+            print("usage: zaman-core [sip_port] [hep_port] [api_port]")
+            print("env: ZAMAN_SIP_PORT ZAMAN_HEP_PORT ZAMAN_API_PORT ZAMAN_DB_DSN ZAMAN_API_KEY")
+            return
+        }
+    }
+
     let mut sip_host = env_get_or("ZAMAN_SIP_HOST", "0.0.0.0")
     let mut sip_port = parse_int_or(env_get_or("ZAMAN_SIP_PORT", "5060"), 5060)
     let mut hep_port = parse_int_or(env_get_or("ZAMAN_HEP_PORT", "9060"), 9060)

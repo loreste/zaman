@@ -1435,8 +1435,8 @@ fn overview_body_v2(user) {
 
     live := "<div class=\"section\">" +
         "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Live Feed</div><a href=\"/messages\" class=\"text-[11px] text-[#a78bfa] hover:underline\">Messages</a></div>" +
-        "<div id=\"live-msgs\" hx-get=\"/partials/live-feed\" hx-trigger=\"every 2s\" hx-swap=\"innerHTML\">" +
-        live_feed_panel() + "</div></div>"
+        "<div id=\"live-msgs\" hx-get=\"/partials/live-feed?method=INVITE\" hx-trigger=\"every 2s\" hx-swap=\"innerHTML\">" +
+        dashboard_live_feed_panel("INVITE") + "</div></div>"
 
     active_overview := "<div class=\"section\">" +
         "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Active Calls</div><a href=\"/calls\" class=\"text-[11px] text-[#a78bfa] hover:underline\">Calls</a></div>" +
@@ -1557,6 +1557,24 @@ fn time_filter_fields(prefix, since_ms, until_ms, inp) {
     "<script>(function(){var p='" + p + "';function init(k){var d=document.getElementById(p+'-'+k),h=document.getElementById(p+'-'+k+'-ms');if(!d||!h)return;var ms=parseInt(d.dataset.ms||h.value||'0',10);if(ms>0){var x=new Date(ms);x.setMinutes(x.getMinutes()-x.getTimezoneOffset());d.value=x.toISOString().slice(0,16)}d.form&&d.form.addEventListener('submit',function(){h.value=d.value?String(new Date(d.value).getTime()):''})}init('since');init('until')})();</script>"
 }
 
+fn range_since_ms(range) {
+    now := time.unix() * 1000
+    if range == "5m" { return "" + (now - 5 * 60 * 1000) }
+    if range == "1h" { return "" + (now - 60 * 60 * 1000) }
+    if range == "24h" { return "" + (now - 24 * 60 * 60 * 1000) }
+    if range == "7d" { return "" + (now - 7 * 24 * 60 * 60 * 1000) }
+    ""
+}
+
+fn range_tabs(base, current) {
+    mut out := "<div class=\"flex flex-wrap gap-2\">"
+    for r in ["5m", "1h", "24h", "7d"] {
+        cls := if current == r { "bg-[#27272a] text-[#e4e4e7]" } else { "text-[#a1a1aa]" }
+        out = out + "<a href=\"" + base + (if str.contains(base, "?") { "&" } else { "?" }) + "range=" + r + "\" class=\"rounded-md border border-[#27272a] px-2.5 py-1 text-xs " + cls + "\">" + r + "</a>"
+    }
+    out + "</div>"
+}
+
 fn report_status_rows(items) {
     mut statuses := []
     for m in items {
@@ -1594,7 +1612,7 @@ fn report_status_rows(items) {
         used = list_append(used, best)
         st_i := int.parse(best).unwrap_or(0)
         cls := if st_i == 408 { "text-[#f87171] font-semibold" } else if st_i >= 500 { "text-[#f87171]" } else if st_i >= 400 { "text-[#fb923c]" } else if st_i >= 200 && st_i < 300 { "text-[#34d399]" } else { "text-[#fbbf24]" }
-        rows = rows + "<tr><td class=\"py-2 px-3 mono text-sm " + cls + "\"><a class=\"hover:underline\" href=\"/report?status=" + h(best) + "&view=messages\">" + h(best) + "</a></td>" +
+        rows = rows + "<tr><td class=\"py-2 px-3 mono text-sm " + cls + "\"><a class=\"hover:underline\" href=\"/status/" + h(best) + "?range=1h\">" + h(best) + "</a></td>" +
             "<td class=\"py-2 px-3 mono text-sm text-right\">" + ("" + (best_count)) + "</td></tr>"
         rank = rank + 1
     }
@@ -1850,6 +1868,60 @@ fn ip_history_panel_time(addr, since_ms, until_ms) {
     time_qs := (if since_ms != "" { "&since_ms=" + since_h } else { "" }) + (if until_ms != "" { "&until_ms=" + until_h } else { "" })
     items := fetch_messages_time(300, "", "", "", "", addr, "", "", "", since_ms, until_ms)
     th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
+    mut call_ids := []
+    for m in items {
+        cid := m["call_id"] ?? ""
+        if cid == "" { continue }
+        mut seen := false
+        for existing in call_ids {
+            if existing == cid { seen = true }
+        }
+        if !seen { call_ids = list_append(call_ids, cid) }
+    }
+    mut invites := 0
+    mut answered := 0
+    mut failed := 0
+    mut ended := 0
+    mut duration_total := 0
+    for cid in call_ids {
+        mut has_invite := false
+        mut has_answer := false
+        mut has_fail := false
+        mut has_end := false
+        mut first_ts := 0
+        mut last_ts := 0
+        for m in items {
+            if (m["call_id"] ?? "") != cid { continue }
+            method := call_method_from_cseq(m["method"] ?? "", m["cseq"] ?? "")
+            kind := m["kind"] ?? ""
+            status := m["status"] ?? 0
+            ts_ms := m["ts_ms"] ?? 0
+            if first_ts == 0 || (ts_ms > 0 && ts_ms < first_ts) { first_ts = ts_ms }
+            if ts_ms > last_ts { last_ts = ts_ms }
+            if method == "INVITE" && kind == "request" { has_invite = true }
+            if status >= 200 && status < 300 { has_answer = true }
+            if status >= 400 { has_fail = true }
+            if method == "BYE" || method == "CANCEL" { has_end = true }
+        }
+        if has_invite { invites = invites + 1 }
+        if has_answer { answered = answered + 1 }
+        if has_fail { failed = failed + 1 }
+        if has_end && first_ts > 0 && last_ts > first_ts {
+            ended = ended + 1
+            duration_total = duration_total + ((last_ts - first_ts) / 1000)
+        }
+    }
+    asr := if invites > 0 { answered * 100 / invites } else { 0 }
+    acd := if ended > 0 { duration_total / ended } else { 0 }
+    ip_kpis := "<div class=\"card p-4 mb-5\"><div class=\"flex flex-wrap items-center justify-between gap-3 mb-3\"><div><div class=\"section-title mb-0\">IP Call KPIs</div><div class=\"text-[11px] text-[#71717a] mt-1\">Calculated from the selected IP/time range.</div></div><div class=\"text-[10px] text-[#52525b] mono\">" + ("" + (len(items))) + " messages sampled</div></div>" +
+        "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3\">" +
+        call_fact("Call-IDs", "" + (len(call_ids)), "unique dialogs", "#38bdf8") +
+        call_fact("INVITEs", "" + (invites), "call attempts", "#fbbf24") +
+        call_fact("ASR", "" + (asr) + "%", "answered calls", if asr >= 70 { "#34d399" } else if asr >= 40 { "#fbbf24" } else { "#f87171" }) +
+        call_fact("ACD", "" + (acd) + "s", "avg completed duration", "#a78bfa") +
+        call_fact("Failed", "" + (failed), "status >= 400", if failed == 0 { "#34d399" } else { "#f87171" }) +
+        "</div></div>"
+    ip_kpis +
     "<div class=\"grid xl:grid-cols-[1.2fr_.8fr] gap-4 mb-5\">" +
     "<div class=\"card overflow-x-auto\"><div class=\"p-4 border-b border-[#1e1e22]\"><div class=\"section-title mb-0\">Peer IPs</div><div class=\"text-[11px] text-[#71717a] mt-1\">Endpoints exchanging traffic with this IP.</div></div>" +
     "<table class=\"w-full text-left text-sm\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\"><th class=\"py-2 px-3\">Peer</th><th class=\"py-2 px-3 text-right\">Msgs</th><th class=\"py-2 px-3 text-right\">In</th><th class=\"py-2 px-3 text-right\">Out</th><th class=\"py-2 px-3 text-right\">Errors</th></tr></thead><tbody class=\"divide-y divide-[#1e1e22]/50\">" + ip_peer_rows(items, addr, 12) + "</tbody></table></div>" +
@@ -1991,6 +2063,60 @@ fn live_feed_panel() {
     "<div><div class=\"text-sm font-semibold\">Recent SIP/HEP Events</div><div class=\"text-[11px] text-[#71717a]\">Newest messages first, refreshed every 2 seconds.</div></div>" +
     "<span class=\"flex items-center gap-1.5 text-[10px] text-[#34d399]\"><span class=\"w-1.5 h-1.5 rounded-full bg-[#34d399] animate-pulse\"></span>live</span></div>" +
     messages_table(items) + "</div>"
+}
+
+fn dashboard_live_feed_row(m, labels) {
+    id := m["id"] ?? 0
+    method := call_method_from_cseq(m["method"] ?? "", m["cseq"] ?? "")
+    status := m["status"] ?? 0
+    kind := m["kind"] ?? ""
+    call_id := m["call_id"] ?? ""
+    src := m["src"] ?? ""
+    dst := m["dst"] ?? ""
+    ts_ms := m["ts_ms"] ?? 0
+    ts_sec := if ts_ms > 0 { ts_ms / 1000 } else { 0 }
+    src_ip := endpoint_ip(src)
+    dst_ip := endpoint_ip(dst)
+    call_href := if call_id != "" { "/ladder?call_id=" + q(call_id) } else { "/messages/" + ("" + (id)) }
+    "<tr class=\"hover:bg-white/[0.02]\">" +
+    "<td class=\"py-2 px-3\">" + method_badge(method, status, kind) + "</td>" +
+    "<td class=\"py-2 px-3 mono text-xs max-w-[22rem] truncate\" title=\"" + h(call_id) + "\"><a class=\"text-[#a78bfa] hover:underline\" href=\"" + call_href + "\">" + h(call_id) + "</a></td>" +
+    "<td class=\"py-2 px-3 text-xs text-[#a1a1aa] max-w-[12rem] truncate hide-mobile\" title=\"" + h(src) + "\"><a class=\"hover:text-[#e4e4e7] hover:underline\" href=\"/ip?addr=" + h(src_ip) + "\">" + endpoint_display(src, labels) + "</a></td>" +
+    "<td class=\"py-2 px-3 text-xs text-[#a1a1aa] max-w-[12rem] truncate hide-mobile\" title=\"" + h(dst) + "\">" + (if dst != "" { "<a class=\"hover:text-[#e4e4e7] hover:underline\" href=\"/ip?addr=" + h(dst_ip) + "\">" + endpoint_display(dst, labels) + "</a>" } else { "<span class=\"text-[#52525b]\">unknown</span>" }) + "</td>" +
+    "<td class=\"py-2 px-3 text-[10px] text-[#52525b] hide-mobile\">" + time_ago(ts_sec) + "</td>" +
+    "<td class=\"py-2 px-3 text-xs\"><a class=\"text-[#a78bfa] hover:underline\" href=\"" + call_href + "\">full call</a> · <a class=\"text-[#a78bfa] hover:underline\" href=\"/messages/" + ("" + (id)) + "\">msg</a></td></tr>"
+}
+
+fn dashboard_live_feed_table(items) {
+    labels := load_site_labels()
+    mut rows := ""
+    for m in items {
+        rows = rows + dashboard_live_feed_row(m, labels)
+    }
+    if rows == "" {
+        rows = "<tr><td colspan=\"6\" class=\"py-8 text-center text-[#a1a1aa] text-sm\">No matching live SIP/HEP events in the current sample.</td></tr>"
+    }
+    "<div class=\"overflow-x-auto\"><table class=\"w-full text-left text-sm\"><thead><tr class=\"text-[11px] uppercase tracking-wide text-[#a1a1aa] border-b border-[#1e1e22]\">" +
+    "<th class=\"py-2 px-3 font-semibold\">Method</th><th class=\"py-2 px-3 font-semibold\">Call-ID</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Source IP</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Destination IP</th><th class=\"py-2 px-3 font-semibold hide-mobile\">Time</th><th class=\"py-2 px-3 font-semibold\"></th></tr></thead>" +
+    "<tbody class=\"divide-y divide-[#27272a]\">" + rows + "</tbody></table></div>"
+}
+
+fn dashboard_live_feed_panel(method) {
+    mut selected := method
+    if selected == "" {
+        selected = "INVITE"
+    }
+    items := fetch_messages_ex(12, "", "", "", selected, "", "", "", "")
+    invite_cls := if selected == "INVITE" { "bg-[#27272a] text-[#e4e4e7]" } else { "text-[#a1a1aa]" }
+    options_checked := if selected == "OPTIONS" { " checked" } else { "" }
+    "<div id=\"sip-ladder\" class=\"card overflow-hidden scroll-mt-6\">" +
+    "<div class=\"flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[#1e1e22]\">" +
+    "<div><div class=\"text-sm font-semibold\">Recent INVITE Traffic</div><div class=\"text-[11px] text-[#71717a]\">INVITEs are shown by default. Open a row to see the full SIP ladder for that Call-ID.</div></div>" +
+    "<div class=\"flex items-center gap-3\">" +
+    "<a hx-get=\"/partials/live-feed?method=INVITE\" hx-target=\"#live-msgs\" hx-swap=\"innerHTML\" class=\"cursor-pointer rounded-md border border-[#27272a] px-2.5 py-1 text-[11px] " + invite_cls + "\">INVITEs</a>" +
+    "<label class=\"flex items-center gap-1.5 text-[11px] text-[#a1a1aa]\"><input type=\"checkbox\" class=\"accent-[#a78bfa]\" onchange=\"htmx.ajax('GET', this.checked ? '/partials/live-feed?method=OPTIONS' : '/partials/live-feed?method=INVITE', {target:'#live-msgs', swap:'innerHTML'})\"" + options_checked + "/> OPTIONS</label>" +
+    "<span class=\"flex items-center gap-1.5 text-[10px] text-[#34d399]\"><span class=\"w-1.5 h-1.5 rounded-full bg-[#34d399] animate-pulse\"></span>live</span></div></div>" +
+    dashboard_live_feed_table(items) + "</div>"
 }
 
 fn active_calls_panel() {
@@ -3607,7 +3733,8 @@ fn main {
 
     app.get("/partials/live-feed", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
-        web.htmx(live_feed_panel())
+        method := req.query_map["method"] ?? "INVITE"
+        web.htmx(dashboard_live_feed_panel(method))
     })
 
     app.get("/partials/active-calls", fn(req) {
@@ -3907,6 +4034,58 @@ fn main {
         }
         save_site_labels(labels)
         {"status":302,"headers":{"Location":"/ip?addr=" + h(addr)},"body":""}
+    })
+
+    app.get("/status/:code", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        code := req.params["code"] ?? req.query_map["code"] ?? ""
+        range := req.query_map["range"] ?? "1h"
+        mut since_ms := req.query_map["since_ms"] ?? ""
+        mut until_ms := req.query_map["until_ms"] ?? ""
+        if since_ms == "" && until_ms == "" {
+            since_ms = range_since_ms(range)
+        }
+        code_h := h(code)
+        since_h := h(since_ms)
+        until_h := h(until_ms)
+        qs_time := (if since_ms != "" { "&since_ms=" + since_h } else { "" }) + (if until_ms != "" { "&until_ms=" + until_h } else { "" })
+        items := fetch_messages_time(500, "", "", "", "", "", "", "", code, since_ms, until_ms)
+        summary := call_state_summary(items)
+        endpoints := ladder_endpoints(items)
+        responses := summary["responses"] ?? 0
+        mut unique_calls := 0
+        mut seen_calls := ""
+        for m in items {
+            cid := m["call_id"] ?? ""
+            if cid != "" && !str.contains(seen_calls, "|" + cid + "|") {
+                seen_calls = seen_calls + "|" + cid + "|"
+                unique_calls = unique_calls + 1
+            }
+        }
+        inp := "rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
+        base := "/status/" + code_h
+        custom := "<form class=\"card p-4 mb-5\" method=\"get\" action=\"" + base + "\"><div class=\"grid md:grid-cols-[220px_220px_auto] gap-3 items-end\">" +
+            time_filter_fields("status-time", since_h, until_h, inp) +
+            "<button class=\"rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Apply custom range</button></div></form>"
+        actions := "<div class=\"flex flex-wrap gap-2\">" +
+            "<a href=\"/messages?status=" + code_h + qs_time + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Messages</a>" +
+            "<a href=\"/report?status=" + code_h + "&view=messages" + qs_time + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">Report</a>" +
+            "<a href=\"/export/csv?status=" + code_h + qs_time + "\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7]\">CSV</a></div>"
+        body := "<div class=\"flex flex-wrap items-end justify-between gap-3 mb-5\"><div><h1 class=\"text-2xl font-bold\">Status " + code_h + "</h1><p class=\"text-sm text-[#71717a] mt-1\">Full failure view for the selected response code and time range.</p></div>" + actions + "</div>" +
+            "<div class=\"card p-4 mb-5\"><div class=\"flex flex-wrap items-center justify-between gap-3 mb-3\">" + range_tabs(base, range) + "<div class=\"text-[10px] text-[#52525b] mono\">" + (if since_ms != "" { "from " + since_h } else { "all recent" }) + (if until_ms != "" { " to " + until_h } else { "" }) + "</div></div>" +
+            "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3\">" +
+            call_fact("Messages", "" + (len(items)), "matching rows", "#e4e4e7") +
+            call_fact("Call-IDs", "" + (unique_calls), "affected calls", "#38bdf8") +
+            call_fact("Responses", "" + (responses), "SIP responses", "#fbbf24") +
+            call_fact("Endpoints", "" + (len(endpoints)), "source/destination IPs", "#a78bfa") +
+            call_fact("Last seen", time_ago((summary["last_ts"] ?? 0) / 1000), "latest matching event", "#f87171") +
+            "</div></div>" + custom +
+            "<div class=\"grid xl:grid-cols-2 gap-4 mb-5\">" +
+            "<div class=\"card overflow-x-auto\"><div class=\"p-4 border-b border-[#1e1e22]\"><div class=\"section-title mb-0\">Source IPs</div></div><table class=\"w-full text-left\"><thead><tr class=\"text-[10px] uppercase tracking-wider text-[#52525b] border-b border-[#1e1e22]\"><th class=\"py-2 px-3\">Source</th><th class=\"py-2 px-3 text-right\">Msgs</th></tr></thead><tbody class=\"divide-y divide-[#1e1e22]/50\">" + report_endpoint_rows(items, "src", 15) + "</tbody></table></div>" +
+            "<div class=\"card overflow-x-auto\"><div class=\"p-4 border-b border-[#1e1e22]\"><div class=\"section-title mb-0\">Destination IPs</div></div><table class=\"w-full text-left\"><thead><tr class=\"text-[10px] uppercase tracking-wider text-[#52525b] border-b border-[#1e1e22]\"><th class=\"py-2 px-3\">Destination</th><th class=\"py-2 px-3 text-right\">Msgs</th></tr></thead><tbody class=\"divide-y divide-[#1e1e22]/50\">" + report_endpoint_rows(items, "dst", 15) + "</tbody></table></div></div>" +
+            "<div class=\"section\"><div class=\"section-title\">Calls and Messages</div>" + call_groups_table(items) + "<div class=\"mt-4\">" + messages_table(items) + "</div></div>"
+        web.html(layout("Status " + code_h, body, user))
     })
 
     app.get("/messages/:id", fn(req) {
