@@ -1002,6 +1002,23 @@ fn node_display_name(agent, names) {
     if display == null || display == "" { agent } else { display }
 }
 
+fn node_select_options(nodes, names, selected) {
+    mut out := "<option value=\"\">All servers</option>"
+    mut found := selected == ""
+    for nd in nodes {
+        raw_agent := nd["agent"] ?? ""
+        if raw_agent != "" {
+            sel := if raw_agent == selected { " selected" } else { "" }
+            if raw_agent == selected { found = true }
+            out = out + "<option value=\"" + h(raw_agent) + "\"" + sel + ">" + h(node_display_name(raw_agent, names)) + "</option>"
+        }
+    }
+    if !found {
+        out = out + "<option value=\"" + h(selected) + "\" selected>" + h(node_display_name(selected, names)) + "</option>"
+    }
+    out
+}
+
 fn site_labels_path() {
     dir := env.get("ZAMAN_DATA_DIR") ?? "data"
     dir + "/zaman-site-labels.json"
@@ -3710,8 +3727,9 @@ fn main {
 
     app.get("/partials/messages", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
-        mut lim := int.parse(req.query_map["limit"] ?? "20").unwrap_or(0)
-        if lim <= 0 { lim = 20 }
+        mut lim := int.parse(req.query_map["limit"] ?? "300").unwrap_or(0)
+        if lim <= 0 { lim = 300 }
+        if lim > 500 { lim = 500 }
         cid := req.query_map["call_id"] ?? ""
         agent := req.query_map["agent"] ?? ""
         method := req.query_map["method"] ?? ""
@@ -3766,10 +3784,13 @@ fn main {
         status := req.query_map["status"] ?? ""
         since_ms := req.query_map["since_ms"] ?? ""
         until_ms := req.query_map["until_ms"] ?? ""
-        list_limit := if cid != "" { 300 } else { 50 }
+        list_limit := if cid != "" { 300 } else { 300 }
         items := fetch_messages_time(list_limit, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms)
         cid_h := h(cid)
         agent_h := h(agent)
+        nodes := fetch_nodes()
+        names := load_node_names()
+        node_opts := node_select_options(nodes, names, agent)
         method_h := h(method)
         transport_h := h(transport)
         src_h := h(src)
@@ -3879,6 +3900,11 @@ fn main {
             "<a href=\"/export/csv" + (if export_qs != "" { "?" + export_qs } else { "" }) + "\" class=\"rounded-lg px-2.5 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">CSV</a>" +
             (if cid != "" { "<a href=\"/pcap?call_id=" + q(cid) + "\" class=\"rounded-lg px-2.5 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">PCAP</a>" } else { "" }) +
             "</div>"
+        live_qs := if agent != "" { "?agent=" + q(agent) } else { "" }
+        live_calls := "<div class=\"section mb-5\">" +
+            "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Live Calls</div><span class=\"text-[10px] text-[#34d399]\">live</span></div>" +
+            "<div id=\"messages-live-calls\" hx-get=\"/partials/active-calls" + live_qs + "\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
+            active_calls_panel_agent(agent) + "</div></div>"
 
         inp := "rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
         body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
@@ -3890,8 +3916,8 @@ fn main {
             "<div class=\"grid grid-cols-2 md:grid-cols-4 xl:grid-cols-10 gap-3\">" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"any\" class=\"w-full " + inp + "\"/></div>" +
-            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Agent / Server</label>" +
-            "<input name=\"agent\" value=\"" + agent_h + "\" placeholder=\"kamailio\" class=\"w-full " + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Server</label>" +
+            "<select name=\"agent\" class=\"w-full " + inp + "\">" + node_opts + "</select></div>" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Method</label>" +
             "<input name=\"method\" value=\"" + method_h + "\" placeholder=\"INVITE\" class=\"w-full " + inp + "\"/></div>" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Transport</label>" +
@@ -3909,6 +3935,7 @@ fn main {
             "<button class=\"flex-1 rounded-lg px-3 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Search</button></div>" +
             "</div>" + save_form + "</form>" +
             active +
+            live_calls +
             "<div id=\"msg-table\" hx-get=\"/partials/messages?" + qs + "\" hx-trigger=\"every 4s\" hx-swap=\"innerHTML\">" +
             (if cid != "" || method == "OPTIONS" { messages_table(items) } else { call_groups_table(items) }) + "</div>"
         web.html(layout("Messages", body, user))

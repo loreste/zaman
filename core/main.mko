@@ -475,6 +475,10 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_id ON captures(agent, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_status_id ON captures(agent, status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_ts_id ON captures(agent, ts_ms DESC, id DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
             "call_id TEXT NOT NULL," +
             "agent TEXT NOT NULL DEFAULT ''," +
@@ -538,6 +542,10 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_id ON captures(agent, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_status_id ON captures(agent, status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_ts_id ON captures(agent, ts_ms DESC, id DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
             "call_id TEXT NOT NULL," +
             "agent TEXT NOT NULL DEFAULT ''," +
