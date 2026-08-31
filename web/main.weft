@@ -747,6 +747,8 @@ fn call_groups_table(items) {
             mut last_method := ""
             mut last_status := 0
             mut invite_seen := false
+            mut answered_seen := false
+            mut failed_seen := false
             mut bye_seen := false
             mut cancel_seen := false
 
@@ -760,6 +762,8 @@ fn call_groups_table(items) {
                     ts_ms := x["ts_ms"] ?? 0
                     if kind == "response" { responses = responses + 1 } else { requests = requests + 1 }
                     if method == "INVITE" { invite_seen = true }
+                    if method == "INVITE" && kind == "response" && status >= 200 && status < 300 { answered_seen = true }
+                    if method == "INVITE" && kind == "response" && status >= 300 { failed_seen = true }
                     if method == "BYE" { bye_seen = true }
                     if method == "CANCEL" { cancel_seen = true }
                     if first_ts == 0 || ts_ms < first_ts { first_ts = ts_ms }
@@ -777,11 +781,17 @@ fn call_groups_table(items) {
             cid := h(call_id)
             mut state := "active"
             mut state_cls := "text-[#34d399] border-[rgba(52,211,153,.25)] bg-[rgba(52,211,153,.08)]"
-            if bye_seen {
+            if bye_seen && answered_seen {
                 state = "ended"
                 state_cls = "text-[#a1a1aa] border-[#27272a] bg-[#18181b]"
             } else if cancel_seen {
                 state = "canceled"
+                state_cls = "text-[#f87171] border-[rgba(248,113,113,.25)] bg-[rgba(248,113,113,.08)]"
+            } else if answered_seen {
+                state = "answered"
+                state_cls = "text-[#34d399] border-[rgba(52,211,153,.25)] bg-[rgba(52,211,153,.08)]"
+            } else if failed_seen {
+                state = "failed"
                 state_cls = "text-[#f87171] border-[rgba(248,113,113,.25)] bg-[rgba(248,113,113,.08)]"
             } else if invite_seen {
                 state = "ringing"
@@ -852,6 +862,10 @@ fn fetch_messages_ex(limit, call_id, transport, agent, method, src, from_number,
 }
 
 fn fetch_messages_time(limit, call_id, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms) {
+    fetch_messages_time_state(limit, call_id, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms, "")
+}
+
+fn fetch_messages_time_state(limit, call_id, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms, state) {
     mut path := core_base() + "/api/messages?limit=" + ("" + (limit))
     if call_id != "" { path = path + "&call_id=" + q(call_id) }
     if transport != "" { path = path + "&transport=" + q(transport) }
@@ -863,6 +877,7 @@ fn fetch_messages_time(limit, call_id, transport, agent, method, src, from_numbe
     if status != "" { path = path + "&status=" + q(status) }
     if since_ms != "" { path = path + "&since_ms=" + q(since_ms) }
     if until_ms != "" { path = path + "&until_ms=" + q(until_ms) }
+    if state != "" { path = path + "&state=" + q(state) }
     r := http.get(path, api_headers())
     if !r.ok { return [] }
     p := json.parse(r.value.body)
@@ -889,7 +904,14 @@ fn fetch_report() {
 }
 
 fn fetch_top_calls() {
-    r := http.get(core_base() + "/api/report/top-calls?limit=15", api_headers())
+    fetch_top_calls_filtered("", "")
+}
+
+fn fetch_top_calls_filtered(agent, state) {
+    mut path := core_base() + "/api/report/top-calls?limit=15"
+    if agent != "" { path = path + "&agent=" + q(agent) }
+    if state != "" { path = path + "&state=" + q(state) }
+    r := http.get(path, api_headers())
     if !r.ok { return [] }
     p := json.parse(r.value.body)
     if p.ok { p.value } else { [] }
@@ -953,9 +975,16 @@ fn fetch_realtime(window) {
 }
 
 fn fetch_active_calls_agent(limit, agent) {
+    fetch_active_calls_agent_state(limit, agent, "")
+}
+
+fn fetch_active_calls_agent_state(limit, agent, state) {
     mut path := core_base() + "/api/calls/active?limit=" + ("" + (limit))
     if agent != "" {
         path = path + "&agent=" + q(agent)
+    }
+    if state != "" {
+        path = path + "&state=" + q(state)
     }
     r := http.get(path, api_headers())
     if !r.ok { return [] }
@@ -1594,6 +1623,8 @@ fn endpoint_index(endpoints, addr) {
 
 fn call_state_summary(items) {
     mut invite_seen := false
+    mut answered_seen := false
+    mut failed_seen := false
     mut bye_seen := false
     mut cancel_seen := false
     mut last_status := 0
@@ -1610,6 +1641,8 @@ fn call_state_summary(items) {
         ts_ms := m["ts_ms"] ?? 0
         if kind == "response" { responses = responses + 1 } else { requests = requests + 1 }
         if method == "INVITE" { invite_seen = true }
+        if method == "INVITE" && kind == "response" && status >= 200 && status < 300 { answered_seen = true }
+        if method == "INVITE" && kind == "response" && status >= 300 { failed_seen = true }
         if method == "BYE" { bye_seen = true }
         if method == "CANCEL" { cancel_seen = true }
         if first_ts == 0 || ts_ms < first_ts { first_ts = ts_ms }
@@ -1620,11 +1653,23 @@ fn call_state_summary(items) {
         }
     }
     mut state := "active"
-    if bye_seen { state = "ended" }
+    if bye_seen && answered_seen { state = "ended" }
     else if cancel_seen { state = "canceled" }
+    else if answered_seen { state = "answered" }
+    else if failed_seen { state = "failed" }
     else if invite_seen { state = "ringing" }
     duration := if first_ts > 0 && last_ts > first_ts { (last_ts - first_ts) / 1000 } else { 0 }
     {"state": state, "duration": duration, "requests": requests, "responses": responses, "last_status": last_status, "last_method": last_method, "last_ts": last_ts}
+}
+
+fn call_state_select_options(selected) {
+    mut out := "<option value=\"\">any</option>"
+    states := ["active", "ringing", "answered", "ended", "failed", "canceled"]
+    for st in states {
+        sel := if st == selected { " selected" } else { "" }
+        out = out + "<option value=\"" + st + "\"" + sel + ">" + st + "</option>"
+    }
+    out
 }
 
 fn call_fact(label, value, sub, color) {
@@ -2218,12 +2263,16 @@ fn dashboard_live_feed_panel(method) {
     dashboard_live_feed_table(items) + "</div>"
 }
 
-fn active_calls_panel_agent(agent) {
-    active := fetch_active_calls_agent(100, agent)
+fn active_calls_panel_agent_state(agent, state) {
+    active := fetch_active_calls_agent_state(100, agent, state)
     if len(active) == 0 {
         return "<div class=\"card p-5 text-sm text-[#71717a]\">No active calls currently detected.</div>"
     }
     call_groups_table(active)
+}
+
+fn active_calls_panel_agent(agent) {
+    active_calls_panel_agent_state(agent, "")
 }
 
 fn active_calls_panel() {
@@ -3783,9 +3832,10 @@ fn main {
         from_number := req.query_map["from_number"] ?? ""
         to_number := req.query_map["to_number"] ?? ""
         status := req.query_map["status"] ?? ""
+        state := req.query_map["state"] ?? ""
         since_ms := req.query_map["since_ms"] ?? ""
         until_ms := req.query_map["until_ms"] ?? ""
-        items := fetch_messages_time(lim, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms)
+        items := fetch_messages_time_state(lim, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms, state)
         if cid != "" || method == "OPTIONS" {
             web.htmx(messages_table(items))
         } else {
@@ -3813,7 +3863,8 @@ fn main {
     app.get("/partials/active-calls", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
         agent := req.query_map["agent"] ?? ""
-        web.htmx(active_calls_panel_agent(agent))
+        state := req.query_map["state"] ?? ""
+        web.htmx(active_calls_panel_agent_state(agent, state))
     })
 
     app.get("/messages", fn(req) {
@@ -3827,10 +3878,11 @@ fn main {
         from_number := req.query_map["from_number"] ?? ""
         to_number := req.query_map["to_number"] ?? ""
         status := req.query_map["status"] ?? ""
+        state := req.query_map["state"] ?? ""
         since_ms := req.query_map["since_ms"] ?? ""
         until_ms := req.query_map["until_ms"] ?? ""
         list_limit := if cid != "" { 300 } else { 300 }
-        items := fetch_messages_time(list_limit, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms)
+        items := fetch_messages_time_state(list_limit, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms, state)
         cid_h := h(cid)
         agent_h := h(agent)
         nodes := fetch_nodes()
@@ -3842,11 +3894,12 @@ fn main {
         from_h := h(from_number)
         to_h := h(to_number)
         status_h := h(status)
+        state_h := h(state)
         since_h := h(since_ms)
         until_h := h(until_ms)
         // Active filter summary
         mut active := ""
-        if cid != "" || agent != "" || method != "" || transport != "" || src != "" || from_number != "" || to_number != "" || status != "" || since_ms != "" || until_ms != "" {
+        if cid != "" || agent != "" || method != "" || transport != "" || src != "" || from_number != "" || to_number != "" || status != "" || state != "" || since_ms != "" || until_ms != "" {
             mut tags := ""
             if cid != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">call-id: " + cid_h + "</span>" }
             if agent != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">agent: " + agent_h + "</span>" }
@@ -3856,6 +3909,7 @@ fn main {
             if from_number != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">from: " + from_h + "</span>" }
             if to_number != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">to: " + to_h + "</span>" }
             if status != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">status: " + status_h + "</span>" }
+            if state != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">state: " + state_h + "</span>" }
             if since_ms != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">from ts: " + since_h + "</span>" }
             if until_ms != "" { tags = tags + "<span class=\"inline-flex items-center gap-1 rounded-md bg-[#27272a] px-2 py-1 text-xs mono\">to ts: " + until_h + "</span>" }
             active = "<div class=\"flex flex-wrap items-center gap-2 mb-4\">" +
@@ -3872,6 +3926,7 @@ fn main {
         if from_number != "" { qs = qs + "&from_number=" + q(from_number) }
         if to_number != "" { qs = qs + "&to_number=" + q(to_number) }
         if status != "" { qs = qs + "&status=" + q(status) }
+        if state != "" { qs = qs + "&state=" + q(state) }
         if since_ms != "" { qs = qs + "&since_ms=" + q(since_ms) }
         if until_ms != "" { qs = qs + "&until_ms=" + q(until_ms) }
         // Saved searches sidebar
@@ -3893,6 +3948,7 @@ fn main {
                 if (sp["from_number"] ?? "") != "" { sq = sq + "&from_number=" + q(sp["from_number"]) }
                 if (sp["to_number"] ?? "") != "" { sq = sq + "&to_number=" + q(sp["to_number"]) }
                 if (sp["status"] ?? "") != "" { sq = sq + "&status=" + q(sp["status"]) }
+                if (sp["state"] ?? "") != "" { sq = sq + "&state=" + q(sp["state"]) }
                 if (sp["since_ms"] ?? "") != "" { sq = sq + "&since_ms=" + q(sp["since_ms"]) }
                 if (sp["until_ms"] ?? "") != "" { sq = sq + "&until_ms=" + q(sp["until_ms"]) }
                 slinks = slinks + "<div class=\"flex items-center justify-between gap-2 py-1.5\">" +
@@ -3906,7 +3962,7 @@ fn main {
         }
         // Save current search form (only show if filtering)
         mut save_form := ""
-        if cid != "" || agent != "" || method != "" || transport != "" || src != "" || from_number != "" || to_number != "" || status != "" || since_ms != "" || until_ms != "" {
+        if cid != "" || agent != "" || method != "" || transport != "" || src != "" || from_number != "" || to_number != "" || status != "" || state != "" || since_ms != "" || until_ms != "" {
             save_form = "<form method=\"post\" action=\"/searches/save\" class=\"flex gap-2 items-center mt-3\">" +
                 "<input type=\"hidden\" name=\"call_id\" value=\"" + cid_h + "\"/>" +
                 "<input type=\"hidden\" name=\"agent\" value=\"" + agent_h + "\"/>" +
@@ -3916,6 +3972,7 @@ fn main {
                 "<input type=\"hidden\" name=\"from_number\" value=\"" + from_h + "\"/>" +
                 "<input type=\"hidden\" name=\"to_number\" value=\"" + to_h + "\"/>" +
                 "<input type=\"hidden\" name=\"status\" value=\"" + status_h + "\"/>" +
+                "<input type=\"hidden\" name=\"state\" value=\"" + state_h + "\"/>" +
                 "<input type=\"hidden\" name=\"since_ms\" value=\"" + since_h + "\"/>" +
                 "<input type=\"hidden\" name=\"until_ms\" value=\"" + until_h + "\"/>" +
                 "<input name=\"name\" placeholder=\"Save this search as…\" required class=\"flex-1 rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-1.5 text-xs mono\"/>" +
@@ -3931,6 +3988,7 @@ fn main {
         if from_number != "" { export_parts = list_append(export_parts, "from_number=" + q(from_number)) }
         if to_number != "" { export_parts = list_append(export_parts, "to_number=" + q(to_number)) }
         if status != "" { export_parts = list_append(export_parts, "status=" + q(status)) }
+        if state != "" { export_parts = list_append(export_parts, "state=" + q(state)) }
         if since_ms != "" { export_parts = list_append(export_parts, "since_ms=" + q(since_ms)) }
         if until_ms != "" { export_parts = list_append(export_parts, "until_ms=" + q(until_ms)) }
         mut export_qs := ""
@@ -3945,7 +4003,16 @@ fn main {
             "<a href=\"/export/csv" + (if export_qs != "" { "?" + export_qs } else { "" }) + "\" class=\"rounded-lg px-2.5 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">CSV</a>" +
             (if cid != "" { "<a href=\"/pcap?call_id=" + q(cid) + "\" class=\"rounded-lg px-2.5 py-1.5 text-[11px] border border-[#1e1e22] text-[#71717a] hover:text-[#e4e4e7] transition-colors\">PCAP</a>" } else { "" }) +
             "</div>"
-        live_qs := if agent != "" { "?agent=" + q(agent) } else { "" }
+        mut live_parts := []
+        if agent != "" { live_parts = list_append(live_parts, "agent=" + q(agent)) }
+        if state != "" { live_parts = list_append(live_parts, "state=" + q(state)) }
+        mut live_qs := ""
+        mut lpi := 0
+        while lpi < len(live_parts) {
+            if lpi == 0 { live_qs = live_qs + "?" } else { live_qs = live_qs + "&" }
+            live_qs = live_qs + live_parts[lpi]
+            lpi = lpi + 1
+        }
         live_calls := "<div class=\"section mb-5\">" +
             "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Live Calls</div><span class=\"text-[10px] text-[#34d399]\">live</span></div>" +
             "<div id=\"messages-live-calls\" hx-get=\"/partials/active-calls" + live_qs + "\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
@@ -3975,6 +4042,8 @@ fn main {
             "<input name=\"to_number\" value=\"" + to_h + "\" placeholder=\"callee\" class=\"w-full " + inp + "\"/></div>" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Status</label>" +
             "<input name=\"status\" value=\"" + status_h + "\" placeholder=\"408\" class=\"w-full " + inp + "\"/></div>" +
+            "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">State</label>" +
+            "<select name=\"state\" class=\"w-full " + inp + "\">" + call_state_select_options(state) + "</select></div>" +
             time_filter_fields("messages-time", since_h, until_h, inp) +
             "<div class=\"flex items-end gap-2\">" +
             "<button class=\"flex-1 rounded-lg px-3 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Search</button></div>" +
@@ -4247,13 +4316,24 @@ fn main {
         if user == null { return login_redirect() }
         cid := req.query_map["call_id"] ?? ""
         agent := req.query_map["agent"] ?? ""
-        tops := fetch_top_calls()
+        state := req.query_map["state"] ?? ""
+        tops := fetch_top_calls_filtered(agent, state)
         cid_h := h(cid)
         agent_h := h(agent)
+        state_h := h(state)
         nodes := fetch_nodes()
         names := load_node_names()
         node_opts := node_select_options(nodes, names, agent)
-        calls_agent_qs := if agent != "" { "?agent=" + q(agent) } else { "" }
+        mut calls_live_parts := []
+        if agent != "" { calls_live_parts = list_append(calls_live_parts, "agent=" + q(agent)) }
+        if state != "" { calls_live_parts = list_append(calls_live_parts, "state=" + q(state)) }
+        mut calls_agent_qs := ""
+        mut clp := 0
+        while clp < len(calls_live_parts) {
+            if clp == 0 { calls_agent_qs = calls_agent_qs + "?" } else { calls_agent_qs = calls_agent_qs + "&" }
+            calls_agent_qs = calls_agent_qs + calls_live_parts[clp]
+            clp = clp + 1
+        }
         rt1 := fetch_realtime_agent(1, agent)
         rt5 := fetch_realtime_agent(5, agent)
         failures_5m := (rt5["resp_4xx"] ?? 0) + (rt5["resp_5xx"] ?? 0)
@@ -4280,7 +4360,7 @@ fn main {
             calls_recent_list(tops, cid, true) + "</div>"
         body := "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
             "<div><h1 class=\"text-2xl font-bold\">Calls</h1><p class=\"text-sm text-[#71717a] mt-1\">Investigate SIP dialogs by Call-ID, endpoint, status, and message flow.</p></div>" +
-            "<div class=\"flex items-center gap-2\"><form method=\"get\" action=\"/calls\"><select name=\"agent\" class=\"rounded-md bg-[#0a0a0c] border border-[#27272a] px-2 py-1.5 text-xs\" onchange=\"this.form.submit()\">" + node_opts + "</select></form><a href=\"/messages?method=OPTIONS\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">SIP OPTIONS</a>" +
+            "<div class=\"flex items-center gap-2\"><form method=\"get\" action=\"/calls\" hx-boost=\"true\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\"><select name=\"agent\" class=\"rounded-md bg-[#0a0a0c] border border-[#27272a] px-2 py-1.5 text-xs\" onchange=\"this.form.submit()\">" + node_opts + "</select><input type=\"hidden\" name=\"state\" value=\"" + state_h + "\"/></form><form method=\"get\" action=\"/calls\" hx-boost=\"true\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\"><input type=\"hidden\" name=\"agent\" value=\"" + agent_h + "\"/><select name=\"state\" class=\"rounded-md bg-[#0a0a0c] border border-[#27272a] px-2 py-1.5 text-xs\" onchange=\"this.form.submit()\">" + call_state_select_options(state) + "</select></form><a href=\"/messages?method=OPTIONS\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">SIP OPTIONS</a>" +
             "<a href=\"/ip\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">IP history</a></div></div>" +
             call_kpis +
             "<form class=\"card p-4 mb-5\" action=\"/ladder\" method=\"get\" hx-boost=\"true\" hx-target=\"main\" hx-select=\"main\" hx-push-url=\"true\">" +
@@ -4288,6 +4368,7 @@ fn main {
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Paste or enter Call-ID\" class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono\"/></div>" +
             (if agent != "" { "<input type=\"hidden\" name=\"agent\" value=\"" + agent_h + "\"/>" } else { "" }) +
+            (if state != "" { "<input type=\"hidden\" name=\"state\" value=\"" + state_h + "\"/>" } else { "" }) +
             "<button class=\"rounded-lg px-4 py-2 text-sm bg-[#27272a] text-[#e4e4e7] hover:bg-[#3f3f46] transition-colors\">Show ladder</button>" +
             "<a href=\"/calls\" class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7] text-center\">Recent</a></div></form>" +
             "<div id=\"live-calls\" hx-get=\"/partials/live-calls\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"><div class=\"card p-5 mb-5 text-sm text-[#71717a]\">Loading realtime calls...</div></div>" +
@@ -5272,11 +5353,12 @@ fn main {
     transport := req.query_map["transport"] ?? ""
     src := req.query_map["ip"] ?? req.query_map["src"] ?? ""
         from_number := req.query_map["from_number"] ?? ""
-        to_number := req.query_map["to_number"] ?? ""
-        status := req.query_map["status"] ?? ""
-        since_ms := req.query_map["since_ms"] ?? ""
-        until_ms := req.query_map["until_ms"] ?? ""
-        messages := fetch_messages_time(500, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms)
+    to_number := req.query_map["to_number"] ?? ""
+    status := req.query_map["status"] ?? ""
+    state := req.query_map["state"] ?? ""
+    since_ms := req.query_map["since_ms"] ?? ""
+    until_ms := req.query_map["until_ms"] ?? ""
+    messages := fetch_messages_time_state(500, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms, state)
         body := json.stringify(messages)
         {"status": 200, "headers": {"Content-Type": "application/json", "Content-Disposition": "attachment; filename=\"zaman-export.json\""}, "body": body}
     })
@@ -5296,10 +5378,11 @@ fn main {
         "transport": web.form_get(req, "transport", ""),
             "ip": web.form_get(req, "ip", ""),
             "src": web.form_get(req, "src", ""),
-            "from_number": web.form_get(req, "from_number", ""),
-            "to_number": web.form_get(req, "to_number", ""),
-            "status": web.form_get(req, "status", ""),
-            "since_ms": web.form_get(req, "since_ms", ""),
+        "from_number": web.form_get(req, "from_number", ""),
+        "to_number": web.form_get(req, "to_number", ""),
+        "status": web.form_get(req, "status", ""),
+        "state": web.form_get(req, "state", ""),
+        "since_ms": web.form_get(req, "since_ms", ""),
             "until_ms": web.form_get(req, "until_ms", "")
         }
         create_search(name, user["username"] ?? "", params)
@@ -5635,9 +5718,10 @@ app.get("/alerts", fn(req) {
         from_number := req.query_map["from_number"] ?? ""
         to_number := req.query_map["to_number"] ?? ""
         status := req.query_map["status"] ?? ""
+        state := req.query_map["state"] ?? ""
         since_ms := req.query_map["since_ms"] ?? ""
         until_ms := req.query_map["until_ms"] ?? ""
-        messages := fetch_messages_time(500, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms)
+        messages := fetch_messages_time_state(500, cid, transport, agent, method, src, from_number, to_number, status, since_ms, until_ms, state)
         audit(user["username"] ?? "", "export_csv", ("" + (len(messages))) + " messages")
         csv := messages_to_csv(messages)
         {"status": 200, "headers": {"Content-Type": "text/csv", "Content-Disposition": "attachment; filename=\"zaman-export.csv\""}, "body": csv}

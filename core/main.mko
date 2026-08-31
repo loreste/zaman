@@ -510,6 +510,7 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_state_lookup ON call_state(open, answered, last_status, last_method, invite_id, call_id)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -589,6 +590,7 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_state_lookup ON call_state(open, answered, last_status, last_method, invite_id, call_id)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -883,11 +885,61 @@ fn ch_writer(ch: chan[string], metrics: CMap) -> int {
 }
 
 fn db_messages_json(limit: int, call_id_filter: string, transport_filter: string) -> string {
-    return db_messages_json_full(limit, call_id_filter, transport_filter, "", "", "", "", "", "", 0, 0)
+    return db_messages_json_full(limit, call_id_filter, transport_filter, "", "", "", "", "", "", 0, 0, "")
+}
+
+fn call_state_filter_sql(state_filter: string) -> string {
+    if str_eq(state_filter, "") {
+        return ""
+    }
+    if str_eq(state_filter, "active") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 1)"
+    }
+    if str_eq(state_filter, "ringing") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 1 AND answered = 0 AND invite_id > 0)"
+    }
+    if str_eq(state_filter, "answered") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE answered = 1)"
+    }
+    if str_eq(state_filter, "ended") || str_eq(state_filter, "completed") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 0 AND answered = 1)"
+    }
+    if str_eq(state_filter, "failed") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 0 AND answered = 0 AND last_status >= 300)"
+    }
+    if str_eq(state_filter, "canceled") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 0 AND last_method = 'CANCEL')"
+    }
+    return ""
+}
+
+fn call_state_where_sql(state_filter: string) -> string {
+    if str_eq(state_filter, "") {
+        return ""
+    }
+    if str_eq(state_filter, "active") {
+        return " AND open = 1"
+    }
+    if str_eq(state_filter, "ringing") {
+        return " AND open = 1 AND answered = 0 AND invite_id > 0"
+    }
+    if str_eq(state_filter, "answered") {
+        return " AND answered = 1"
+    }
+    if str_eq(state_filter, "ended") || str_eq(state_filter, "completed") {
+        return " AND open = 0 AND answered = 1"
+    }
+    if str_eq(state_filter, "failed") {
+        return " AND open = 0 AND answered = 0 AND last_status >= 300"
+    }
+    if str_eq(state_filter, "canceled") {
+        return " AND open = 0 AND last_method = 'CANCEL'"
+    }
+    return ""
 }
 
 // ClickHouse query helper: returns JSON array from a SELECT that includes record_json.
-fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int) -> string {
+fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int, state_filter: string) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 50
@@ -956,7 +1008,7 @@ fn ch_messages_json(limit: int, call_id_filter: string, transport_filter: string
     return out + "]"
 }
 
-fn db_messages_json_full(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int) -> string {
+fn db_messages_json_full(limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int, state_filter: string) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 50
@@ -999,6 +1051,7 @@ fn db_messages_json_full(limit: int, call_id_filter: string, transport_filter: s
     if until_ms > 0 {
         sql = sql + " AND ts_ms <= " + string(until_ms)
     }
+    sql = sql + call_state_filter_sql(state_filter)
     sql = sql + " ORDER BY id DESC LIMIT " + string(lim)
     let rows = sql_query_rows(db, sql, [])
     let mut out = "["
@@ -1145,7 +1198,7 @@ fn db_report_daily_json(limit: int) -> string {
     return out
 }
 
-fn db_report_top_calls_json(limit: int) -> string {
+fn db_report_top_calls_json(limit: int, agent_filter: string, state_filter: string) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 20
@@ -1157,13 +1210,14 @@ fn db_report_top_calls_json(limit: int) -> string {
     if sql_ok(db) == 0 {
         return "[]"
     }
-    let sample = lim * 400
+    let mut where_sql = " WHERE call_id IS NOT NULL AND call_id != ''"
+    if not str_eq(agent_filter, "") {
+        where_sql = where_sql + " AND agent = " + sql_quote(agent_filter)
+    }
+    where_sql = where_sql + call_state_where_sql(state_filter)
     let rows = sql_query_rows(db,
-        "SELECT call_id, COUNT(*) AS c, MIN(ts_ms) AS t0, MAX(ts_ms) AS t1 FROM (" +
-        "SELECT call_id, ts_ms FROM captures WHERE call_id IS NOT NULL AND call_id != '' " +
-        "AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO') " +
-        "ORDER BY id DESC LIMIT " + string(sample) + ") recent " +
-        "GROUP BY call_id ORDER BY t1 DESC LIMIT " + string(lim),
+        "SELECT call_id, (SELECT COUNT(*) FROM captures c WHERE c.call_id = call_state.call_id) AS c, first_ts_ms, last_ts_ms, open, answered, last_status, last_method " +
+        "FROM call_state" + where_sql + " ORDER BY last_ts_ms DESC LIMIT " + string(lim),
         [])
     let mut out = "["
     let mut first = 1
@@ -1173,13 +1227,18 @@ fn db_report_top_calls_json(limit: int) -> string {
             let c = sql_rows_int(rows, 1)
             let t0 = sql_rows_int(rows, 2)
             let t1 = sql_rows_int(rows, 3)
+            let open_v = sql_rows_int(rows, 4)
+            let answered_v = sql_rows_int(rows, 5)
+            let last_status = sql_rows_int(rows, 6)
+            let last_method = sql_rows_str(rows, 7)
+            let state = if open_v == 1 && answered_v == 0 { "ringing" } else if open_v == 1 && answered_v == 1 { "answered" } else if str_eq(last_method, "CANCEL") { "canceled" } else if answered_v == 1 { "ended" } else if last_status >= 300 { "failed" } else { "active" }
             if first == 1 {
                 first = 0
             } else {
                 out = out + ","
             }
             out = out + "{\"call_id\":\"" + jesc(cid) + "\",\"messages\":" + string(c) +
-                ",\"ts_first\":" + string(t0) + ",\"ts_last\":" + string(t1) + "}"
+                ",\"ts_first\":" + string(t0) + ",\"ts_last\":" + string(t1) + ",\"state\":\"" + state + "\"}"
         }
         let _ = sql_rows_close(rows)
     }
@@ -1765,7 +1824,7 @@ fn db_realtime_json(window_min: int, agent_filter: string) -> string {
         "}"
 }
 
-fn db_active_calls_json(limit: int, agent_filter: string) -> string {
+fn db_active_calls_json(limit: int, agent_filter: string, state_filter: string) -> string {
     let mut lim = limit
     if lim <= 0 {
         lim = 50
@@ -1777,9 +1836,15 @@ fn db_active_calls_json(limit: int, agent_filter: string) -> string {
     if sql_ok(db) == 0 {
         return "[]"
     }
-    let agent_where = if str_eq(agent_filter, "") { "" } else { " AND agent = " + sql_quote(agent_filter) }
+    let mut where_sql = " WHERE open = 1"
+    if not str_eq(state_filter, "") {
+        where_sql = " WHERE 1=1" + call_state_where_sql(state_filter)
+    }
+    if not str_eq(agent_filter, "") {
+        where_sql = where_sql + " AND agent = " + sql_quote(agent_filter)
+    }
     let rows = sql_query_rows(db,
-        "SELECT last_id, record_json FROM call_state WHERE open = 1" + agent_where +
+        "SELECT last_id, record_json FROM call_state" + where_sql +
         " ORDER BY last_ts_ms DESC LIMIT " + string(lim),
         [])
     let mut out = "["
@@ -2917,13 +2982,13 @@ fn messages_json(store: CMap, limit: int, call_id_filter: string) -> string {
 fn messages_json_ex(store: CMap, limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int) -> string {
     // ClickHouse path
     if db_is_clickhouse() == 1 {
-        let from_ch = ch_messages_json(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms)
+        let from_ch = ch_messages_json(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms, "")
         if not str_eq(from_ch, "[]") {
             return from_ch
         }
     }
     // Prefer durable DB when available
-    let from_db = db_messages_json_full(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms)
+    let from_db = db_messages_json_full(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms, "")
     if not str_eq(from_db, "[]") {
         return from_db
     }
@@ -3408,12 +3473,13 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let statusq = if status_i > 0 { string(status_i) } else { "" }
             let since_ms = parse_int_or(query_get(q, "since_ms"), 0)
             let until_ms = parse_int_or(query_get(q, "until_ms"), 0)
+            let stateq = query_get(q, "state")
             let body = if db_is_clickhouse() == 1 {
-                ch_messages_json(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms)
-            } else if str_eq(agent, "") && str_eq(method, "") && str_eq(src, "") && str_eq(fromq, "") && str_eq(toq, "") && str_eq(statusq, "") && since_ms <= 0 && until_ms <= 0 {
+                ch_messages_json(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms, stateq)
+            } else if str_eq(agent, "") && str_eq(method, "") && str_eq(src, "") && str_eq(fromq, "") && str_eq(toq, "") && str_eq(statusq, "") && str_eq(stateq, "") && since_ms <= 0 && until_ms <= 0 {
                 messages_json_ex(store, lim, cid, tr, "", "", "", "", "", "", 0, 0)
             } else {
-                db_messages_json_full(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms)
+                db_messages_json_full(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms, stateq)
             }
             let _ = http_respond_json(c, 200, body)
         } else if str_has_prefix(path, "/api/messages/") {
@@ -3432,7 +3498,9 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let _ = http_respond_json(c, 200, db_report_daily_json(lim))
         } else if str_eq(path, "/api/report/top-calls") {
             let lim = parse_int_or(query_get(q, "limit"), 20)
-            let _ = http_respond_json(c, 200, db_report_top_calls_json(lim))
+            let agent = query_get(q, "agent")
+            let state = query_get(q, "state")
+            let _ = http_respond_json(c, 200, db_report_top_calls_json(lim, agent, state))
         } else if str_eq(path, "/api/report/response-codes") {
             let _ = http_respond_json(c, 200, db_report_response_codes_json())
         } else if str_eq(path, "/api/report/top-talkers") {
@@ -3452,7 +3520,8 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
         } else if str_eq(path, "/api/calls/active") {
             let lim = parse_int_or(query_get(q, "limit"), 50)
             let agent = query_get(q, "agent")
-            let _ = http_respond_json(c, 200, db_active_calls_json(lim, agent))
+            let state = query_get(q, "state")
+            let _ = http_respond_json(c, 200, db_active_calls_json(lim, agent, state))
         } else if str_eq(path, "/api/nodes") {
             let _ = http_respond_json(c, 200, db_node_health_json())
         } else if str_eq(path, "/api/sla/agents") {
