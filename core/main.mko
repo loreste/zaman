@@ -471,6 +471,9 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent ON captures(agent)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_from ON captures(from_h)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_to ON captures(to_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -511,6 +514,9 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent ON captures(agent)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_from ON captures(from_h)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_to ON captures(to_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -1019,11 +1025,13 @@ fn db_report_top_calls_json(limit: int) -> string {
     if sql_ok(db) == 0 {
         return "[]"
     }
+    let sample = lim * 400
     let rows = sql_query_rows(db,
-        "SELECT call_id, COUNT(*) AS c, MIN(ts_ms) AS t0, MAX(ts_ms) AS t1 " +
-        "FROM captures WHERE call_id IS NOT NULL AND call_id != '' " +
+        "SELECT call_id, COUNT(*) AS c, MIN(ts_ms) AS t0, MAX(ts_ms) AS t1 FROM (" +
+        "SELECT call_id, ts_ms FROM captures WHERE call_id IS NOT NULL AND call_id != '' " +
         "AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO') " +
-        "GROUP BY call_id ORDER BY c DESC LIMIT " + string(lim),
+        "ORDER BY id DESC LIMIT " + string(sample) + ") recent " +
+        "GROUP BY call_id ORDER BY t1 DESC LIMIT " + string(lim),
         [])
     let mut out = "["
     let mut first = 1
@@ -1338,11 +1346,11 @@ fn db_node_health_json() -> string {
     let five_min = now - 300000
     let rows = sql_query_rows(db,
         "SELECT agent, COUNT(*) AS total, " +
-        "SUM(CASE WHEN ts_ms > " + string(five_min) + " THEN 1 ELSE 0 END) AS recent, " +
+        "COUNT(*) AS recent, " +
         "MAX(ts_ms) AS last_seen, " +
         "COUNT(DISTINCT call_id) AS calls, " +
         "SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors " +
-        "FROM captures WHERE agent IS NOT NULL AND agent != '' " +
+        "FROM captures WHERE ts_ms > " + string(five_min) + " AND agent IS NOT NULL AND agent != '' " +
         "GROUP BY agent ORDER BY recent DESC, total DESC", [])
     let mut out = "["
     let mut first = 1

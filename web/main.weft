@@ -4103,14 +4103,11 @@ fn main {
 
         m := fetch_metrics()
         rt := fetch_realtime(5)
-        rep := fetch_report()
-        rcodes := fetch_response_codes()
         anomalies := fetch_anomalies()
 
         mut methods := m["methods"]
         if methods == null { methods = {} }
-        mut transports := rep["transports"]
-        if transports == null { transports = {} }
+        mut transports := {"UDP": 0, "HEP3": n(m, "hep_udp"), "HEP3/TCP": n(m, "hep_tcp"), "HEP3/TLS": n(m, "hep_tls")}
 
         up_ms := n(m, "uptime_ms")
         up_h := up_ms / 3600000
@@ -4207,13 +4204,16 @@ fn main {
         if method_rows == "" { method_rows = "<tr><td colspan=\"3\" class=\"py-6 text-center text-sm text-[#71717a]\">No SIP methods captured.</td></tr>" }
 
         mut rcode_rows := ""
-        for rc in rcodes {
-            st := rc["status"] ?? 0
-            cnt := rc["count"] ?? 0
-            cls := if st >= 200 && st < 300 { "text-[#34d399]" } else if st >= 400 { "text-[#f87171]" } else { "text-[#fbbf24]" }
-            rcode_rows = rcode_rows + "<tr><td class=\"py-2 px-3 mono font-semibold " + cls + "\">" + ("" + (st)) + "</td><td class=\"py-2 px-3 mono text-right\">" + ("" + (cnt)) + "</td></tr>"
+        if (rt["resp_2xx"] ?? 0) > 0 {
+            rcode_rows = rcode_rows + "<tr><td class=\"py-2 px-3 mono font-semibold text-[#34d399]\">2xx</td><td class=\"py-2 px-3 mono text-right\">" + ("" + (rt["resp_2xx"] ?? 0)) + "</td></tr>"
         }
-        if rcode_rows == "" { rcode_rows = "<tr><td colspan=\"2\" class=\"py-6 text-center text-sm text-[#71717a]\">No responses captured.</td></tr>" }
+        if (rt["resp_4xx"] ?? 0) > 0 {
+            rcode_rows = rcode_rows + "<tr><td class=\"py-2 px-3 mono font-semibold text-[#f87171]\">4xx</td><td class=\"py-2 px-3 mono text-right\">" + ("" + (rt["resp_4xx"] ?? 0)) + "</td></tr>"
+        }
+        if (rt["resp_5xx"] ?? 0) > 0 {
+            rcode_rows = rcode_rows + "<tr><td class=\"py-2 px-3 mono font-semibold text-[#f87171]\">5xx</td><td class=\"py-2 px-3 mono text-right\">" + ("" + (rt["resp_5xx"] ?? 0)) + "</td></tr>"
+        }
+        if rcode_rows == "" { rcode_rows = "<tr><td colspan=\"2\" class=\"py-6 text-center text-sm text-[#71717a]\">No responses in the live window.</td></tr>" }
         th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
         breakdown := "<div class=\"grid xl:grid-cols-[1.2fr_.8fr] gap-4 mb-5\">" +
             "<div class=\"card p-4 overflow-x-auto\"><div class=\"section-title\">Traffic Charts</div><div id=\"metrics-traffic-charts\" hx-get=\"/partials/charts?window=5\" hx-trigger=\"load\" hx-swap=\"innerHTML\"><div class=\"p-6 text-sm text-[#71717a]\">Loading traffic charts...</div></div></div>" +
