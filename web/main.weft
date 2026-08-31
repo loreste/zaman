@@ -2227,23 +2227,25 @@ fn live_calls_panel() {
 }
 
 fn live_calls_panel_filtered(agent, state, src, dst, from_number, to_number) {
-    rt := fetch_realtime_agent(1, agent)
-    rt5 := fetch_realtime_agent(5, agent)
     items := fetch_active_calls_agent_state_filtered(120, agent, state, src, dst, from_number, to_number)
-    cps := per_second_label(rt["invites"] ?? 0, 60)
-    msgps := per_second_label(rt["total"] ?? 0, 60)
-    err := (rt5["resp_4xx"] ?? 0) + (rt5["resp_5xx"] ?? 0)
     "<div class=\"card p-4 mb-5\">" +
     "<div class=\"flex flex-wrap items-center justify-between gap-3 mb-3\">" +
-    "<div><div class=\"section-title mb-1\">Realtime Calls</div><div class=\"text-xs text-[#71717a]\">Live call attempts, concurrency, failures, and recent dialogs. Refreshes every 5 seconds.</div></div>" +
+    "<div><div class=\"section-title mb-1\">Realtime Calls</div><div class=\"text-xs text-[#71717a]\">Filtered live dialogs from the call-state summary. Refreshes every 5 seconds.</div></div>" +
     "<span class=\"flex items-center gap-1.5 text-[10px] text-[#34d399]\"><span class=\"w-1.5 h-1.5 rounded-full bg-[#34d399] animate-pulse\"></span>live</span></div>" +
-    "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3 mb-4\">" +
-    call_fact("CPS", cps, "INVITE/s, last 1m", "#34d399") +
-    call_fact("Concurrent", "" + (rt["active_calls"] ?? 0), "open dialogs in the live window", "#f472b6") +
+    call_groups_table(items) + "</div>"
+}
+
+fn calls_kpis_panel(agent) {
+    rt1 := fetch_realtime_agent(1, agent)
+    rt5 := fetch_realtime_agent(5, agent)
+    failures_5m := (rt5["resp_4xx"] ?? 0) + (rt5["resp_5xx"] ?? 0)
+    "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3 mb-5\">" +
+    call_fact("Concurrent calls", "" + (rt1["active_calls"] ?? rt5["active_calls"] ?? 0), "open dialogs in the live window", "#f472b6") +
+    call_fact("CPS", per_second_label(rt1["invites"] ?? 0, 60), "INVITE requests per second", "#34d399") +
+    call_fact("Message rate", per_second_label(rt1["total"] ?? 0, 60) + "/s", "all captures, last 1m", "#38bdf8") +
     call_fact("Attempts", "" + (rt5["invites"] ?? 0), "INVITEs, last 5m", "#fbbf24") +
-    call_fact("Message rate", msgps + "/s", "all captures, last 1m", "#38bdf8") +
-    call_fact("Failures", "" + (err), "4xx/5xx, last 5m", if err > 0 { "#f87171" } else { "#34d399" }) +
-    "</div>" + call_groups_table(items) + "</div>"
+    call_fact("Failures", "" + (failures_5m), "4xx/5xx, last 5m", if failures_5m > 0 { "#f87171" } else { "#34d399" }) +
+    "</div>"
 }
 
 fn live_feed_panel() {
@@ -3904,6 +3906,12 @@ fn main {
         web.htmx(live_calls_panel_filtered(agent, state, src, dst, from_number, to_number))
     })
 
+    app.get("/partials/call-kpis", fn(req) {
+        if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
+        agent := req.query_map["agent"] ?? ""
+        web.htmx(calls_kpis_panel(agent))
+    })
+
     app.get("/partials/overview-realtime", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
         agent := req.query_map["agent"] ?? ""
@@ -4406,16 +4414,7 @@ fn main {
             calls_agent_qs = calls_agent_qs + calls_live_parts[clp]
             clp = clp + 1
         }
-        rt1 := fetch_realtime_agent(1, agent)
-        rt5 := fetch_realtime_agent(5, agent)
-        failures_5m := (rt5["resp_4xx"] ?? 0) + (rt5["resp_5xx"] ?? 0)
-        call_kpis := "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3 mb-5\">" +
-            call_fact("Concurrent calls", "" + (rt1["active_calls"] ?? rt5["active_calls"] ?? 0), "open dialogs in the live window", "#f472b6") +
-            call_fact("CPS", per_second_label(rt1["invites"] ?? 0, 60), "INVITE requests per second", "#34d399") +
-            call_fact("Message rate", per_second_label(rt1["total"] ?? 0, 60) + "/s", "all captures, last 1m", "#38bdf8") +
-            call_fact("Attempts", "" + (rt5["invites"] ?? 0), "INVITEs, last 5m", "#fbbf24") +
-            call_fact("Failures", "" + (failures_5m), "4xx/5xx, last 5m", if failures_5m > 0 { "#f87171" } else { "#34d399" }) +
-            "</div>"
+        call_kpis := "<div id=\"call-kpis\" hx-get=\"/partials/call-kpis" + (if agent != "" { "?agent=" + q(agent) } else { "" }) + "\" hx-trigger=\"load, every 3s\" hx-swap=\"innerHTML\">" + calls_kpis_panel(agent) + "</div>"
         mut active_filters := ""
         if cid != "" || agent != "" || state != "" || src != "" || dst != "" || from_number != "" || to_number != "" {
             mut tags := ""
