@@ -2223,9 +2223,13 @@ fn call_media_panel(call_id, all_items, sip_count) {
 }
 
 fn live_calls_panel() {
-    rt := fetch_realtime(1)
-    rt5 := fetch_realtime(5)
-    items := call_messages_only(fetch_messages_ex(120, "", "", "", "", "", "", "", ""))
+    live_calls_panel_filtered("", "", "", "", "", "")
+}
+
+fn live_calls_panel_filtered(agent, state, src, dst, from_number, to_number) {
+    rt := fetch_realtime_agent(1, agent)
+    rt5 := fetch_realtime_agent(5, agent)
+    items := fetch_active_calls_agent_state_filtered(120, agent, state, src, dst, from_number, to_number)
     cps := per_second_label(rt["invites"] ?? 0, 60)
     msgps := per_second_label(rt["total"] ?? 0, 60)
     err := (rt5["resp_4xx"] ?? 0) + (rt5["resp_5xx"] ?? 0)
@@ -3891,7 +3895,13 @@ fn main {
 
     app.get("/partials/live-calls", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
-        web.htmx(live_calls_panel())
+        agent := req.query_map["agent"] ?? ""
+        state := req.query_map["state"] ?? ""
+        src := req.query_map["src"] ?? ""
+        dst := req.query_map["dst"] ?? ""
+        from_number := req.query_map["from_number"] ?? ""
+        to_number := req.query_map["to_number"] ?? ""
+        web.htmx(live_calls_panel_filtered(agent, state, src, dst, from_number, to_number))
     })
 
     app.get("/partials/overview-realtime", fn(req) {
@@ -4452,7 +4462,7 @@ fn main {
             (if agent != "" { "<input type=\"hidden\" name=\"agent\" value=\"" + agent_h + "\"/>" } else { "" }) +
             (if state != "" { "<input type=\"hidden\" name=\"state\" value=\"" + state_h + "\"/>" } else { "" }) +
             "</div></form>" +
-            "<div id=\"live-calls\" hx-get=\"/partials/live-calls\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"><div class=\"card p-5 mb-5 text-sm text-[#71717a]\">Loading realtime calls...</div></div>" +
+            "<div id=\"live-calls\" hx-get=\"/partials/live-calls" + calls_agent_qs + "\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"><div class=\"card p-5 mb-5 text-sm text-[#71717a]\">Loading realtime calls...</div></div>" +
             "<div class=\"section\"><div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Active Calls</div><span class=\"text-[10px] text-[#52525b]\">live sample, refreshes every 3s</span></div>" +
             "<div id=\"active-calls\" hx-get=\"/partials/active-calls" + calls_agent_qs + "\" hx-trigger=\"load, every 3s\" hx-swap=\"innerHTML\"><div class=\"card p-5 text-sm text-[#71717a]\">Loading active calls...</div></div></div>" +
             "<div class=\"grid xl:grid-cols-[360px_1fr] gap-5\">" +
