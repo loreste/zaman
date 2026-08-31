@@ -2648,15 +2648,21 @@ fn audit_path() {
 fn audit(user, action, detail) {
     dir := env.get("ZAMAN_DATA_DIR") ?? "data"
     if !fs.exists(dir) { fs.mkdir(dir) }
-    entry := json.stringify({"ts": time.unix(), "user": user, "action": action, "detail": detail})
+    now := time.unix()
+    entry := json.stringify({"ts": now, "user": user, "action": action, "detail": detail})
     fs.append(audit_path(), entry + "\n")
-    // Rotate: keep last 10000 lines
+    if (now % 300) == 0 {
+        audit_rotate(10000)
+    }
+}
+
+fn audit_rotate(max_lines) {
     r := fs.read(audit_path())
     if r.ok {
         lines := str.split(r.value, "\n")
-        if len(lines) > 10000 {
+        if len(lines) > max_lines {
             mut kept := ""
-            mut i := len(lines) - 10000
+            mut i := len(lines) - max_lines
             while i < len(lines) {
                 if lines[i] != "" { kept = kept + lines[i] + "\n" }
                 i = i + 1
@@ -2679,6 +2685,9 @@ fn syslog_send(msg) {
 }
 
 fn load_audit(limit) {
+    mut lim := limit
+    if lim <= 0 { lim = 100 }
+    if lim > 500 { lim = 500 }
     r := fs.read(audit_path())
     if !r.ok { return [] }
     lines := str.split(r.value, "\n")
@@ -2686,7 +2695,7 @@ fn load_audit(limit) {
     // Read from end (most recent first)
     mut i := len(lines) - 1
     mut count := 0
-    while i >= 0 && count < limit {
+    while i >= 0 && count < lim {
         line := lines[i]
         if line != "" {
             p := json.parse(line)
@@ -5710,7 +5719,8 @@ app.get("/alerts", fn(req) {
         user := get_user(req, token_secret)
         if user == null { return login_redirect() }
         if !has_role(user, "admin") { return web.status(403) }
-        entries := load_audit(100)
+        limit := int.parse(req.query_map["limit"] ?? "100").unwrap_or(100)
+        entries := load_audit(limit)
         th := "text-[10px] uppercase tracking-wider text-[#52525b] font-semibold"
 
         // Group by action type for summary
@@ -5771,9 +5781,9 @@ app.get("/alerts", fn(req) {
         reg_fail_max := targets["reg_fail_max"] ?? 3
         fivexx_max := targets["fivexx_max"] ?? 2
 
-        overview := "<div id=\"sla-overview\" hx-get=\"/partials/sla-overview\" hx-trigger=\"load\" hx-swap=\"innerHTML\">" +
+        overview := "<div id=\"sla-overview\" hx-get=\"/partials/sla-overview\" hx-trigger=\"load, every 10s\" hx-swap=\"innerHTML\">" +
             "<div class=\"card p-6 mb-5 text-sm text-[#71717a]\">Loading SLA overview...</div></div>"
-        sla_details := "<div id=\"sla-details\" hx-get=\"/partials/sla-details\" hx-trigger=\"load\" hx-swap=\"innerHTML\">" +
+        sla_details := "<div id=\"sla-details\" hx-get=\"/partials/sla-details\" hx-trigger=\"load, every 30s\" hx-swap=\"innerHTML\">" +
             "<div class=\"card p-6 text-sm text-[#71717a]\">Loading agent and destination SLA...</div></div>"
         targets_form := "<div class=\"section\">" +
             "<div class=\"section-title\">SLA targets</div>" +
