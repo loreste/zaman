@@ -1568,7 +1568,7 @@ fn overview_body_v2(user) {
 
     active_overview := "<div class=\"section\">" +
         "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Active Calls</div><a href=\"/calls\" class=\"text-[11px] text-[#a78bfa] hover:underline\">Calls</a></div>" +
-        "<div id=\"overview-active-calls\" hx-get=\"/partials/active-calls\" hx-include=\"#overview-agent\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
+        "<div id=\"overview-active-calls\" hx-get=\"/partials/active-calls\" hx-include=\"#overview-agent\" hx-trigger=\"load, every 2s\" hx-swap=\"innerHTML\">" +
         active_calls_panel() + "</div></div>"
 
     notifications := "<div class=\"section mb-0\">" +
@@ -1579,7 +1579,7 @@ fn overview_body_v2(user) {
     "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
     "<div><h1 class=\"text-2xl font-bold\">Overview</h1><p class=\"text-sm text-[#71717a] mt-1\">Live SIP/HEP operations, site history, capture health, and notifications.</p></div>" +
     "<div class=\"flex items-center gap-3\"><select id=\"overview-agent\" name=\"agent\" class=\"rounded-md bg-[#0a0a0c] border border-[#27272a] px-2 py-1 text-xs\" onchange=\"htmx.ajax('GET','/partials/overview-realtime',{target:'#overview-realtime',swap:'innerHTML',values:{agent:this.value}});htmx.ajax('GET','/partials/active-calls',{target:'#overview-active-calls',swap:'innerHTML',values:{agent:this.value}})\">" + node_opts + "</select><div class=\"text-[10px] text-[#3f3f46] mono\">uptime " + ("" + (up_s)) + "s</div></div></div>" +
-    "<div id=\"overview-realtime\" hx-get=\"/partials/overview-realtime\" hx-include=\"#overview-agent\" hx-trigger=\"every 5s\" hx-swap=\"innerHTML\">" + overview_realtime_panel() + "</div>" +
+    "<div id=\"overview-realtime\" hx-get=\"/partials/overview-realtime\" hx-include=\"#overview-agent\" hx-trigger=\"load, every 2s\" hx-swap=\"innerHTML\">" + overview_realtime_panel() + "</div>" +
     "<div class=\"grid xl:grid-cols-[1.2fr_.8fr] gap-4 mb-5\">" + nodes_panel + "<div class=\"space-y-4\">" + method_mix + quick + "</div></div>" +
     "<div class=\"grid xl:grid-cols-[1fr_360px] gap-4 mb-5\">" + live + sites_panel + "</div>" +
     active_overview +
