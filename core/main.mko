@@ -474,6 +474,7 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_invite_outcome ON captures(call_id, method, kind, status) WHERE call_id IS NOT NULL AND call_id != '' AND (method = 'INVITE' OR method LIKE '% INVITE')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_id ON captures(agent, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
@@ -554,6 +555,7 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_invite_outcome ON captures(call_id, method, kind, status) WHERE call_id IS NOT NULL AND call_id != '' AND (method = 'INVITE' OR method LIKE '% INVITE')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_id ON captures(agent, id DESC)")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
@@ -678,12 +680,15 @@ fn db_update_call_state(db: SqlDB, id: int, record_json: string) -> int {
     if str_eq(call_id, "") {
         return 1
     }
+    let is_invite = str_eq(method, "INVITE") || str_contains(method, " INVITE")
+    let is_bye = str_eq(method, "BYE") || str_contains(method, " BYE")
+    let is_cancel = str_eq(method, "CANCEL") || str_contains(method, " CANCEL")
 
     let mut open_v = 1
     let mut answered_v = 0
     let mut invite_id = 0
     let mut relevant = 0
-    if str_eq(method, "INVITE") {
+    if is_invite {
         if str_eq(kind, "request") {
             relevant = 1
             open_v = 1
@@ -696,7 +701,7 @@ fn db_update_call_state(db: SqlDB, id: int, record_json: string) -> int {
             relevant = 1
             open_v = 0
         }
-    } else if (str_eq(method, "BYE") || str_eq(method, "CANCEL")) && str_eq(kind, "request") {
+    } else if (is_bye || is_cancel) && str_eq(kind, "request") {
         relevant = 1
         open_v = 0
     }
@@ -720,6 +725,13 @@ fn db_update_call_state(db: SqlDB, id: int, record_json: string) -> int {
         "to_h=CASE WHEN excluded.to_h != '' THEN excluded.to_h ELSE call_state.to_h END," +
         "record_json=excluded.record_json"
     let _ = sql_exec_plain(db, up)
+    if is_invite && str_eq(kind, "response") && status >= 200 && status < 300 {
+        let _ = sql_exec_plain(db, "UPDATE call_state SET answered = 1, open = 1, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = 'INVITE', last_status = " + string(status) + ", record_json = " + sql_quote(record_json) + " WHERE call_id = " + sql_quote(call_id))
+    } else if is_invite && str_eq(kind, "response") && status >= 300 {
+        let _ = sql_exec_plain(db, "UPDATE call_state SET open = 0, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = 'INVITE', last_status = " + string(status) + ", record_json = " + sql_quote(record_json) + " WHERE call_id = " + sql_quote(call_id) + " AND answered = 0")
+    } else if (is_bye || is_cancel) && str_eq(kind, "request") {
+        let _ = sql_exec_plain(db, "UPDATE call_state SET open = 0, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = " + sql_quote(method) + ", last_status = " + string(status) + ", record_json = " + sql_quote(record_json) + " WHERE call_id = " + sql_quote(call_id))
+    }
     return 1
 }
 
@@ -1581,11 +1593,25 @@ fn db_report_kpi_fast_json() -> string {
     }
     let cutoff = now_ms() - window_min * 60 * 1000
     let cs = string(cutoff)
-    let total_messages = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs, [])
-    let total_calls = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE first_ts_ms > " + cs, [])
-    let total_invites = total_calls
-    let answered = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE first_ts_ms > " + cs + " AND answered = 1", [])
-    let failed = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE first_ts_ms > " + cs + " AND answered = 0 AND open = 0 AND last_status >= 300", [])
+    let rows = sql_query_rows(db,
+        "SELECT COUNT(*) AS total_invites, " +
+        "SUM(CASE WHEN answered = 1 THEN 1 ELSE 0 END) AS answered, " +
+        "SUM(CASE WHEN answered = 0 AND open = 0 AND last_status >= 300 THEN 1 ELSE 0 END) AS failed " +
+        "FROM call_state WHERE first_ts_ms > " + cs,
+        [])
+    let mut total_invites = 0
+    let mut answered = 0
+    let mut failed = 0
+    if sql_rows_ok(rows) == 1 {
+        if sql_rows_next(rows) == 1 {
+            total_invites = sql_rows_int(rows, 0)
+            answered = sql_rows_int(rows, 1)
+            failed = sql_rows_int(rows, 2)
+        }
+        let _ = sql_rows_close(rows)
+    }
+    let total_calls = total_invites
+    let total_messages = total_invites
     let total_registers = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND kind = 'request'", [])
     let reg_ok = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND status >= 200 AND status < 300", [])
     let reg_fail = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND status >= 400", [])
