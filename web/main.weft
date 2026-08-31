@@ -913,11 +913,34 @@ fn fetch_daily() {
     if p.ok { p.value } else { [] }
 }
 
-fn fetch_realtime(window) {
-    r := http.get(core_base() + "/api/realtime?window=" + ("" + (window)), api_headers())
+fn fetch_realtime_agent(window, agent) {
+    mut path := core_base() + "/api/realtime?window=" + ("" + (window))
+    if agent != "" {
+        path = path + "&agent=" + q(agent)
+    }
+    r := http.get(path, api_headers())
     if !r.ok { return {} }
     p := json.parse(r.value.body)
     if p.ok { p.value } else { {} }
+}
+
+fn fetch_realtime(window) {
+    fetch_realtime_agent(window, "")
+}
+
+fn fetch_active_calls_agent(limit, agent) {
+    mut path := core_base() + "/api/calls/active?limit=" + ("" + (limit))
+    if agent != "" {
+        path = path + "&agent=" + q(agent)
+    }
+    r := http.get(path, api_headers())
+    if !r.ok { return [] }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { [] }
+}
+
+fn fetch_active_calls(limit) {
+    fetch_active_calls_agent(limit, "")
 }
 
 fn fetch_nodes() {
@@ -1300,18 +1323,23 @@ fn overview_metric_card(label, value, sub, color) {
     "<div class=\"text-[10px] text-[#71717a] mt-1 leading-snug\">" + h(sub) + "</div></div>"
 }
 
-fn overview_realtime_panel() {
-    rt := fetch_realtime(1)
+fn overview_realtime_panel_agent(agent) {
+    rt := fetch_realtime_agent(1, agent)
     failures := (rt["resp_4xx"] ?? 0) + (rt["resp_5xx"] ?? 0)
     fail_color := if failures > 0 { "#f87171" } else { "#34d399" }
+    scope := if agent == "" { "all servers" } else { "selected server" }
     "<div class=\"grid grid-cols-2 xl:grid-cols-3 gap-3 mb-5\">" +
-    overview_metric_card("Concurrent calls", "" + (rt["active_calls"] ?? 0), "open dialogs in the live 1m window", "#f472b6") +
-    overview_metric_card("CPS", per_second_label(rt["invites"] ?? 0, 60), "distinct INVITE Call-IDs per second", "#34d399") +
-    overview_metric_card("Message rate", per_second_label(rt["total"] ?? 0, 60) + "/s", "all captures per second, last 1m", "#38bdf8") +
-    overview_metric_card("Call attempts", "" + (rt["invites"] ?? 0), "distinct INVITEs in the last 1m", "#fbbf24") +
+    overview_metric_card("Concurrent calls", "" + (rt["active_calls"] ?? 0), "open dialogs, " + scope, "#f472b6") +
+    overview_metric_card("CPS", per_second_label(rt["invites"] ?? 0, 60), "distinct INVITE Call-IDs per second, " + scope, "#34d399") +
+    overview_metric_card("Message rate", per_second_label(rt["total"] ?? 0, 60) + "/s", "all captures per second, " + scope, "#38bdf8") +
+    overview_metric_card("Call attempts", "" + (rt["invites"] ?? 0), "distinct INVITEs in the last 1m, " + scope, "#fbbf24") +
     overview_metric_card("Failures", "" + (failures), "4xx/5xx in the last 1m", fail_color) +
     overview_metric_card("ASR", "" + (rt["asr"] ?? 0) + "%", "answer rate, last 1m", if (rt["asr"] ?? 0) >= 70 { "#34d399" } else if (rt["asr"] ?? 0) >= 40 { "#fbbf24" } else { "#f87171" }) +
     "</div>"
+}
+
+fn overview_realtime_panel() {
+    overview_realtime_panel_agent("")
 }
 
 fn overview_body_v2(user) {
@@ -1351,6 +1379,13 @@ fn overview_body_v2(user) {
             "<span class=\"flex items-center gap-3 text-[11px] text-[#71717a] shrink-0\"><span><span class=\"mono text-[#e4e4e7]\">" + ("" + (recent)) + "</span> 5m</span><span><span class=\"mono text-[#e4e4e7]\">" + ("" + (calls)) + "</span> calls</span></span></a>"
     }
     if node_rows == "" { node_rows = "<div class=\"px-3 py-6 text-sm text-[#71717a]\">No nodes reporting yet.</div>" }
+    mut node_opts := "<option value=\"\">All servers</option>"
+    for nd2 in nodes {
+        raw_agent2 := nd2["agent"] ?? ""
+        if raw_agent2 != "" {
+            node_opts = node_opts + "<option value=\"" + h(raw_agent2) + "\">" + h(node_display_name(raw_agent2, names)) + "</option>"
+        }
+    }
 
     health_color := if red > 0 { "#f87171" } else if yellow > 0 { "#fbbf24" } else { "#34d399" }
     health_text := if red > 0 { "offline node attention needed" } else if yellow > 0 { "stale nodes present" } else { "all reporting nodes healthy" }
@@ -1440,7 +1475,7 @@ fn overview_body_v2(user) {
 
     active_overview := "<div class=\"section\">" +
         "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Active Calls</div><a href=\"/calls\" class=\"text-[11px] text-[#a78bfa] hover:underline\">Calls</a></div>" +
-        "<div id=\"overview-active-calls\" hx-get=\"/partials/active-calls\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
+        "<div id=\"overview-active-calls\" hx-get=\"/partials/active-calls\" hx-include=\"#overview-agent\" hx-trigger=\"every 3s\" hx-swap=\"innerHTML\">" +
         active_calls_panel() + "</div></div>"
 
     notifications := "<div class=\"section mb-0\">" +
@@ -1450,8 +1485,8 @@ fn overview_body_v2(user) {
 
     "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
     "<div><h1 class=\"text-2xl font-bold\">Overview</h1><p class=\"text-sm text-[#71717a] mt-1\">Live SIP/HEP operations, site history, capture health, and notifications.</p></div>" +
-    "<div class=\"text-[10px] text-[#3f3f46] mono\">uptime " + ("" + (up_s)) + "s</div></div>" +
-    "<div id=\"overview-realtime\" hx-get=\"/partials/overview-realtime\" hx-trigger=\"every 5s\" hx-swap=\"innerHTML\">" + overview_realtime_panel() + "</div>" +
+    "<div class=\"flex items-center gap-3\"><select id=\"overview-agent\" name=\"agent\" class=\"rounded-md bg-[#0a0a0c] border border-[#27272a] px-2 py-1 text-xs\" onchange=\"htmx.ajax('GET','/partials/overview-realtime',{target:'#overview-realtime',swap:'innerHTML',values:{agent:this.value}});htmx.ajax('GET','/partials/active-calls',{target:'#overview-active-calls',swap:'innerHTML',values:{agent:this.value}})\">" + node_opts + "</select><div class=\"text-[10px] text-[#3f3f46] mono\">uptime " + ("" + (up_s)) + "s</div></div></div>" +
+    "<div id=\"overview-realtime\" hx-get=\"/partials/overview-realtime\" hx-include=\"#overview-agent\" hx-trigger=\"every 5s\" hx-swap=\"innerHTML\">" + overview_realtime_panel() + "</div>" +
     "<div class=\"grid xl:grid-cols-[1.2fr_.8fr] gap-4 mb-5\">" + nodes_panel + "<div class=\"space-y-4\">" + method_mix + quick + "</div></div>" +
     "<div class=\"grid xl:grid-cols-[1fr_360px] gap-4 mb-5\">" + live + sites_panel + "</div>" +
     active_overview +
@@ -2119,42 +2154,16 @@ fn dashboard_live_feed_panel(method) {
     dashboard_live_feed_table(items) + "</div>"
 }
 
-fn active_calls_panel() {
-    items := call_messages_only(fetch_messages_ex(220, "", "", "", "", "", "", "", ""))
-    mut active := []
-    mut seen := []
-    for m in items {
-        cid := m["call_id"] ?? ""
-        if cid == "" { continue }
-        mut exists := false
-        for s in seen {
-            if s == cid { exists = true }
-        }
-        if exists { continue }
-        seen = list_append(seen, cid)
-        mut has_invite := false
-        mut ended := false
-        for x in items {
-            if (x["call_id"] ?? "") != cid { continue }
-            method := x["method"] ?? ""
-            kind := x["kind"] ?? ""
-            status := x["status"] ?? 0
-            if method == "INVITE" && kind == "request" { has_invite = true }
-            if method == "BYE" || method == "CANCEL" { ended = true }
-            if method == "INVITE" && kind == "response" && status >= 300 { ended = true }
-        }
-        if has_invite && !ended {
-            for x in items {
-                if (x["call_id"] ?? "") == cid {
-                    active = list_append(active, x)
-                }
-            }
-        }
-    }
+fn active_calls_panel_agent(agent) {
+    active := fetch_active_calls_agent(100, agent)
     if len(active) == 0 {
-        return "<div class=\"card p-5 text-sm text-[#71717a]\">No active calls in the current live sample.</div>"
+        return "<div class=\"card p-5 text-sm text-[#71717a]\">No active calls currently detected.</div>"
     }
     call_groups_table(active)
+}
+
+fn active_calls_panel() {
+    active_calls_panel_agent("")
 }
 
 fn ladder_html(call_id) {
@@ -3728,7 +3737,8 @@ fn main {
 
     app.get("/partials/overview-realtime", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
-        web.htmx(overview_realtime_panel())
+        agent := req.query_map["agent"] ?? ""
+        web.htmx(overview_realtime_panel_agent(agent))
     })
 
     app.get("/partials/live-feed", fn(req) {
@@ -3739,7 +3749,8 @@ fn main {
 
     app.get("/partials/active-calls", fn(req) {
         if auth_enabled() && get_user(req, token_secret) == null { return web.htmx("") }
-        web.htmx(active_calls_panel())
+        agent := req.query_map["agent"] ?? ""
+        web.htmx(active_calls_panel_agent(agent))
     })
 
     app.get("/messages", fn(req) {
@@ -4194,7 +4205,7 @@ fn main {
             "<div class=\"flex gap-2\"><a href=\"/messages?method=OPTIONS\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">SIP OPTIONS</a>" +
             "<a href=\"/ip\" class=\"rounded-md border border-[#27272a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-[#e4e4e7] hover:border-[#3f3f46]\">IP history</a></div></div>" +
             call_kpis +
-            "<form class=\"card p-4 mb-5\" action=\"/calls\" method=\"get\">" +
+        "<form class=\"card p-4 mb-5\" action=\"/ladder\" method=\"get\">" +
             "<div class=\"grid md:grid-cols-[1fr_auto_auto] gap-3 items-end\">" +
             "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">Call-ID</label>" +
             "<input name=\"call_id\" value=\"" + cid_h + "\" placeholder=\"Paste or enter Call-ID\" class=\"w-full rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono\"/></div>" +

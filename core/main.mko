@@ -474,6 +474,26 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
+            "call_id TEXT NOT NULL," +
+            "agent TEXT NOT NULL DEFAULT ''," +
+            "first_ts_ms BIGINT NOT NULL," +
+            "last_ts_ms BIGINT NOT NULL," +
+            "last_id BIGINT NOT NULL DEFAULT 0," +
+            "invite_id BIGINT NOT NULL DEFAULT 0," +
+            "last_method TEXT," +
+            "last_status INTEGER DEFAULT 0," +
+            "answered INTEGER DEFAULT 0," +
+            "open INTEGER DEFAULT 1," +
+            "src TEXT," +
+            "dst TEXT," +
+            "from_h TEXT," +
+            "to_h TEXT," +
+            "record_json TEXT NOT NULL DEFAULT ''," +
+            "PRIMARY KEY(call_id, agent)" +
+            ")")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_open_agent_last ON call_state(open, agent, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -517,6 +537,26 @@ fn db_init() -> int {
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
         let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
+            "call_id TEXT NOT NULL," +
+            "agent TEXT NOT NULL DEFAULT ''," +
+            "first_ts_ms INTEGER NOT NULL," +
+            "last_ts_ms INTEGER NOT NULL," +
+            "last_id INTEGER NOT NULL DEFAULT 0," +
+            "invite_id INTEGER NOT NULL DEFAULT 0," +
+            "last_method TEXT," +
+            "last_status INTEGER DEFAULT 0," +
+            "answered INTEGER DEFAULT 0," +
+            "open INTEGER DEFAULT 1," +
+            "src TEXT," +
+            "dst TEXT," +
+            "from_h TEXT," +
+            "to_h TEXT," +
+            "record_json TEXT NOT NULL DEFAULT ''," +
+            "PRIMARY KEY(call_id, agent)" +
+            ")")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_open_agent_last ON call_state(open, agent, last_ts_ms DESC)")
         let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
             "day TEXT NOT NULL," +
             "method TEXT NOT NULL," +
@@ -590,6 +630,65 @@ fn ch_insert_json(record_json: string) -> int {
     return 1
 }
 
+fn db_update_call_state(db: SqlDB, id: int, record_json: string) -> int {
+    let ts_ms = json_get_int(record_json, "ts_ms")
+    let status = json_get_int(record_json, "status")
+    let src = json_get_string(record_json, "src")
+    let dst = json_get_string(record_json, "dst")
+    let agent = json_get_string(record_json, "agent")
+    let kind = json_get_string(record_json, "kind")
+    let method = json_get_string(record_json, "method")
+    let call_id = json_get_string(record_json, "call_id")
+    let from_h = json_get_string(record_json, "from")
+    let to_h = json_get_string(record_json, "to")
+    if str_eq(call_id, "") {
+        return 1
+    }
+
+    let mut open_v = 1
+    let mut answered_v = 0
+    let mut invite_id = 0
+    let mut relevant = 0
+    if str_eq(method, "INVITE") {
+        if str_eq(kind, "request") {
+            relevant = 1
+            open_v = 1
+            invite_id = id
+        } else if status >= 200 && status < 300 {
+            relevant = 1
+            open_v = 1
+            answered_v = 1
+        } else if status >= 300 {
+            relevant = 1
+            open_v = 0
+        }
+    } else if (str_eq(method, "BYE") || str_eq(method, "CANCEL")) && str_eq(kind, "request") {
+        relevant = 1
+        open_v = 0
+    }
+    if relevant == 0 {
+        return 1
+    }
+
+    let up = "INSERT INTO call_state(call_id, agent, first_ts_ms, last_ts_ms, last_id, invite_id, last_method, last_status, answered, open, src, dst, from_h, to_h, record_json) VALUES (" +
+        sql_quote(call_id) + "," + sql_quote(agent) + "," + string(ts_ms) + "," + string(ts_ms) + "," + string(id) + "," + string(invite_id) + "," +
+        sql_quote(method) + "," + string(status) + "," + string(answered_v) + "," + string(open_v) + "," +
+        sql_quote(src) + "," + sql_quote(dst) + "," + sql_quote(from_h) + "," + sql_quote(to_h) + "," + sql_quote(record_json) + ") " +
+        "ON CONFLICT(call_id, agent) DO UPDATE SET " +
+        "last_ts_ms=excluded.last_ts_ms,last_id=excluded.last_id," +
+        "invite_id=CASE WHEN excluded.invite_id > 0 THEN excluded.invite_id ELSE call_state.invite_id END," +
+        "last_method=excluded.last_method,last_status=excluded.last_status," +
+        "answered=CASE WHEN excluded.answered = 1 THEN 1 ELSE call_state.answered END," +
+        "open=CASE WHEN excluded.last_method = 'INVITE' AND excluded.last_status >= 300 AND call_state.answered = 1 THEN call_state.open ELSE excluded.open END," +
+        "src=CASE WHEN excluded.src != '' THEN excluded.src ELSE call_state.src END," +
+        "dst=CASE WHEN excluded.dst != '' THEN excluded.dst ELSE call_state.dst END," +
+        "from_h=CASE WHEN excluded.from_h != '' THEN excluded.from_h ELSE call_state.from_h END," +
+        "to_h=CASE WHEN excluded.to_h != '' THEN excluded.to_h ELSE call_state.to_h END," +
+        "record_json=excluded.record_json"
+    let _ = sql_exec_plain(db, up)
+    return 1
+}
+
 // Insert one capture from record JSON on an already-open connection.
 // Uses chan[string] (not multi-field struct) — large struct channels have
 // triggered libmalloc free-of-unallocated under multi-worker stress.
@@ -652,6 +751,7 @@ fn db_insert_json(db: SqlDB, record_json: string) -> int {
     let _ = sql_exec_str4(db,
         "UPDATE captures SET hep_node=?, hep_cid=?, raw_b64=?, record_json=? WHERE id=" + id_s,
         hep_node, hep_cid, raw_b64, record_json)
+    let _ = db_update_call_state(db, id, record_json)
     // daily rollup
     let day = day_key(ts_ms)
     let mut m = method
@@ -1278,7 +1378,7 @@ fn db_report_agents_json() -> string {
 
 
 // Real-time dashboard: windowed stats for the last N minutes.
-fn db_realtime_json(window_min: int) -> string {
+fn db_realtime_json(window_min: int, agent_filter: string) -> string {
     let mut win = window_min
     if win <= 0 {
         win = 5
@@ -1289,42 +1389,38 @@ fn db_realtime_json(window_min: int) -> string {
         return "{}"
     }
     let cs = string(cutoff)
-    let total = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs, [])
-    let invite_msgs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'", [])
-    let invites = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'INVITE' AND kind = 'request'", [])
-    let byes = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'BYE' AND kind = 'request'", [])
-    let regs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND kind = 'request'", [])
-    let opts = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'OPTIONS' AND kind = 'request'", [])
-    let resp_2xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 200 AND status < 300", [])
-    let resp_4xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 400 AND status < 500", [])
-    let resp_5xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 500", [])
-    let err_401 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 401", [])
-    let err_403 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 403", [])
-    let err_404 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 404", [])
-    let err_486 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 486", [])
-    let err_503 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 503", [])
-    // Live-window open dialogs: distinct INVITE Call-IDs in this realtime window
-    // with no later BYE/CANCEL or final failed INVITE response.
-    let active = sql_query_int(db,
-        "SELECT COUNT(DISTINCT inv.call_id) FROM captures inv " +
-        "WHERE inv.ts_ms > " + cs + " AND inv.call_id IS NOT NULL AND inv.call_id != '' " +
-        "AND inv.method = 'INVITE' AND inv.kind = 'request' " +
-        "AND NOT EXISTS (SELECT 1 FROM captures term WHERE term.call_id = inv.call_id AND term.ts_ms >= inv.ts_ms " +
-        "AND ((term.method = 'BYE' AND term.kind = 'request') OR (term.method = 'CANCEL' AND term.kind = 'request') " +
-        "OR (term.method = 'INVITE' AND term.kind = 'response' AND term.status >= 300)))", [])
+    let agent_where = if str_eq(agent_filter, "") { "" } else { " AND agent = " + sql_quote(agent_filter) }
+    let c1_agent_where = if str_eq(agent_filter, "") { "" } else { " AND c1.agent = " + sql_quote(agent_filter) + " " }
+    let c2_agent_where = if str_eq(agent_filter, "") { "" } else { " AND c2.agent = " + sql_quote(agent_filter) }
+    let total = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + agent_where, [])
+    let invite_msgs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'" + agent_where, [])
+    let invites = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'INVITE' AND kind = 'request'" + agent_where, [])
+    let byes = sql_query_int(db, "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND call_id IS NOT NULL AND call_id != '' AND method = 'BYE' AND kind = 'request'" + agent_where, [])
+    let regs = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'REGISTER' AND kind = 'request'" + agent_where, [])
+    let opts = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND method = 'OPTIONS' AND kind = 'request'" + agent_where, [])
+    let resp_2xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 200 AND status < 300" + agent_where, [])
+    let resp_4xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 400 AND status < 500" + agent_where, [])
+    let resp_5xx = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status >= 500" + agent_where, [])
+    let err_401 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 401" + agent_where, [])
+    let err_403 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 403" + agent_where, [])
+    let err_404 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 404" + agent_where, [])
+    let err_486 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 486" + agent_where, [])
+    let err_503 = sql_query_int(db, "SELECT COUNT(*) FROM captures WHERE ts_ms > " + cs + " AND status = 503" + agent_where, [])
+    let active = sql_query_int(db, "SELECT COUNT(*) FROM call_state WHERE open = 1" + agent_where, [])
     // Unique agents seen in window
     let agents_active = sql_query_int(db,
-        "SELECT COUNT(DISTINCT agent) FROM captures WHERE ts_ms > " + cs, [])
+        "SELECT COUNT(DISTINCT agent) FROM captures WHERE ts_ms > " + cs + agent_where, [])
     // Unique source IPs in window
     let sources = sql_query_int(db,
-        "SELECT COUNT(DISTINCT src) FROM captures WHERE ts_ms > " + cs, [])
+        "SELECT COUNT(DISTINCT src) FROM captures WHERE ts_ms > " + cs + agent_where, [])
     // ASR for window
     let win_inv = sql_query_int(db,
-        "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'", [])
+        "SELECT COUNT(DISTINCT call_id) FROM captures WHERE ts_ms > " + cs + " AND method = 'INVITE' AND kind = 'request'" + agent_where, [])
     let win_ans = sql_query_int(db,
         "SELECT COUNT(DISTINCT c1.call_id) FROM captures c1 " +
         "WHERE c1.ts_ms > " + cs + " AND c1.method = 'INVITE' AND c1.kind = 'request' " +
-        "AND EXISTS (SELECT 1 FROM captures c2 WHERE c2.call_id = c1.call_id AND c2.status >= 200 AND c2.status < 300)", [])
+        c1_agent_where +
+        "AND EXISTS (SELECT 1 FROM captures c2 WHERE c2.call_id = c1.call_id AND c2.status >= 200 AND c2.status < 300" + c2_agent_where + ")", [])
     let mut win_asr = 0
     if win_inv > 0 {
         win_asr = win_ans * 100 / win_inv
@@ -1337,6 +1433,7 @@ fn db_realtime_json(window_min: int) -> string {
     }
     let _ = sql_close(db)
     return "{\"window_min\":" + string(win) +
+        ",\"agent\":\"" + jesc(agent_filter) + "\"" +
         ",\"total\":" + string(total) +
         ",\"invites\":" + string(invites) +
         ",\"invite_messages\":" + string(invite_msgs) +
@@ -1357,6 +1454,47 @@ fn db_realtime_json(window_min: int) -> string {
         ",\"asr\":" + string(win_asr) +
         ",\"err_rate\":" + string(err_rate) +
         "}"
+}
+
+fn db_active_calls_json(limit: int, agent_filter: string) -> string {
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 50
+    }
+    if lim > 200 {
+        lim = 200
+    }
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        return "[]"
+    }
+    let agent_where = if str_eq(agent_filter, "") { "" } else { " AND agent = " + sql_quote(agent_filter) }
+    let rows = sql_query_rows(db,
+        "SELECT last_id, record_json FROM call_state WHERE open = 1" + agent_where +
+        " ORDER BY last_ts_ms DESC LIMIT " + string(lim),
+        [])
+    let mut out = "["
+    let mut first = 1
+    if sql_rows_ok(rows) == 1 {
+        while sql_rows_next(rows) == 1 {
+            let id = sql_rows_int(rows, 0)
+            let rec = sql_rows_str(rows, 1)
+            if str_eq(rec, "") {
+                continue
+            }
+            let with_id = "{\"id\":" + string(id) + "," + rec[1:]
+            if first == 1 {
+                first = 0
+            } else {
+                out = out + ","
+            }
+            out = out + with_id
+        }
+        let _ = sql_rows_close(rows)
+    }
+    out = out + "]"
+    let _ = sql_close(db)
+    return out
 }
 
 // Per-node health: each HEP agent with message rate and last-seen.
@@ -3000,7 +3138,12 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let _ = http_respond_json(c, 200, db_report_agents_json())
         } else if str_eq(path, "/api/realtime") {
             let win = parse_int_or(query_get(q, "window"), 5)
-            let _ = http_respond_json(c, 200, db_realtime_json(win))
+            let agent = query_get(q, "agent")
+            let _ = http_respond_json(c, 200, db_realtime_json(win, agent))
+        } else if str_eq(path, "/api/calls/active") {
+            let lim = parse_int_or(query_get(q, "limit"), 50)
+            let agent = query_get(q, "agent")
+            let _ = http_respond_json(c, 200, db_active_calls_json(lim, agent))
         } else if str_eq(path, "/api/nodes") {
             let _ = http_respond_json(c, 200, db_node_health_json())
         } else if str_eq(path, "/api/sla/agents") {
@@ -3055,7 +3198,7 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
             let htot = string(cmap_i(metrics, "hep_total"))
             // Fetch KPI + realtime for ASR/NER/active_calls/err_rate
             let kpi = db_report_kpi_json()
-            let rt = db_realtime_json(5)
+            let rt = db_realtime_json(5, "")
             let asr_v = string(json_get_int(kpi, "asr"))
             let ner_v = string(json_get_int(kpi, "ner"))
             let active = string(json_get_int(rt, "active_calls"))
