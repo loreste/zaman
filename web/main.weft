@@ -1356,7 +1356,8 @@ fn overview_body_v2(user) {
     health_text := if red > 0 { "offline node attention needed" } else if yellow > 0 { "stale nodes present" } else { "all reporting nodes healthy" }
     db_ok := n(m, "db_ok")
     db_err := n(m, "db_err")
-    db_color := if db_err > 0 { "#f87171" } else { "#34d399" }
+    db_drop := n(m, "db_drop")
+    db_color := if db_err + db_drop > 0 { "#f87171" } else { "#34d399" }
     parse_err := n(m, "parse_err")
     hep_err := n(m, "hep_err")
     error_color := if parse_err + hep_err > 0 { "#fbbf24" } else { "#34d399" }
@@ -1377,7 +1378,7 @@ fn overview_body_v2(user) {
         overview_metric_card("System health", "" + (green) + "/" + (len(nodes)), health_text, health_color) +
         overview_metric_card("Requests", "" + (n(m, "requests")), "parsed SIP requests", "#e4e4e7") +
         overview_metric_card("Responses", "" + (n(m, "responses")), "parsed SIP responses", "#e4e4e7") +
-        overview_metric_card("Database writes", "" + (db_ok), "writer errors: " + ("" + (db_err)), db_color) +
+    overview_metric_card("Database writes", "" + (db_ok), "errors " + ("" + (db_err)) + " · dropped " + ("" + (db_drop)), db_color) +
         overview_metric_card("Parser health", "" + (parse_err + hep_err), "parse + HEP errors", error_color) +
         "</div>"
 
@@ -4117,6 +4118,7 @@ fn main {
         total_msgs := n(m, "msgs_total")
         total_hep := n(m, "hep_total")
         db_err := n(m, "db_err")
+        db_drop := n(m, "db_drop")
         parse_err := n(m, "parse_err")
         hep_err := n(m, "hep_err")
         hep_deny := n(m, "hep_deny")
@@ -4124,7 +4126,7 @@ fn main {
         active_calls := rt["active_calls"] ?? 0
         asr := rt["asr"] ?? 0
         err_window := (rt["resp_4xx"] ?? 0) + (rt["resp_5xx"] ?? 0)
-        ingest_issue_count := db_err + parse_err + hep_err + hep_deny
+        ingest_issue_count := db_err + db_drop + parse_err + hep_err + hep_deny
         asr_color := if asr >= 70 { "#34d399" } else if asr >= 40 { "#fbbf24" } else { "#f87171" }
         health_label := if ingest_issue_count == 0 { "clean" } else if ingest_issue_count < 10 { "watch" } else { "attention" }
         health_cls := if ingest_issue_count == 0 { "text-[#34d399] border-[rgba(52,211,153,.28)] bg-[rgba(52,211,153,.08)]" } else if ingest_issue_count < 10 { "text-[#fbbf24] border-[rgba(251,191,36,.28)] bg-[rgba(251,191,36,.08)]" } else { "text-[#f87171] border-[rgba(248,113,113,.28)] bg-[rgba(248,113,113,.08)]" }
@@ -4168,7 +4170,7 @@ fn main {
             stat_card("Total messages", total_msgs, "stored") +
             stat_card("Requests", n(m, "requests"), "SIP requests") +
             stat_card("Responses", n(m, "responses"), "SIP responses") +
-            stat_card("DB writes", n(m, "db_ok"), "errors " + ("" + (db_err))) +
+            stat_card("DB writes", n(m, "db_ok"), "errors " + ("" + (db_err)) + " · dropped " + ("" + (db_drop))) +
             stat_card("Parse errors", parse_err, "malformed SIP") +
             stat_card("HEP errors", hep_err, "decode failures") +
             stat_card("HEP denied", hep_deny, "ACL blocked") +

@@ -678,8 +678,8 @@ fn db_insert_json(db: SqlDB, record_json: string) -> int {
 }
 
 // Enqueue record JSON for the single kicked DB writer (blocks if channel full).
-fn db_enqueue(ch: chan[string], record_json: string) {
-    let _ = ch.send(record_json)
+fn db_enqueue(ch: chan[string], record_json: string) -> int {
+    return ch.send_timeout(record_json, 25)
 }
 
 // Single-writer job: owns one SQLite connection, drains via range.
@@ -1752,18 +1752,20 @@ fn sip_dir_label(is_req: int) -> string {
 
 fn make_record(
     db_ch: chan[string],
+    metrics: CMap,
     src: string,
     transport: string,
     msg: string,
     agent: string
 ) -> string {
-    return make_record_ex(db_ch, src, "", transport, msg, agent, "sip", now_ms(), 0, "", "")
+    return make_record_ex(db_ch, metrics, src, "", transport, msg, agent, "sip", now_ms(), 0, "", "")
 }
 
 // Full capture record — used for native SIP and HEPv3.
 // Parses + builds JSON on the capture path; durable insert is kicked via db_ch.
 fn make_record_ex(
     db_ch: chan[string],
+    metrics: CMap,
     src: string,
     dst: string,
     transport: string,
@@ -1874,7 +1876,9 @@ fn make_record_ex(
     let j = builder_string(buf)
     // Durable store: enqueue JSON to single kicked writer (serialized SQLite).
     // Ring still used for live UI via cap_push at the call site.
-    db_enqueue(db_ch, j)
+    if db_enqueue(db_ch, j) != 1 {
+        let _ = cmap_incr(metrics, "db_drop", 1)
+    }
     return j
 }
 
@@ -2112,7 +2116,7 @@ fn handle_sip_packet(
         return
     }
     let src = udp_last_sender()
-    let rec = make_record(db_ch, src, transport, msg, "zaman")
+    let rec = make_record(db_ch, metrics, src, transport, msg, "zaman")
     cap_push(store, metrics, rec)
 
     if sip_is_request(msg) == 1 {
@@ -2124,7 +2128,7 @@ fn handle_sip_packet(
             let port = udp_last_sender_port()
             if not str_eq(host, "") && port > 0 {
                 let _ = sip_udp_send(fd, host, port, reply)
-                let rrec = make_record(db_ch, local_host + ":" + string(local_port), transport, reply, "zaman-echo")
+                let rrec = make_record(db_ch, metrics, local_host + ":" + string(local_port), transport, reply, "zaman-echo")
                 cap_push(store, metrics, rrec)
                 let _ = cmap_incr(metrics, "echoes", 1)
             }
@@ -2184,6 +2188,7 @@ fn handle_hep_packet_via(store: CMap, metrics: CMap, db_ch: chan[string], pkt: s
     let ts = hep_ts_ms(info)
     let mut rec = make_record_ex(
         db_ch,
+        metrics,
         src,
         dst,
         transport,
@@ -2340,11 +2345,12 @@ fn metrics_json(metrics: CMap, store: CMap) -> string {
     let status_4xx_5xx = cmap_i(metrics, "status_4xx_5xx")
     let db_ok = cmap_i(metrics, "db_ok")
     let db_err = cmap_i(metrics, "db_err")
+    let db_drop = cmap_i(metrics, "db_drop")
     let buf = str_builder()
     builder_write(buf, "{\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"")
     builder_write(buf, ",\"uptime_ms\":" + string(uptime))
     builder_write(buf, ",\"msgs_total\":" + string(msgs))
-    builder_write(buf, ",\"db_ok\":" + string(db_ok) + ",\"db_err\":" + string(db_err))
+    builder_write(buf, ",\"db_ok\":" + string(db_ok) + ",\"db_err\":" + string(db_err) + ",\"db_drop\":" + string(db_drop))
     builder_write(buf, ",\"requests\":" + string(reqs) + ",\"responses\":" + string(resps))
     builder_write(buf, ",\"echoes\":" + string(echoes))
     builder_write(buf, ",\"hep_total\":" + string(hep_total))
@@ -2375,6 +2381,9 @@ fn metrics_prom(metrics: CMap, store: CMap) -> string {
     o = o + "# HELP zaman_messages_total Captured SIP messages\n"
     o = o + "# TYPE zaman_messages_total counter\n"
     o = o + "zaman_messages_total " + string(cmap_i(metrics, "msgs_total")) + "\n"
+    o = o + "# HELP zaman_db_dropped_total Capture records dropped after DB writer queue timeout\n"
+    o = o + "# TYPE zaman_db_dropped_total counter\n"
+    o = o + "zaman_db_dropped_total " + string(cmap_i(metrics, "db_drop")) + "\n"
     o = o + "# HELP zaman_requests_total SIP requests\n"
     o = o + "# TYPE zaman_requests_total counter\n"
     o = o + "zaman_requests_total " + string(cmap_i(metrics, "requests")) + "\n"
@@ -2878,6 +2887,7 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                 // Authenticated: full detail
                 let db_ok = cmap_i(metrics, "db_ok")
                 let db_err = cmap_i(metrics, "db_err")
+                let db_drop = cmap_i(metrics, "db_drop")
                 let msgs = cmap_i(metrics, "msgs_total")
                 let uptime = now_ms() - cmap_i(metrics, "started_ms")
                 let mut db_status = "sqlite"
@@ -2888,7 +2898,7 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                 }
                 let body = "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"" +
                     ",\"uptime_ms\":" + string(uptime) +
-                    ",\"db\":{\"driver\":\"" + db_status + "\",\"writes_ok\":" + string(db_ok) + ",\"writes_err\":" + string(db_err) + "}" +
+                    ",\"db\":{\"driver\":\"" + db_status + "\",\"writes_ok\":" + string(db_ok) + ",\"writes_err\":" + string(db_err) + ",\"writes_dropped\":" + string(db_drop) + "}" +
                     ",\"captures\":" + string(msgs) +
                     "}"
                 let _ = http_respond_json(c, 200, body)
@@ -3097,7 +3107,9 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                             if len(rec) > 10 {
                                 let validated = fed_validate_and_tag(rec)
                                 if not str_eq(validated, "") {
-                                    db_enqueue(db_ch, validated)
+                                    if db_enqueue(db_ch, validated) != 1 {
+                                        let _ = cmap_incr(metrics, "db_drop", 1)
+                                    }
                                     cap_push(store, metrics, validated)
                                     count = count + 1
                                 } else {
@@ -3115,7 +3127,9 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                 // Single record
                 let validated = fed_validate_and_tag(body)
                 if not str_eq(validated, "") {
-                    db_enqueue(db_ch, validated)
+                    if db_enqueue(db_ch, validated) != 1 {
+                        let _ = cmap_incr(metrics, "db_drop", 1)
+                    }
                     cap_push(store, metrics, validated)
                     let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":1}")
                 } else {
@@ -3218,6 +3232,7 @@ fn main() {
     cmap_set_i(store, "idx", 0)
     cmap_set_i(metrics, "db_ok", 0)
     cmap_set_i(metrics, "db_err", 0)
+    cmap_set_i(metrics, "db_drop", 0)
 
     // Capture path: kicked workers enqueue JSON → kicked db_writer owns SQLite.
     let db_ch = chan_open[string](DB_CH_CAP)
