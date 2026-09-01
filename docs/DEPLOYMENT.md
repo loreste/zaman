@@ -167,8 +167,9 @@ sites, and private routing identifiers. Do not commit those values.
 | 90 days | 4.5 GB | 45 GB | 450 GB |
 | 365 days | 18 GB | 180 GB | 1.8 TB |
 
-Set `ZAMAN_DB_RETENTION_DAYS` in `/etc/zaman/core.env`. Use `0` only when an
-external retention process is in place.
+Set `ZAMAN_DB_RETENTION_DAYS` in `/etc/zaman/core.env`. It prunes raw captures,
+call summaries, and daily rollups. Use `0` only when an external retention
+process is in place.
 
 ---
 

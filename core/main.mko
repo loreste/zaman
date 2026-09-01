@@ -627,6 +627,21 @@ fn day_key(ts_ms: int) -> string {
     return string(sec / 86400)
 }
 
+fn retention_days() -> int {
+    let days = parse_int_or(env_get_or("ZAMAN_DB_RETENTION_DAYS", "14"), 14)
+    if days < 0 {
+        return 0
+    }
+    return days
+}
+
+fn retention_cutoff_ms(days: int) -> int {
+    if days <= 0 {
+        return 0
+    }
+    return now_ms() - days * 86400 * 1000
+}
+
 // ClickHouse insert: single INSERT with all fields (no UPDATE, append-only).
 fn ch_insert_json(record_json: string) -> int {
     let ts_ms = json_get_int(record_json, "ts_ms")
@@ -825,10 +840,11 @@ fn db_insert_json(db: SqlDB, record_json: string) -> int {
     let _ = sql_exec_plain(db, up)
     // opportunistic retention
     if id % 64 == 0 {
-        let days = parse_int_or(env_get_or("ZAMAN_DB_RETENTION_DAYS", "14"), 14)
+        let days = retention_days()
         if days > 0 {
-            let cutoff = now_ms() - days * 86400 * 1000
+            let cutoff = retention_cutoff_ms(days)
             let _ = sql_exec_plain(db, "DELETE FROM captures WHERE ts_ms < " + string(cutoff))
+            let _ = sql_exec_plain(db, "DELETE FROM call_state WHERE last_ts_ms < " + string(cutoff))
             let _ = sql_exec_plain(db, "DELETE FROM report_daily WHERE day < " + sql_quote(day_key(cutoff)))
         }
     }
@@ -3542,9 +3558,12 @@ fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> in
                 } else if db_is_postgres() == 1 {
                     db_status = "postgres"
                 }
+                let days = retention_days()
+                let cutoff = retention_cutoff_ms(days)
                 let body = "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"" +
                     ",\"uptime_ms\":" + string(uptime) +
                     ",\"db\":{\"driver\":\"" + db_status + "\",\"writes_ok\":" + string(db_ok) + ",\"writes_err\":" + string(db_err) + ",\"writes_dropped\":" + string(db_drop) + "}" +
+                    ",\"retention\":{\"days\":" + string(days) + ",\"cutoff_ms\":" + string(cutoff) + ",\"enabled\":" + (if days > 0 { "true" } else { "false" }) + "}" +
                     ",\"captures\":" + string(msgs) +
                     "}"
                 let _ = http_respond_json(c, 200, body)

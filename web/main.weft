@@ -493,6 +493,7 @@ fn layout_inner(title, body, user, csrf) {
         admin_link = nav_link("/admin/users", "Users", "M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z") +
             nav_link("/admin/tokens", "API Tokens", "M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z") +
             nav_link("/admin/audit", "Audit Log", "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2") +
+            nav_link("/admin/retention", "Retention", "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z") +
             nav_link("/sla", "SLA Report", "M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z")
     }
     "<!doctype html><html lang=\"en\" class=\"h-full\"><head><meta charset=\"utf-8\"/>" +
@@ -981,6 +982,13 @@ fn fetch_message(id) {
 fn fetch_health() {
     r := http.get_json(core_base() + "/api/health")
     if r.ok { r.value } else { {"ok": false} }
+}
+
+fn fetch_health_detail() {
+    r := http.get(core_base() + "/api/health", api_headers())
+    if !r.ok { return {"ok": false} }
+    p := json.parse(r.value.body)
+    if p.ok { p.value } else { {"ok": false} }
 }
 
 fn fetch_report() {
@@ -2831,6 +2839,42 @@ fn admin_users_page(user, flash) {
     "<option value=\"admin\">admin</option></select></div>" +
     "<button type=\"submit\" class=\"rounded-md px-4 py-2 text-sm bg-[#a78bfa] text-[#0a0a0c] font-medium hover:bg-[#c4b5fd] transition-colors\">Create user</button>" +
     "</form></div>"
+}
+
+fn admin_retention_page() {
+    health := fetch_health_detail()
+    report := fetch_report()
+    retention := health["retention"] ?? {}
+    db := health["db"] ?? {}
+    days := retention["days"] ?? 0
+    enabled := retention["enabled"] ?? false
+    cutoff_ms := retention["cutoff_ms"] ?? 0
+    min_ts := report["min_ts_ms"] ?? 0
+    max_ts := report["max_ts_ms"] ?? 0
+    retained_days := if min_ts > 0 && max_ts > min_ts { (max_ts - min_ts) / 86400000 } else { 0 }
+    cutoff_age := if cutoff_ms > 0 { time_ago(cutoff_ms / 1000) } else { "disabled" }
+    state_label := if enabled { "enabled" } else { "disabled" }
+    state_color := if enabled { "#34d399" } else { "#fbbf24" }
+    "<div class=\"flex items-end justify-between gap-3 mb-5\">" +
+    "<div><h1 class=\"text-xl font-semibold\">Retention</h1><p class=\"text-sm text-[#71717a] mt-1\">Data retention for SIP captures, call summaries, and rollups.</p></div>" +
+    "<span class=\"rounded-md border border-[#27272a] px-2.5 py-1 text-xs\" style=\"color:" + state_color + "\">" + state_label + "</span></div>" +
+    "<div class=\"grid md:grid-cols-4 gap-3 mb-5\">" +
+    call_fact("Retention", if enabled { ("" + (days)) + " days" } else { "off" }, "ZAMAN_DB_RETENTION_DAYS", state_color) +
+    call_fact("Database", "" + (db["driver"] ?? "unknown"), "active backend", "#38bdf8") +
+    call_fact("Current window", "" + (retained_days) + " days", "oldest to newest capture", "#a78bfa") +
+    call_fact("Cutoff", cutoff_age, "records older than this are pruned", "#fbbf24") +
+    "</div>" +
+    "<div class=\"grid lg:grid-cols-2 gap-5\">" +
+    "<div class=\"card p-4\"><div class=\"section-title\">Cleanup Scope</div>" +
+    "<div class=\"divide-y divide-[#1e1e22] text-sm\">" +
+    "<div class=\"flex justify-between py-2\"><span class=\"text-[#a1a1aa]\">Raw SIP/HEP captures</span><span class=\"text-[#34d399]\">pruned</span></div>" +
+    "<div class=\"flex justify-between py-2\"><span class=\"text-[#a1a1aa]\">Call summaries</span><span class=\"text-[#34d399]\">pruned</span></div>" +
+    "<div class=\"flex justify-between py-2\"><span class=\"text-[#a1a1aa]\">Daily rollups</span><span class=\"text-[#34d399]\">pruned</span></div>" +
+    "</div></div>" +
+    "<div class=\"card p-4\"><div class=\"section-title\">Change Retention</div>" +
+    "<p class=\"text-sm text-[#a1a1aa] mb-3\">Set the environment variable below in the core service environment, then restart the core service. Use 0 only if an external database retention job is managing cleanup.</p>" +
+    "<pre class=\"mono text-xs rounded-lg border border-[#1e1e22] bg-[#0a0a0c] p-3 text-[#d4d4d8]\">ZAMAN_DB_RETENTION_DAYS=" + ("" + (days)) + "</pre>" +
+    "</div></div>"
 }
 
 // ---- audit log ----
@@ -6109,6 +6153,15 @@ app.get("/alerts", fn(req) {
     })
 
     // ---- admin routes ----
+
+    app.get("/admin/retention", fn(req) {
+        user := get_user(req, token_secret)
+        if user == null { return login_redirect() }
+        if !has_role(user, "admin") {
+            return {"status": 403, "headers": {"Content-Type": "text/html; charset=utf-8"}, "body": layout("Forbidden", "<h1 class=\"text-xl font-bold\">Forbidden</h1><p class=\"text-[#a1a1aa] mt-2\">Admin role required.</p>", user)}
+        }
+        web.html(layout("Retention", admin_retention_page(), user))
+    })
 
     app.get("/admin/users", fn(req) {
         user := get_user(req, token_secret)

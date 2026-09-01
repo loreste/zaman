@@ -113,7 +113,8 @@ node degradation, high CPS, and auth failures.
 | ClickHouse | Very high volume or long retention | `ZAMAN_DB_DRIVER=clickhouse` |
 
 Tables and indexes are created on startup. Retention is controlled by
-`ZAMAN_DB_RETENTION_DAYS` and defaults to 14 days.
+`ZAMAN_DB_RETENTION_DAYS`, defaults to 14 days, and applies to raw captures,
+call summaries, and daily rollups.
 
 ---
 
@@ -155,7 +156,7 @@ Core settings are environment variables or CLI arguments. Common variables:
 | `ZAMAN_HEP_TLS` | `0` | Enable HEP over TLS |
 | `ZAMAN_ECHO_METHODS` | `OPTIONS` | SIP methods to echo |
 | `ZAMAN_PROBE` | `0` | Enable active probe API |
-| `ZAMAN_DB_RETENTION_DAYS` | `14` | Auto-delete old captures |
+| `ZAMAN_DB_RETENTION_DAYS` | `14` | Auto-delete old captures, call summaries, and rollups |
 
 Dashboard settings live in the web environment and runtime JSON state. Labels
 for nodes and IPs are managed from the UI and are not committed to source.
