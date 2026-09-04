@@ -1,0 +1,275 @@
+// Zaman core — SIP packet parsing, header extraction, echo replies, and UDP worker.
+
+fn sip_dir_label(is_req: int) -> string {
+    if is_req == 1 {
+        return "request"
+    }
+    return "response"
+}
+
+fn make_record(
+    db_ch: chan[string],
+    metrics: CMap,
+    src: string,
+    transport: string,
+    msg: string,
+    agent: string
+) -> string {
+    return make_record_ex(db_ch, metrics, src, "", transport, msg, agent, "sip", now_ms(), 0, "", "")
+}
+
+// Full capture record — used for native SIP and HEPv3.
+// Parses + builds JSON on the capture path; durable insert is kicked via db_ch.
+fn make_record_ex(
+    db_ch: chan[string],
+    metrics: CMap,
+    src: string,
+    dst: string,
+    transport: string,
+    msg: string,
+    agent: string,
+    proto: string,
+    ts_ms: int,
+    hep_node_id: int,
+    hep_node_name: string,
+    hep_correlation: string
+) -> string {
+    let is_sip = if str_eq(proto, "sip") || str_eq(proto, "") || str_eq(proto, "unknown") {
+        1
+    } else {
+        0
+    }
+    let safe = if is_sip == 1 {
+        redact_sip(msg)
+    } else {
+        msg
+    }
+    let mut ts = ts_ms
+    if ts <= 0 {
+        ts = now_ms()
+    }
+    let mut method = ""
+    let mut status = 0
+    let mut ruri = ""
+    let mut cid = ""
+    let mut from_h = ""
+    let mut to_h = ""
+    let mut cseq = ""
+    let mut kind = "payload"
+    if is_sip == 1 && sip_ok(safe) == 1 {
+        let is_req = sip_is_request(safe)
+        kind = sip_dir_label(is_req)
+        if is_req == 1 {
+            method = sip_method(safe)
+            ruri = sip_request_uri(safe)
+        } else {
+            status = sip_status_code(safe)
+            method = sip_header(safe, "CSeq")
+        }
+        cid = sip_header(safe, "Call-ID")
+        if str_eq(cid, "") {
+            cid = sip_header(safe, "i")
+        }
+        from_h = sip_header(safe, "From")
+        if str_eq(from_h, "") {
+            from_h = sip_header(safe, "f")
+        }
+        to_h = sip_header(safe, "To")
+        if str_eq(to_h, "") {
+            to_h = sip_header(safe, "t")
+        }
+        cseq = sip_header(safe, "CSeq")
+    } else {
+        kind = proto
+        method = str_to_upper(proto)
+    }
+    // HEP correlation ID (chunk 0x0011) can fill Call-ID for non-SIP or missing CID
+    if str_eq(cid, "") && not str_eq(hep_correlation, "") {
+        cid = hep_correlation
+    }
+    let raw_b64 = base64_encode(safe)
+
+    // Hot path: str_builder avoids O(n^2) string concat (makori 0.6+).
+    let buf = str_builder()
+    builder_write(buf, "{\"ts_ms\":")
+    builder_write(buf, string(ts))
+    builder_write(buf, ",\"src\":\"")
+    builder_write(buf, jesc(src))
+    builder_write(buf, "\",\"dst\":\"")
+    builder_write(buf, jesc(dst))
+    builder_write(buf, "\",\"transport\":\"")
+    builder_write(buf, jesc(transport))
+    builder_write(buf, "\",\"proto\":\"")
+    builder_write(buf, jesc(proto))
+    builder_write(buf, "\",\"agent\":\"")
+    builder_write(buf, jesc(agent))
+    builder_write(buf, "\",\"kind\":\"")
+    builder_write(buf, jesc(kind))
+    builder_write(buf, "\",\"method\":\"")
+    builder_write(buf, jesc(method))
+    builder_write(buf, "\",\"status\":")
+    builder_write(buf, string(status))
+    builder_write(buf, ",\"ruri\":\"")
+    builder_write(buf, jesc(ruri))
+    builder_write(buf, "\",\"call_id\":\"")
+    builder_write(buf, jesc(cid))
+    builder_write(buf, "\",\"from\":\"")
+    builder_write(buf, jesc(from_h))
+    builder_write(buf, "\",\"to\":\"")
+    builder_write(buf, jesc(to_h))
+    builder_write(buf, "\",\"cseq\":\"")
+    builder_write(buf, jesc(cseq))
+    builder_write(buf, "\",\"hep_node_id\":")
+    builder_write(buf, string(hep_node_id))
+    builder_write(buf, ",\"hep_node\":\"")
+    builder_write(buf, jesc(hep_node_name))
+    builder_write(buf, "\",\"hep_cid\":\"")
+    builder_write(buf, jesc(hep_correlation))
+    builder_write(buf, "\",\"size\":")
+    builder_write(buf, string(len(safe)))
+    builder_write(buf, ",\"raw_b64\":\"")
+    builder_write(buf, raw_b64)
+    builder_write(buf, "\"}")
+    let j = builder_string(buf)
+    // Durable store: enqueue JSON to single kicked writer (serialized SQLite).
+    // Ring still used for live UI via cap_push at the call site.
+    if db_enqueue(db_ch, j) != 1 {
+        let _ = cmap_incr(metrics, "db_drop", 1)
+    }
+    return j
+}
+
+fn bump_method(metrics: CMap, method: string) {
+    if str_eq(method, "") {
+        let _ = cmap_incr(metrics, "m_UNKNOWN", 1)
+        return
+    }
+    let key = "m_" + str_to_upper(method)
+    let _ = cmap_incr(metrics, key, 1)
+}
+
+// ---- echo replies ----
+
+// Echo policy (security):
+//   default: OPTIONS only (monitoring ping)
+//   ZAMAN_ECHO_METHODS=OPTIONS,REGISTER,... or "ALL" with ZAMAN_ECHO_ALL=1
+// Never return 200 OK + Expires for REGISTER without real auth — that lied.
+fn method_echo_allowed(method: string, echo_all: int) -> int {
+    if echo_all == 1 {
+        return 1
+    }
+    let allow = env_get_or("ZAMAN_ECHO_METHODS", "OPTIONS")
+    if str_eq(allow, "ALL") || str_eq(allow, "all") {
+        return 1
+    }
+    let parts = str_split(str_to_upper(allow), ",")
+    let want = str_to_upper(method)
+    let mut i = 0
+    while i < len(parts) {
+        let p = str_trim_space(parts[i])
+        if str_eq(p, want) {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn should_echo(msg: string, echo_all: int) -> int {
+    if sip_is_request(msg) == 0 {
+        return 0
+    }
+    return method_echo_allowed(sip_method(msg), echo_all)
+}
+
+fn build_echo(msg: string, local_host: string, local_port: int) -> string {
+    let contact = sip_contact_value(sip_uri_build("zaman", local_host, local_port))
+    let extra = sip_headers_append("", "Contact", contact)
+    let extra2 = sip_headers_append(extra, "Server", "Zaman/" + VERSION)
+    let extra3 = sip_headers_append(extra2, "Allow", "OPTIONS")
+    // REGISTER must not look like a real registrar (white-hat H5).
+    if sip_method_eq(msg, "REGISTER") == 1 {
+        let wa = sip_www_authenticate("zaman.local", sip_tag())
+        let e = sip_headers_append(extra3, "WWW-Authenticate", wa)
+        return sip_reply(msg, 401, "Unauthorized", e, "")
+    }
+    if sip_method_eq(msg, "OPTIONS") == 1 {
+        return sip_reply(msg, 200, "OK", extra3, "")
+    }
+    // Lab methods if explicitly allowed: still 200 without faking registration.
+    return sip_reply(msg, 200, "OK", extra3, "")
+}
+
+// ---- process one SIP message ----
+
+fn handle_sip_packet(
+    store: CMap,
+    metrics: CMap,
+    db_ch: chan[string],
+    fd: int,
+    msg: string,
+    transport: string,
+    echo_all: int,
+    local_host: string,
+    local_port: int
+) {
+    if sip_ok(msg) == 0 {
+        let _ = cmap_incr(metrics, "parse_err", 1)
+        return
+    }
+    let src = udp_last_sender()
+    let rec = make_record(db_ch, metrics, src, transport, msg, "zaman")
+    cap_push(store, metrics, rec)
+
+    if sip_is_request(msg) == 1 {
+        bump_method(metrics, sip_method(msg))
+        let _ = cmap_incr(metrics, "requests", 1)
+        if should_echo(msg, echo_all) == 1 {
+            let reply = build_echo(msg, local_host, local_port)
+            let host = udp_last_sender_host()
+            let port = udp_last_sender_port()
+            if not str_eq(host, "") && port > 0 {
+                let _ = sip_udp_send(fd, host, port, reply)
+                let rrec = make_record(db_ch, metrics, local_host + ":" + string(local_port), transport, reply, "zaman-echo")
+                cap_push(store, metrics, rrec)
+                let _ = cmap_incr(metrics, "echoes", 1)
+            }
+        }
+    } else {
+        let _ = cmap_incr(metrics, "responses", 1)
+        let code = sip_status_code(msg)
+        if code >= 200 && code < 300 {
+            let _ = cmap_incr(metrics, "status_2xx", 1)
+        } else if code >= 400 {
+            let _ = cmap_incr(metrics, "status_4xx_5xx", 1)
+        }
+    }
+}
+
+// ---- SIP worker ----
+
+fn sip_worker(
+    store: CMap,
+    metrics: CMap,
+    db_ch: chan[string],
+    host: string,
+    port: int,
+    echo_all: int
+) -> int {
+    let fd = sip_udp_bind(host, port)
+    if fd < 0 {
+        print("sip bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    print("sip  udp  " + host + ":" + string(port) + "  (echo policy: ZAMAN_ECHO_METHODS, default OPTIONS)")
+    let _ = io_set_nonblocking(fd, 1)
+    while 1 == 1 {
+        let msg = sip_udp_recv(fd, 65535)
+        if not str_eq(msg, "") {
+            handle_sip_packet(store, metrics, db_ch, fd, msg, "UDP", echo_all, host, port)
+        } else {
+            sleep_ms(2)
+        }
+    }
+    return 0
+}

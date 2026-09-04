@@ -1,0 +1,350 @@
+// Zaman core — configuration, constants, encoding, auth, and environment helpers.
+
+const RING = 512
+const VERSION = "0.3.0"
+// Capture enqueue buffer — backpressures SIP/HEP workers when the DB lags.
+const DB_CH_CAP = 1024
+
+// ---- small helpers ----
+
+fn jesc(s: string) -> string {
+    // JSON string escape via str_builder (makori 0.6+). SIP headers are untrusted.
+    let buf = str_builder()
+    let hex = "0123456789abcdef"
+    let mut i = 0
+    let n = len(s)
+    while i < n {
+        let b = int(s[i])
+        if b == 34 {
+            builder_write(buf, "\\\"")
+        } else if b == 92 {
+            builder_write(buf, "\\\\")
+        } else if b == 8 {
+            builder_write(buf, "\\b")
+        } else if b == 12 {
+            builder_write(buf, "\\f")
+        } else if b == 10 {
+            builder_write(buf, "\\n")
+        } else if b == 13 {
+            builder_write(buf, "\\r")
+        } else if b == 9 {
+            builder_write(buf, "\\t")
+        } else if b < 32 {
+            builder_write(buf, "\\u00" + hex[b / 16:b / 16 + 1] + hex[b % 16:b % 16 + 1])
+        } else {
+            builder_write(buf, s[i:i + 1])
+        }
+        i = i + 1
+    }
+    return builder_string(buf)
+}
+
+// Strip credential-bearing headers before store/export.
+fn redact_sip(msg: string) -> string {
+    // Line-based pass for Authorization / Proxy-Authorization (case-insensitive).
+    let lines = str_split(msg, "\n")
+    let mut kept = ""
+    let mut i = 0
+    while i < len(lines) {
+        let line = lines[i]
+        let lower = str_to_lower(line)
+        let mut drop = 0
+        if str_has_prefix(lower, "authorization:") {
+            drop = 1
+        }
+        if str_has_prefix(lower, "proxy-authorization:") {
+            drop = 1
+        }
+        if drop == 0 {
+            if i > 0 {
+                // preserve \n joins (CR may still be on lines from \r\n split)
+                kept = kept + "\n" + line
+            } else {
+                kept = line
+            }
+        } else {
+            if i == 0 {
+                kept = "Authorization: [REDACTED]\r"
+            } else {
+                kept = kept + "\nAuthorization: [REDACTED]\r"
+            }
+        }
+        i = i + 1
+    }
+    return kept
+}
+
+fn probe_enabled() -> int {
+    return parse_int_or(env_get_or("ZAMAN_PROBE", "0"), 0)
+}
+
+fn host_is_private_ipv4(host: string) -> int {
+    if str_has_prefix(host, "10.") {
+        return 1
+    }
+    if str_has_prefix(host, "192.168.") {
+        return 1
+    }
+    if str_has_prefix(host, "127.") {
+        return 1
+    }
+    if str_has_prefix(host, "172.") {
+        // 172.16.0.0/12
+        let parts = str_split(host, ".")
+        if len(parts) >= 2 {
+            let second = parse_int_or(parts[1], 0)
+            if second >= 16 && second <= 31 {
+                return 1
+            }
+        }
+    }
+    return 0
+}
+
+fn host_is_blocked_for_probe(host: string) -> int {
+    // Always block cloud metadata / link-local abuse targets.
+    if str_eq(host, "169.254.169.254") {
+        return 1
+    }
+    if str_eq(host, "metadata.google.internal") {
+        return 1
+    }
+    if str_has_prefix(host, "169.254.") {
+        return 1
+    }
+    // Localhost always allowed for loopback self-tests.
+    if str_eq(host, "127.0.0.1") || str_eq(host, "::1") || str_eq(host, "localhost") {
+        return 0
+    }
+    // Other private/RFC1918 blocked unless ZAMAN_PROBE_ALLOW_PRIVATE=1
+    let allow_priv = parse_int_or(env_get_or("ZAMAN_PROBE_ALLOW_PRIVATE", "0"), 0)
+    if allow_priv == 0 && host_is_private_ipv4(host) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// ZAMAN_HEP_ALLOW: empty = any peer; else comma-separated IPs or prefixes (e.g. 10.0.0.,203.0.113.5)
+fn hep_peer_host(peer: string) -> string {
+    // peer may be "1.2.3.4:5060" or "[::1]:5060"
+    if str_has_prefix(peer, "[") {
+        let cut = str_cut(peer, "]")
+        if len(cut) >= 1 {
+            let h = cut[0]
+            if str_has_prefix(h, "[") {
+                return h[1:]
+            }
+            return h
+        }
+    }
+    let cut = str_cut(peer, ":")
+    if len(cut) >= 1 {
+        return cut[0]
+    }
+    return peer
+}
+
+fn hep_peer_allowed(peer: string) -> int {
+    let allow = env_get_or("ZAMAN_HEP_ALLOW", "")
+    if str_eq(allow, "") {
+        return 1
+    }
+    let host = hep_peer_host(peer)
+    let parts = str_split(allow, ",")
+    let mut i = 0
+    while i < len(parts) {
+        let p = str_trim_space(parts[i])
+        if str_eq(p, "") {
+            // skip
+        } else if str_eq(p, host) {
+            return 1
+        } else if str_has_prefix(host, p) {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn api_key_configured() -> string {
+    return env_get_or("ZAMAN_API_KEY", "")
+}
+
+// Constant-time string comparison (crypto_eq builtin, makori 0.6+).
+fn ct_str_eq(a: string, b: string) -> int {
+    return crypto_eq(a, b)
+}
+
+fn api_request_authorized(c: int) -> int {
+    let want = api_key_configured()
+    if str_eq(want, "") {
+        return 1
+    }
+    let h = http_header(c, "X-API-Key")
+    if ct_str_eq(h, want) == 1 {
+        return 1
+    }
+    let auth = http_header(c, "Authorization")
+    if str_has_prefix(auth, "Bearer ") {
+        let tok = auth[7:]
+        if ct_str_eq(tok, want) == 1 {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn u8_at(s: string, i: int) -> int {
+    if i < 0 || i >= len(s) {
+        return 0
+    }
+    return int(s[i])
+}
+
+fn u16be_at(s: string, i: int) -> int {
+    if i + 2 > len(s) {
+        return 0
+    }
+    return binary_u16be(s[i:i + 2])
+}
+
+fn u32be_at(s: string, i: int) -> int {
+    if i + 4 > len(s) {
+        return 0
+    }
+    return binary_u32be(s[i:i + 4])
+}
+
+fn ipv4_at(s: string, i: int) -> string {
+    if i + 4 > len(s) {
+        return ""
+    }
+    return string(u8_at(s, i)) + "." + string(u8_at(s, i + 1)) + "." + string(u8_at(s, i + 2)) + "." + string(u8_at(s, i + 3))
+}
+
+fn hex_nibble(n: int) -> string {
+    let h = "0123456789abcdef"
+    if n < 0 || n > 15 {
+        return "0"
+    }
+    return h[n:n + 1]
+}
+
+fn ipv6_at(s: string, i: int) -> string {
+    // Compress-free hextet form a:b:c:d:e:f:g:h
+    if i + 16 > len(s) {
+        return ""
+    }
+    let mut out = ""
+    let mut g = 0
+    while g < 8 {
+        let off = i + g * 2
+        let v = u16be_at(s, off)
+        if g > 0 {
+            out = out + ":"
+        }
+        // strip leading zeros per hextet for readability
+        out = out + hex_nibble((v / 4096) % 16) + hex_nibble((v / 256) % 16) + hex_nibble((v / 16) % 16) + hex_nibble(v % 16)
+        g = g + 1
+    }
+    return out
+}
+
+fn proto_type_name(t: int) -> string {
+    if t == 1 {
+        return "sip"
+    }
+    if t == 5 {
+        return "rtcp"
+    }
+    if t == 34 {
+        return "rtpagent"
+    }
+    if t == 35 {
+        return "rtcpxr"
+    }
+    if t == 38 {
+        return "horaclifix"
+    }
+    if t == 53 {
+        return "dns"
+    }
+    if t == 100 {
+        return "log"
+    }
+    if t == 0 {
+        return "unknown"
+    }
+    return "proto-" + string(t)
+}
+
+fn parse_int_or(s: string, fallback: int) -> int {
+    match parse_int(s) {
+        Ok(v) => v,
+        Err(_) => fallback,
+    }
+}
+
+fn cmap_i(m: CMap, key: string) -> int {
+    return parse_int_or(cmap_get(m, key), 0)
+}
+
+fn cmap_set_i(m: CMap, key: string, v: int) {
+    cmap_set(m, key, string(v))
+}
+
+// ---- ring store (shared via CMap) ----
+
+fn cap_push(ring: CMap, metrics: CMap, rec: string) {
+    let idx = cmap_i(ring, "idx")
+    let slot = idx % RING
+    cmap_set(ring, "msg_" + string(slot), rec)
+    cmap_set_i(ring, "idx", idx + 1)
+    let _ = cmap_incr(metrics, "msgs_total", 1)
+}
+
+fn cap_get(ring: CMap, id: int) -> string {
+    if id < 0 {
+        return ""
+    }
+    let idx = cmap_i(ring, "idx")
+    if id >= idx {
+        return ""
+    }
+    if idx - id > RING {
+        return ""
+    }
+    return cmap_get(ring, "msg_" + string(id % RING))
+}
+
+fn day_key(ts_ms: int) -> string {
+    // Day bucket as unix-day integer string (stable, no locale).
+    let mut sec = ts_ms / 1000
+    if sec < 0 {
+        sec = 0
+    }
+    return string(sec / 86400)
+}
+
+fn retention_days() -> int {
+    let days = parse_int_or(env_get_or("ZAMAN_DB_RETENTION_DAYS", "14"), 14)
+    if days < 0 {
+        return 0
+    }
+    return days
+}
+
+fn retention_cutoff_ms(days: int) -> int {
+    if days <= 0 {
+        return 0
+    }
+    return now_ms() - days * 86400 * 1000
+}
+
+fn idle_worker() -> int {
+    while 1 == 1 {
+        sleep_ms(1000)
+    }
+    return 0
+}
+

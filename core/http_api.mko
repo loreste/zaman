@@ -1,0 +1,682 @@
+// Zaman core — Prometheus exporter, metrics, message retrieval, and REST/JSON HTTP server.
+
+fn metrics_json(metrics: CMap, store: CMap) -> string {
+    let started = cmap_i(metrics, "started_ms")
+    let uptime = now_ms() - started
+    let msgs = cmap_i(metrics, "msgs_total")
+    let reqs = cmap_i(metrics, "requests")
+    let resps = cmap_i(metrics, "responses")
+    let echoes = cmap_i(metrics, "echoes")
+    let hep_total = cmap_i(metrics, "hep_total")
+    let hep_udp = cmap_i(metrics, "hep_udp")
+    let hep_tcp = cmap_i(metrics, "hep_tcp")
+    let hep_tls = cmap_i(metrics, "hep_tls")
+    let hep_err = cmap_i(metrics, "hep_err")
+    let hep_auth_fail = cmap_i(metrics, "hep_auth_fail")
+    let hep_deny = cmap_i(metrics, "hep_deny")
+    let hep_sip = cmap_i(metrics, "hep_sip")
+    let hep_rtcp = cmap_i(metrics, "hep_rtcp")
+    let hep_other = cmap_i(metrics, "hep_other")
+    let parse_err = cmap_i(metrics, "parse_err")
+    let probes_ok = cmap_i(metrics, "probes_ok")
+    let probes_fail = cmap_i(metrics, "probes_fail")
+    let probe_rtt_ms = cmap_i(metrics, "probe_rtt_ms")
+    let m_invite = cmap_i(metrics, "m_INVITE")
+    let m_options = cmap_i(metrics, "m_OPTIONS")
+    let m_register = cmap_i(metrics, "m_REGISTER")
+    let m_bye = cmap_i(metrics, "m_BYE")
+    let m_ack = cmap_i(metrics, "m_ACK")
+    let m_info = cmap_i(metrics, "m_INFO")
+    let m_message = cmap_i(metrics, "m_MESSAGE")
+    let m_unknown = cmap_i(metrics, "m_UNKNOWN")
+    let status_2xx = cmap_i(metrics, "status_2xx")
+    let status_4xx_5xx = cmap_i(metrics, "status_4xx_5xx")
+    let db_ok = cmap_i(metrics, "db_ok")
+    let db_err = cmap_i(metrics, "db_err")
+    let db_drop = cmap_i(metrics, "db_drop")
+    let buf = str_builder()
+    builder_write(buf, "{\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"")
+    builder_write(buf, ",\"uptime_ms\":" + string(uptime))
+    builder_write(buf, ",\"msgs_total\":" + string(msgs))
+    builder_write(buf, ",\"db_ok\":" + string(db_ok) + ",\"db_err\":" + string(db_err) + ",\"db_drop\":" + string(db_drop))
+    builder_write(buf, ",\"requests\":" + string(reqs) + ",\"responses\":" + string(resps))
+    builder_write(buf, ",\"echoes\":" + string(echoes))
+    builder_write(buf, ",\"hep_total\":" + string(hep_total))
+    builder_write(buf, ",\"hep_udp\":" + string(hep_udp) + ",\"hep_tcp\":" + string(hep_tcp) + ",\"hep_tls\":" + string(hep_tls))
+    builder_write(buf, ",\"hep_err\":" + string(hep_err) + ",\"hep_auth_fail\":" + string(hep_auth_fail) + ",\"hep_deny\":" + string(hep_deny))
+    builder_write(buf, ",\"hep_sip\":" + string(hep_sip) + ",\"hep_rtcp\":" + string(hep_rtcp) + ",\"hep_other\":" + string(hep_other))
+    builder_write(buf, ",\"parse_err\":" + string(parse_err))
+    builder_write(buf, ",\"probes_ok\":" + string(probes_ok) + ",\"probes_fail\":" + string(probes_fail) + ",\"probe_rtt_ms\":" + string(probe_rtt_ms))
+    builder_write(buf, ",\"ring_size\":" + string(RING) + ",\"ring_idx\":" + string(msgs))
+    builder_write(buf, ",\"methods\":{\"INVITE\":" + string(m_invite) + ",\"OPTIONS\":" + string(m_options))
+    builder_write(buf, ",\"REGISTER\":" + string(m_register) + ",\"BYE\":" + string(m_bye))
+    builder_write(buf, ",\"ACK\":" + string(m_ack) + ",\"INFO\":" + string(m_info))
+    builder_write(buf, ",\"MESSAGE\":" + string(m_message) + ",\"UNKNOWN\":" + string(m_unknown) + "}")
+    builder_write(buf, ",\"status_2xx\":" + string(status_2xx))
+    builder_write(buf, ",\"status_4xx_5xx\":" + string(status_4xx_5xx) + "}")
+    return builder_string(buf)
+}
+
+fn metrics_prom(metrics: CMap, store: CMap) -> string {
+    let uptime = now_ms() - cmap_i(metrics, "started_ms")
+    let mut o = ""
+    o = o + "# HELP zaman_up Zaman core up flag\n"
+    o = o + "# TYPE zaman_up gauge\n"
+    o = o + "zaman_up 1\n"
+    o = o + "# HELP zaman_uptime_ms Process uptime\n"
+    o = o + "# TYPE zaman_uptime_ms gauge\n"
+    o = o + "zaman_uptime_ms " + string(uptime) + "\n"
+    o = o + "# HELP zaman_messages_total Captured SIP messages\n"
+    o = o + "# TYPE zaman_messages_total counter\n"
+    o = o + "zaman_messages_total " + string(cmap_i(metrics, "msgs_total")) + "\n"
+    o = o + "# HELP zaman_db_dropped_total Capture records dropped after DB writer queue timeout\n"
+    o = o + "# TYPE zaman_db_dropped_total counter\n"
+    o = o + "zaman_db_dropped_total " + string(cmap_i(metrics, "db_drop")) + "\n"
+    o = o + "# HELP zaman_requests_total SIP requests\n"
+    o = o + "# TYPE zaman_requests_total counter\n"
+    o = o + "zaman_requests_total " + string(cmap_i(metrics, "requests")) + "\n"
+    o = o + "# HELP zaman_responses_total SIP responses\n"
+    o = o + "# TYPE zaman_responses_total counter\n"
+    o = o + "zaman_responses_total " + string(cmap_i(metrics, "responses")) + "\n"
+    o = o + "# HELP zaman_echoes_total Auto-echo replies\n"
+    o = o + "# TYPE zaman_echoes_total counter\n"
+    o = o + "zaman_echoes_total " + string(cmap_i(metrics, "echoes")) + "\n"
+    o = o + "# HELP zaman_hep_total HEP packets accepted\n"
+    o = o + "# TYPE zaman_hep_total counter\n"
+    o = o + "zaman_hep_total " + string(cmap_i(metrics, "hep_total")) + "\n"
+    o = o + "# HELP zaman_hep_transport_total HEP by transport\n"
+    o = o + "# TYPE zaman_hep_transport_total counter\n"
+    o = o + "zaman_hep_transport_total{transport=\"udp\"} " + string(cmap_i(metrics, "hep_udp")) + "\n"
+    o = o + "zaman_hep_transport_total{transport=\"tcp\"} " + string(cmap_i(metrics, "hep_tcp")) + "\n"
+    o = o + "zaman_hep_transport_total{transport=\"tls\"} " + string(cmap_i(metrics, "hep_tls")) + "\n"
+    o = o + "# HELP zaman_hep_auth_fail_total HEP packets rejected by password\n"
+    o = o + "# TYPE zaman_hep_auth_fail_total counter\n"
+    o = o + "zaman_hep_auth_fail_total " + string(cmap_i(metrics, "hep_auth_fail")) + "\n"
+    o = o + "# HELP zaman_hep_deny_total HEP peers denied by allowlist\n"
+    o = o + "# TYPE zaman_hep_deny_total counter\n"
+    o = o + "zaman_hep_deny_total " + string(cmap_i(metrics, "hep_deny")) + "\n"
+    o = o + "# HELP zaman_hep_proto_total HEP by payload protocol type\n"
+    o = o + "# TYPE zaman_hep_proto_total counter\n"
+    o = o + "zaman_hep_proto_total{proto=\"sip\"} " + string(cmap_i(metrics, "hep_sip")) + "\n"
+    o = o + "zaman_hep_proto_total{proto=\"rtcp\"} " + string(cmap_i(metrics, "hep_rtcp")) + "\n"
+    o = o + "zaman_hep_proto_total{proto=\"other\"} " + string(cmap_i(metrics, "hep_other")) + "\n"
+    o = o + "# HELP zaman_probe_rtt_ms Last successful OPTIONS probe RTT\n"
+    o = o + "# TYPE zaman_probe_rtt_ms gauge\n"
+    o = o + "zaman_probe_rtt_ms " + string(cmap_i(metrics, "probe_rtt_ms")) + "\n"
+    o = o + "# HELP zaman_sip_method_total SIP requests by method\n"
+    o = o + "# TYPE zaman_sip_method_total counter\n"
+    o = o + "zaman_sip_method_total{method=\"INVITE\"} " + string(cmap_i(metrics, "m_INVITE")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"OPTIONS\"} " + string(cmap_i(metrics, "m_OPTIONS")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"REGISTER\"} " + string(cmap_i(metrics, "m_REGISTER")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"BYE\"} " + string(cmap_i(metrics, "m_BYE")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"ACK\"} " + string(cmap_i(metrics, "m_ACK")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"INFO\"} " + string(cmap_i(metrics, "m_INFO")) + "\n"
+    o = o + "zaman_sip_method_total{method=\"MESSAGE\"} " + string(cmap_i(metrics, "m_MESSAGE")) + "\n"
+    o = o + "# HELP zaman_ring_idx Capture ring write index\n"
+    o = o + "# TYPE zaman_ring_idx gauge\n"
+    o = o + "zaman_ring_idx " + string(cmap_i(store, "idx")) + "\n"
+    return o
+}
+
+// ---- messages list / filter (prefer SQLite; fall back to ring) ----
+
+fn messages_json(store: CMap, limit: int, call_id_filter: string) -> string {
+    return messages_json_ex(store, limit, call_id_filter, "", "", "", "", "", "", "", 0, 0)
+}
+
+fn messages_json_ex(store: CMap, limit: int, call_id_filter: string, transport_filter: string, agent_filter: string, method_filter: string, src_filter: string, from_filter: string, to_filter: string, status_filter: string, since_ms: int, until_ms: int) -> string {
+    // ClickHouse path
+    if db_is_clickhouse() == 1 {
+        let from_ch = ch_messages_json(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms, "")
+        if not str_eq(from_ch, "[]") {
+            return from_ch
+        }
+    }
+    // Prefer durable DB when available
+    let from_db = db_messages_json_full(limit, call_id_filter, transport_filter, agent_filter, method_filter, src_filter, from_filter, to_filter, status_filter, since_ms, until_ms, "")
+    if not str_eq(from_db, "[]") {
+        return from_db
+    }
+    // Fallback: in-memory ring (startup / empty DB)
+    let idx = cmap_i(store, "idx")
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 50
+    }
+    if lim > 200 {
+        lim = 200
+    }
+    let mut out = "["
+    let mut first = 1
+    let mut added = 0
+    let mut i = idx - 1
+    while i >= 0 && added < lim {
+        let rec = cap_get(store, i)
+        if not str_eq(rec, "") {
+            let mut keep = 1
+            if not str_eq(call_id_filter, "") {
+                if not str_contains(rec, "\"call_id\":\"" + jesc(call_id_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(transport_filter, "") {
+                if not str_contains(rec, "\"transport\":\"" + jesc(transport_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(agent_filter, "") {
+                if not str_contains(rec, "\"agent\":\"" + jesc(agent_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(method_filter, "") {
+                if not str_contains(rec, "\"method\":\"" + jesc(method_filter) + "\"") {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(src_filter, "") {
+                if not str_contains(rec, src_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(from_filter, "") {
+                if not str_contains(rec, "\"from\":\"") || not str_contains(rec, from_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(to_filter, "") {
+                if not str_contains(rec, "\"to\":\"") || not str_contains(rec, to_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && not str_eq(status_filter, "") {
+                if not str_contains(rec, "\"status\":" + status_filter) {
+                    keep = 0
+                }
+            }
+            if keep == 1 && since_ms > 0 {
+                if json_get_int(rec, "ts_ms") < since_ms {
+                    keep = 0
+                }
+            }
+            if keep == 1 && until_ms > 0 {
+                if json_get_int(rec, "ts_ms") > until_ms {
+                    keep = 0
+                }
+            }
+            if keep == 1 {
+                let with_id = "{\"id\":" + string(i) + "," + rec[1:]
+                if first == 1 {
+                    first = 0
+                } else {
+                    out = out + ","
+                }
+                out = out + with_id
+                added = added + 1
+            }
+        }
+        i = i - 1
+    }
+    out = out + "]"
+    return out
+}
+
+fn message_one_json(store: CMap, id: int) -> string {
+    let from_db = db_message_one_json(id)
+    if not str_eq(from_db, "") {
+        return from_db
+    }
+    let rec = cap_get(store, id)
+    if str_eq(rec, "") {
+        return ""
+    }
+    return "{\"id\":" + string(id) + "," + rec[1:]
+}
+
+fn query_get(q: string, key: string) -> string {
+    // very small query parser: key=value pairs joined by &
+    let parts = str_split(q, "&")
+    let mut i = 0
+    while i < len(parts) {
+        let p = parts[i]
+        let kv = str_cut(p, "=")
+        if len(kv) >= 2 {
+            if str_eq(kv[0], key) {
+                return kv[1]
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn path_only(path: string) -> string {
+    let cut = str_cut(path, "?")
+    if len(cut) >= 1 {
+        return cut[0]
+    }
+    return path
+}
+
+fn path_query(path: string) -> string {
+    let cut = str_cut(path, "?")
+    if len(cut) >= 2 {
+        return cut[1]
+    }
+    return ""
+}
+
+// Rate limiting: per-IP request counter, resets every second.
+// ZAMAN_RATE_LIMIT: max requests/sec per IP (default 100, 0 = disabled).
+fn rate_limit_max() -> int {
+    return parse_int_or(env_get_or("ZAMAN_RATE_LIMIT", "100"), 100)
+}
+
+fn rate_check(rl: CMap, ip: string) -> int {
+    let max = rate_limit_max()
+    if max <= 0 {
+        return 1
+    }
+    let sec = now_ms() / 1000
+    let sec_key = "s_" + string(sec)
+    let ip_key = sec_key + "_" + ip
+    // Reset counters from previous seconds (lazy cleanup)
+    let prev_sec = "s_" + string(sec - 1)
+    let prev_key = prev_sec + "_" + ip
+    if cmap_i(rl, prev_key) > 0 {
+        cmap_set_i(rl, prev_key, 0)
+    }
+    let count = cmap_i(rl, ip_key)
+    if count >= max {
+        return 0
+    }
+    let _ = cmap_incr(rl, ip_key, 1)
+    return 1
+}
+
+// Validate federation record has required fields, inject "federated":true tag.
+// Returns tagged JSON string or "" if invalid.
+fn fed_validate_and_tag(rec: string) -> string {
+    let ts = json_get_int(rec, "ts_ms")
+    let src = json_get_string(rec, "src")
+    let cid = json_get_string(rec, "call_id")
+    let m = json_get_string(rec, "method")
+    if ts <= 0 || str_eq(src, "") || str_eq(cid, "") || str_eq(m, "") {
+        return ""
+    }
+    // Inject "federated":true if not already present
+    if str_contains(rec, "\"federated\"") {
+        return rec
+    }
+    // Insert before final '}'
+    let rlen = len(rec)
+    return rec[0:rlen - 1] + ",\"federated\":true}"
+}
+
+fn http_worker(store: CMap, metrics: CMap, db_ch: chan[string], port: int) -> int {
+    let fd = http_bind(port)
+    if fd < 0 {
+        print("http bind failed on :" + string(port))
+        return 1
+    }
+    let key = api_key_configured()
+    let rate_limiter = cmap_new()
+    let max_rps = rate_limit_max()
+    if str_eq(key, "") {
+        print("api  http 0.0.0.0:" + string(port) + "  (NO AUTH — set ZAMAN_API_KEY)  rate=" + string(max_rps) + "/s")
+    } else {
+        print("api  http 0.0.0.0:" + string(port) + "  (X-API-Key / Bearer)  rate=" + string(max_rps) + "/s")
+    }
+    while 1 == 1 {
+        let c = http_accept(fd)
+        if c < 0 {
+            sleep_ms(5)
+            continue
+        }
+        // Rate limiting — only trust XFF if TCP peer matches ZAMAN_TRUSTED_PROXY
+        let mut rip = "direct"
+        let trusted_proxy = env_get_or("ZAMAN_TRUSTED_PROXY", "")
+        let peer_addr = http_header(c, "X-Real-IP")
+        if not str_eq(trusted_proxy, "") {
+            if str_eq(peer_addr, trusted_proxy) {
+                let xff = http_header(c, "X-Forwarded-For")
+                if not str_eq(xff, "") {
+                    rip = xff
+                }
+            }
+        } else {
+            let xff = http_header(c, "X-Forwarded-For")
+            if not str_eq(xff, "") {
+                rip = xff
+            }
+        }
+        if rate_check(rate_limiter, rip) == 0 {
+            let _ = http_respond_json(c, 429, "{\"error\":\"rate limit exceeded\"}")
+            let _ = http_close(c)
+            let _ = cmap_incr(metrics, "rate_limited", 1)
+            continue
+        }
+
+        let method = http_method(c)
+        let raw_path = http_path(c)
+        let path = path_only(raw_path)
+        let q = path_query(raw_path)
+
+        // Health check: minimal for unauthenticated, detailed for authenticated.
+        if str_eq(path, "/health") || str_eq(path, "/api/health") {
+            if api_request_authorized(c) == 1 {
+                // Authenticated: full detail
+                let db_ok = cmap_i(metrics, "db_ok")
+                let db_err = cmap_i(metrics, "db_err")
+                let db_drop = cmap_i(metrics, "db_drop")
+                let msgs = cmap_i(metrics, "msgs_total")
+                let uptime = now_ms() - cmap_i(metrics, "started_ms")
+                let mut db_status = "sqlite"
+                if db_is_clickhouse() == 1 {
+                    db_status = "clickhouse"
+                } else if db_is_postgres() == 1 {
+                    db_status = "postgres"
+                }
+                let days = retention_days()
+                let cutoff = retention_cutoff_ms(days)
+                let body = "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\"" +
+                    ",\"uptime_ms\":" + string(uptime) +
+                    ",\"db\":{\"driver\":\"" + db_status + "\",\"writes_ok\":" + string(db_ok) + ",\"writes_err\":" + string(db_err) + ",\"writes_dropped\":" + string(db_drop) + "}" +
+                    ",\"retention\":{\"days\":" + string(days) + ",\"cutoff_ms\":" + string(cutoff) + ",\"enabled\":" + (if days > 0 { "true" } else { "false" }) + "}" +
+                    ",\"captures\":" + string(msgs) +
+                    ",\"channel_capacity\":" + string(DB_CH_CAP) +
+                    "}"
+                let _ = http_respond_json(c, 200, body)
+            } else {
+                // Unauthenticated: liveness only
+                let _ = http_respond_json(c, 200, "{\"ok\":true}")
+            }
+        } else if api_request_authorized(c) == 0 {
+            let _ = http_respond_json(c, 401, "{\"error\":\"unauthorized\",\"hint\":\"X-API-Key or Authorization: Bearer\"}")
+        } else if str_eq(path, "/api/metrics") {
+            let body = metrics_json(metrics, store)
+            let _ = http_respond_json(c, 200, body)
+        } else if str_eq(path, "/metrics") {
+            let body = metrics_prom(metrics, store)
+            let _ = http_respond_ct(c, 200, "text/plain", body)
+        } else if str_eq(path, "/api/messages") {
+            let lim = parse_int_or(query_get(q, "limit"), 50)
+            let cid = query_get(q, "call_id")
+            let tr = query_get(q, "transport")
+            let agent = query_get(q, "agent")
+            let method = query_get(q, "method")
+            let mut src = query_get(q, "ip")
+            if str_eq(src, "") {
+                src = query_get(q, "src")
+            }
+            let fromq = query_get(q, "from_number")
+            let toq = query_get(q, "to_number")
+            let status_i = parse_int_or(query_get(q, "status"), 0)
+            let statusq = if status_i > 0 { string(status_i) } else { "" }
+            let since_ms = parse_int_or(query_get(q, "since_ms"), 0)
+            let until_ms = parse_int_or(query_get(q, "until_ms"), 0)
+            let stateq = query_get(q, "state")
+            let body = if db_is_clickhouse() == 1 {
+                ch_messages_json(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms, stateq)
+            } else if str_eq(agent, "") && str_eq(method, "") && str_eq(src, "") && str_eq(fromq, "") && str_eq(toq, "") && str_eq(statusq, "") && str_eq(stateq, "") && since_ms <= 0 && until_ms <= 0 {
+                messages_json_ex(store, lim, cid, tr, "", "", "", "", "", "", 0, 0)
+            } else {
+                db_messages_json_full(lim, cid, tr, agent, method, src, fromq, toq, statusq, since_ms, until_ms, stateq)
+            }
+            let _ = http_respond_json(c, 200, body)
+        } else if str_has_prefix(path, "/api/messages/") {
+            let id_s = path[14:]
+            let id = parse_int_or(id_s, 0 - 1)
+            let one = message_one_json(store, id)
+            if str_eq(one, "") {
+                let _ = http_respond_json(c, 404, "{\"error\":\"not found\"}")
+            } else {
+                let _ = http_respond_json(c, 200, one)
+            }
+        } else if str_eq(path, "/api/report") || str_eq(path, "/api/report/summary") {
+            let _ = http_respond_json(c, 200, db_report_summary_fast_json())
+        } else if str_eq(path, "/api/report/daily") {
+            let lim = parse_int_or(query_get(q, "limit"), 30)
+            let _ = http_respond_json(c, 200, db_report_daily_json(lim))
+        } else if str_eq(path, "/api/report/top-calls") {
+            let lim = parse_int_or(query_get(q, "limit"), 20)
+            let agent = query_get(q, "agent")
+            let state = query_get(q, "state")
+            let src = query_get(q, "src")
+            let dst = query_get(q, "dst")
+            let from_number = query_get(q, "from_number")
+            let to_number = query_get(q, "to_number")
+            let _ = http_respond_json(c, 200, db_report_top_calls_json(lim, agent, state, src, dst, from_number, to_number))
+        } else if str_eq(path, "/api/report/response-codes") {
+            let _ = http_respond_json(c, 200, db_report_response_codes_json())
+        } else if str_eq(path, "/api/report/top-talkers") {
+            let lim = parse_int_or(query_get(q, "limit"), 20)
+            let _ = http_respond_json(c, 200, db_report_top_talkers_fast_json(lim))
+        } else if str_eq(path, "/api/report/kpi") {
+            let _ = http_respond_json(c, 200, db_report_kpi_fast_json())
+        } else if str_eq(path, "/api/report/cps") {
+            let mins = parse_int_or(query_get(q, "minutes"), 60)
+            let _ = http_respond_json(c, 200, db_report_cps_json(mins))
+        } else if str_eq(path, "/api/report/agents") {
+            let _ = http_respond_json(c, 200, db_report_agents_fast_json())
+        } else if str_eq(path, "/api/realtime") {
+            let win = parse_int_or(query_get(q, "window"), 5)
+            let agent = query_get(q, "agent")
+            let _ = http_respond_json(c, 200, db_realtime_json(win, agent))
+        } else if str_eq(path, "/api/calls/active") {
+            let lim = parse_int_or(query_get(q, "limit"), 50)
+            let agent = query_get(q, "agent")
+            let state = query_get(q, "state")
+            let src = query_get(q, "src")
+            let dst = query_get(q, "dst")
+            let from_number = query_get(q, "from_number")
+            let to_number = query_get(q, "to_number")
+            let _ = http_respond_json(c, 200, db_active_calls_json(lim, agent, state, src, dst, from_number, to_number))
+        } else if str_eq(path, "/api/nodes") {
+            let _ = http_respond_json(c, 200, db_node_health_json())
+        } else if str_eq(path, "/api/sla/agents") {
+            let _ = http_respond_json(c, 200, db_sla_by_agent_fast_json())
+        } else if str_eq(path, "/api/sla/destinations") {
+            let _ = http_respond_json(c, 200, db_sla_by_dest_fast_json())
+        } else if str_eq(path, "/api/anomalies") {
+            let _ = http_respond_json(c, 200, db_anomalies_json())
+        } else if str_eq(path, "/api/delete") && str_eq(method, "POST") {
+            let body = http_body(c)
+            let del_cid = json_get_string(body, "call_id")
+            let del_before = json_get_int(body, "before_ts")
+            if not str_eq(del_cid, "") {
+                let deldb = db_open()
+                if sql_ok(deldb) == 1 {
+                    let _ = sql_exec_plain(deldb, "DELETE FROM captures WHERE call_id = " + sql_quote(del_cid))
+                    let _ = sql_close(deldb)
+                }
+                let _ = http_respond_json(c, 200, "{\"ok\":true,\"deleted_call_id\":\"" + jesc(del_cid) + "\"}")
+            } else if del_before > 0 {
+                let deldb = db_open()
+                if sql_ok(deldb) == 1 {
+                    let _ = sql_exec_plain(deldb, "DELETE FROM captures WHERE ts_ms < " + string(del_before))
+                    let _ = sql_close(deldb)
+                }
+                let _ = http_respond_json(c, 200, "{\"ok\":true,\"deleted_before\":" + string(del_before) + "}")
+            } else {
+                let _ = http_respond_json(c, 400, "{\"error\":\"provide call_id or before_ts\"}")
+            }
+        } else if str_eq(path, "/api/related") {
+            let rel_cid = query_get(q, "call_id")
+            if str_eq(rel_cid, "") {
+                let _ = http_respond_json(c, 400, "{\"error\":\"call_id required\"}")
+            } else {
+                let _ = http_respond_json(c, 200, db_related_calls_json(rel_cid))
+            }
+        // Grafana JSON datasource compatibility (/api/grafana/*)
+        } else if str_eq(path, "/api/grafana/") || str_eq(path, "/api/grafana") {
+            // Test endpoint — Grafana datasource health check
+            let _ = http_respond_json(c, 200, "{\"status\":\"ok\"}")
+        } else if str_eq(path, "/api/grafana/search") {
+            // Available metrics
+            let _ = http_respond_json(c, 200, "[\"messages_total\",\"requests\",\"responses\",\"echoes\",\"hep_total\",\"asr\",\"ner\",\"active_calls\",\"err_rate\"]")
+        } else if str_eq(path, "/api/grafana/query") && str_eq(method, "POST") {
+            // Return current metric values as Grafana SimpleJSON time-series
+            let _ = http_body(c)
+            let ts = string(now_ms())
+            let msgs = string(cmap_i(metrics, "msgs_total"))
+            let reqs = string(cmap_i(metrics, "requests"))
+            let resps = string(cmap_i(metrics, "responses"))
+            let echs = string(cmap_i(metrics, "echoes"))
+            let htot = string(cmap_i(metrics, "hep_total"))
+            // Fetch KPI + realtime for ASR/NER/active_calls/err_rate
+            let kpi = db_report_kpi_fast_json()
+            let rt = db_realtime_json(5, "")
+            let asr_v = string(json_get_int(kpi, "asr"))
+            let ner_v = string(json_get_int(kpi, "ner"))
+            let active = string(json_get_int(rt, "active_calls"))
+            let errr = string(json_get_int(rt, "err_rate"))
+            let _ = http_respond_json(c, 200,
+                "[{\"target\":\"messages_total\",\"datapoints\":[[" + msgs + "," + ts + "]]}," +
+                "{\"target\":\"requests\",\"datapoints\":[[" + reqs + "," + ts + "]]}," +
+                "{\"target\":\"responses\",\"datapoints\":[[" + resps + "," + ts + "]]}," +
+                "{\"target\":\"echoes\",\"datapoints\":[[" + echs + "," + ts + "]]}," +
+                "{\"target\":\"hep_total\",\"datapoints\":[[" + htot + "," + ts + "]]}," +
+                "{\"target\":\"asr\",\"datapoints\":[[" + asr_v + "," + ts + "]]}," +
+                "{\"target\":\"ner\",\"datapoints\":[[" + ner_v + "," + ts + "]]}," +
+                "{\"target\":\"active_calls\",\"datapoints\":[[" + active + "," + ts + "]]}," +
+                "{\"target\":\"err_rate\",\"datapoints\":[[" + errr + "," + ts + "]]}]")
+        // ── Federation: remote Zaman instances push captures here ──
+        // ── QoS / MOS for a call ──
+        } else if str_eq(path, "/api/qos") {
+            let qos_cid = query_get(q, "call_id")
+            if str_eq(qos_cid, "") {
+                let _ = http_respond_json(c, 400, "{\"error\":\"call_id required\"}")
+            } else {
+                // Find RTCP records for this call and extract QoS
+                let qos_db = db_open()
+                let mut qos_out = "["
+                let mut qos_first = 1
+                if sql_ok(qos_db) == 1 {
+                    let qos_rows = sql_query_rows(qos_db,
+                        "SELECT record_json FROM captures WHERE call_id = " + sql_quote(qos_cid) +
+                        " AND proto = 'rtcp' ORDER BY ts_ms", [])
+                    if sql_rows_ok(qos_rows) == 1 {
+                        while sql_rows_next(qos_rows) == 1 {
+                            let qrec = sql_rows_str(qos_rows, 0)
+                            let qos_val = json_get_string(qrec, "qos")
+                            if not str_eq(qos_val, "") {
+                                if qos_first == 1 {
+                                    qos_first = 0
+                                } else {
+                                    qos_out = qos_out + ","
+                                }
+                                qos_out = qos_out + qos_val
+                            }
+                        }
+                        let _ = sql_rows_close(qos_rows)
+                    }
+                    let _ = sql_close(qos_db)
+                }
+                let _ = http_respond_json(c, 200, qos_out + "]")
+            }
+        // ── Federation ──
+        } else if str_eq(path, "/api/federation/push") && str_eq(method, "POST") {
+            let body = http_body(c)
+            // Body is a JSON array of capture records
+            if len(body) > 2 && str_has_prefix(body, "[") {
+                // Parse array and enqueue each record
+                // Simple approach: split on },{ boundaries
+                let mut count = 0
+                let mut rejected = 0
+                let mut pos = 0
+                let blen = len(body)
+                while pos < blen {
+                    // Find next {
+                    if u8_at(body, pos) == 123 {
+                        // Find matching }
+                        let mut depth = 0
+                        let mut end = pos
+                        while end < blen {
+                            let ch = u8_at(body, end)
+                            if ch == 123 {
+                                depth = depth + 1
+                            } else if ch == 125 {
+                                depth = depth - 1
+                                if depth == 0 {
+                                    break
+                                }
+                            }
+                            end = end + 1
+                        }
+                        if depth == 0 && end < blen {
+                            let rec = body[pos:end + 1]
+                            if len(rec) > 10 {
+                                let validated = fed_validate_and_tag(rec)
+                                if not str_eq(validated, "") {
+                                    if db_enqueue(db_ch, validated) != 1 {
+                                        let _ = cmap_incr(metrics, "db_drop", 1)
+                                    }
+                                    cap_push(store, metrics, validated)
+                                    count = count + 1
+                                } else {
+                                    rejected = rejected + 1
+                                }
+                            }
+                        }
+                        pos = end + 1
+                    } else {
+                        pos = pos + 1
+                    }
+                }
+                let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":" + string(count) + ",\"rejected\":" + string(rejected) + "}")
+            } else if len(body) > 2 && str_has_prefix(body, "{") {
+                // Single record
+                let validated = fed_validate_and_tag(body)
+                if not str_eq(validated, "") {
+                    if db_enqueue(db_ch, validated) != 1 {
+                        let _ = cmap_incr(metrics, "db_drop", 1)
+                    }
+                    cap_push(store, metrics, validated)
+                    let _ = http_respond_json(c, 200, "{\"ok\":true,\"accepted\":1}")
+                } else {
+                    let _ = http_respond_json(c, 400, "{\"error\":\"invalid record: missing required fields (ts_ms, src, call_id, method)\"}")
+                }
+            } else {
+                let _ = http_respond_json(c, 400, "{\"error\":\"expected JSON array or object\"}")
+            }
+        } else if str_eq(path, "/api/federation/health") {
+            let _ = http_respond_json(c, 200, "{\"ok\":true,\"service\":\"zaman-core\",\"version\":\"" + VERSION + "\",\"federation\":true}")
+        } else if str_eq(path, "/api/export") {
+            let lim = parse_int_or(query_get(q, "limit"), 100)
+            let cid = query_get(q, "call_id")
+            let tr = query_get(q, "transport")
+            let body = messages_json_ex(store, lim, cid, tr, "", "", "", "", "", "", 0, 0)
+            let _ = http_respond_ct(c, 200, "application/json", body)
+        } else if str_eq(path, "/api/probe") && str_eq(method, "POST") {
+            let body = http_body(c)
+            let mut host = json_get_string(body, "host")
+            let mut port_p = json_get_int(body, "port")
+            let mut wait_ms = json_get_int(body, "timeout_ms")
+            if str_eq(host, "") {
+                host = "127.0.0.1"
+            }
+            if port_p <= 0 {
+                port_p = 5060
+            }
+            if wait_ms <= 0 {
+                wait_ms = 2000
+            }
+            if wait_ms > 5000 {
+                wait_ms = 5000
+            }
+            let result = do_probe(metrics, host, port_p, wait_ms)
+            if str_contains(result, "probe disabled") || str_contains(result, "host blocked") {
+                let _ = http_respond_json(c, 403, result)
+            } else {
+                let _ = http_respond_json(c, 200, result)
+            }
+        } else if str_eq(path, "/api/stats") {
+            let _ = http_respond_json(c, 200, metrics_json(metrics, store))
+        } else {
+            let _ = http_respond_json(c, 404, "{\"error\":\"not found\",\"hint\":\"/api/health /api/metrics /api/messages /api/report /api/probe /metrics\"}")
+        }
+        let _ = http_close(c)
+    }
+    return 0
+}

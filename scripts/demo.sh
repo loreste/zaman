@@ -11,7 +11,7 @@ WEB="${ZAMAN_WEB_PORT:-3000}"
 
 mkdir -p "${ROOT}/bin"
 if [[ ! -x "${ROOT}/bin/zaman-core" ]]; then
-  mako build --release "${ROOT}/core/main.mko" -o "${ROOT}/bin/zaman-core"
+  make -C "${ROOT}" build
 fi
 
 # Demo enables probe for the UI form; never do this on a public interface.

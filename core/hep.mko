@@ -1,0 +1,524 @@
+// Zaman core — HEPv3 / EEP protocol decoder, RTCP QoS parsing, and TCP/TLS streaming collectors.
+
+// ---- RTCP / QoS / MOS scoring ----
+// Parse RTCP Sender Report (SR) and Receiver Report (RR) payloads.
+// Compute MOS from jitter + packet loss using the E-model (ITU-T G.107 simplified).
+//
+// RTCP RR block (24 bytes):
+//   SSRC (4) + fraction_lost(1) + cumulative_lost(3) + highest_seq(4)
+//   + jitter(4) + last_sr(4) + delay_since_sr(4)
+
+fn rtcp_parse_qos(payload: string) -> string {
+    if len(payload) < 12 {
+        return ""
+    }
+    // RTCP header: V(2)|P(1)|RC(5)|PT(8)|Length(16)
+    let pt = u8_at(payload, 1)
+    let rc = u8_at(payload, 0) % 32  // lower 5 bits = report count
+
+    // PT 200 = SR, PT 201 = RR
+    if pt != 200 && pt != 201 {
+        return ""
+    }
+
+    // For SR, report blocks start at offset 28 (after sender info)
+    // For RR, report blocks start at offset 8
+    let mut rr_offset = 8
+    if pt == 200 {
+        rr_offset = 28
+    }
+
+    if rc == 0 || len(payload) < rr_offset + 24 {
+        return ""
+    }
+
+    // Parse first report block
+    let fraction_lost = u8_at(payload, rr_offset + 4)
+    let cumul_lost = u8_at(payload, rr_offset + 5) * 65536 + u8_at(payload, rr_offset + 6) * 256 + u8_at(payload, rr_offset + 7)
+    let jitter = u32be_at(payload, rr_offset + 12)
+    let dlsr = u32be_at(payload, rr_offset + 20)
+
+    // Fraction lost is 0-255, convert to percentage
+    let loss_pct = fraction_lost * 100 / 256
+
+    // Jitter is in timestamp units (typically 8kHz for G.711), convert to ms
+    let jitter_ms = jitter / 8
+
+    // E-model simplified MOS calculation (ITU-T G.107)
+    // R = 93.2 - Id - Ie_eff
+    // Id = 0.024 * delay + 0.11 * (delay - 177.3) * H(delay - 177.3)
+    // Ie_eff = function of codec + packet loss
+    // Simplified: R = 93.2 - (jitter_ms * 0.1) - (loss_pct * 2.5)
+    let mut r_factor = 93 - jitter_ms / 10 - loss_pct * 25 / 10
+    if r_factor < 0 {
+        r_factor = 0
+    }
+    if r_factor > 100 {
+        r_factor = 100
+    }
+
+    // MOS = 1 + 0.035*R + R*(R-60)*(100-R)*7e-6
+    // Simplified integer approximation: MOS*10 for one decimal
+    let mut mos_x10 = 10
+    if r_factor > 0 {
+        mos_x10 = 10 + r_factor * 35 / 1000
+        if r_factor > 60 {
+            mos_x10 = mos_x10 + (r_factor - 60) * (100 - r_factor) * r_factor / 1400000
+        }
+    }
+    if mos_x10 > 50 {
+        mos_x10 = 50
+    }
+    if mos_x10 < 10 {
+        mos_x10 = 10
+    }
+
+    return "{\"jitter_ms\":" + string(jitter_ms) +
+        ",\"loss_pct\":" + string(loss_pct) +
+        ",\"loss_cumulative\":" + string(cumul_lost) +
+        ",\"r_factor\":" + string(r_factor) +
+        ",\"mos_x10\":" + string(mos_x10) +
+        ",\"mos\":\"" + string(mos_x10 / 10) + "." + string(mos_x10 % 10) + "\"" +
+        ",\"dlsr\":" + string(dlsr) +
+        "}"
+}
+
+// Enrich RTCP captures with parsed QoS metrics.
+fn enrich_rtcp_record(record_json: string, payload: string) -> string {
+    let qos = rtcp_parse_qos(payload)
+    if str_eq(qos, "") {
+        return record_json
+    }
+    // Inject qos object into record JSON before the closing }
+    if len(record_json) > 2 {
+        return record_json[0:len(record_json) - 1] + ",\"qos\":" + qos + "}"
+    }
+    return record_json
+}
+
+// ---- HEPv3 / EEP (Homer Extensible Encapsulation) ----
+// Chunk layout: vendor_id(2) type_id(2) length(2) value(length-6)
+// Compatible with heplify / kamailio sipcapture / OpenSIPS HEP agents.
+// Types (vendor 0): 1 version, 2 IP proto, 3/4 IPv4, 5/6 IPv6, 7/8 ports,
+// 9/10 timestamps, 11 proto type (1=SIP), 12 node id, 14 password, 15 payload,
+// 17 correlation id, 18 vlan, 19 node name.
+
+struct HepInfo {
+    ok: int
+    version: int
+    ip_proto: int
+    src_ip: string
+    dst_ip: string
+    src_port: int
+    dst_port: int
+    tsec: int
+    tusec: int
+    proto_type: int
+    node_id: int
+    node_pw: string
+    node_name: string
+    correlation_id: string
+    vlan: int
+    payload: string
+}
+
+fn hep_empty() -> HepInfo {
+    return HepInfo {
+        ok: 0,
+        version: 0,
+        ip_proto: 0,
+        src_ip: "",
+        dst_ip: "",
+        src_port: 0,
+        dst_port: 0,
+        tsec: 0,
+        tusec: 0,
+        proto_type: 0,
+        node_id: 0,
+        node_pw: "",
+        node_name: "",
+        correlation_id: "",
+        vlan: 0,
+        payload: "",
+    }
+}
+
+fn hep_decode(pkt: string) -> HepInfo {
+    let empty = hep_empty()
+    if len(pkt) < 6 {
+        return empty
+    }
+    if not str_eq(pkt[0:4], "HEP3") {
+        return empty
+    }
+    let total = u16be_at(pkt, 4)
+    // Strict agents set total == len(pkt). Accept total <= len for trailing noise.
+    if total < 6 || total > len(pkt) {
+        return empty
+    }
+    let end = total
+    let mut off = 6
+    let mut info = hep_empty()
+
+    while off + 6 <= end {
+        // vendor ignored for matching (heplify does the same) — standard is 0
+        let typ = u16be_at(pkt, off + 2)
+        let clen = u16be_at(pkt, off + 4)
+        if clen < 6 || off + clen > end {
+            break
+        }
+        let voff = off + 6
+        let vlen = clen - 6
+        if typ == 1 && vlen >= 1 {
+            info.version = u8_at(pkt, voff)
+        } else if typ == 2 && vlen >= 1 {
+            info.ip_proto = u8_at(pkt, voff)
+        } else if typ == 3 && vlen >= 4 {
+            info.src_ip = ipv4_at(pkt, voff)
+        } else if typ == 4 && vlen >= 4 {
+            info.dst_ip = ipv4_at(pkt, voff)
+        } else if typ == 5 && vlen >= 16 {
+            info.src_ip = ipv6_at(pkt, voff)
+        } else if typ == 6 && vlen >= 16 {
+            info.dst_ip = ipv6_at(pkt, voff)
+        } else if typ == 7 && vlen >= 2 {
+            info.src_port = u16be_at(pkt, voff)
+        } else if typ == 8 && vlen >= 2 {
+            info.dst_port = u16be_at(pkt, voff)
+        } else if typ == 9 && vlen >= 4 {
+            info.tsec = u32be_at(pkt, voff)
+        } else if typ == 10 && vlen >= 4 {
+            info.tusec = u32be_at(pkt, voff)
+        } else if typ == 11 && vlen >= 1 {
+            info.proto_type = u8_at(pkt, voff)
+        } else if typ == 12 && vlen >= 4 {
+            info.node_id = u32be_at(pkt, voff)
+        } else if typ == 14 && vlen > 0 {
+            info.node_pw = pkt[voff:voff + vlen]
+        } else if typ == 15 && vlen > 0 {
+            info.payload = pkt[voff:voff + vlen]
+        } else if typ == 17 && vlen > 0 {
+            info.correlation_id = pkt[voff:voff + vlen]
+        } else if typ == 18 && vlen >= 2 {
+            info.vlan = u16be_at(pkt, voff)
+        } else if typ == 19 && vlen > 0 {
+            info.node_name = pkt[voff:voff + vlen]
+        }
+        off = off + clen
+    }
+
+    if str_eq(info.payload, "") {
+        return empty
+    }
+    info.ok = 1
+    return info
+}
+
+fn hep_ts_ms(info: HepInfo) -> int {
+    if info.tsec <= 0 {
+        return now_ms()
+    }
+    // tsec is UNIX seconds; tusec is microseconds (not milliseconds)
+    return info.tsec * 1000 + info.tusec / 1000
+}
+
+fn hep_password_ok(info: HepInfo) -> int {
+    let want = env_get_or("ZAMAN_HEP_PASSWORD", "")
+    if str_eq(want, "") {
+        return 1
+    }
+    return ct_str_eq(info.node_pw, want)
+}
+
+fn hep_endpoint(ip: string, port: int) -> string {
+    if str_eq(ip, "") {
+        if port > 0 {
+            return ":" + string(port)
+        }
+        return ""
+    }
+    // bracket IPv6
+    if str_contains(ip, ":") {
+        return "[" + ip + "]:" + string(port)
+    }
+    return ip + ":" + string(port)
+}
+
+fn hep_agent_label(info: HepInfo) -> string {
+    if not str_eq(info.node_name, "") {
+        return info.node_name
+    }
+    return "hep-" + string(info.node_id)
+}
+
+fn handle_hep_packet(store: CMap, metrics: CMap, db_ch: chan[string], pkt: string) {
+    handle_hep_packet_via(store, metrics, db_ch, pkt, "HEP3")
+}
+
+fn handle_hep_packet_via(store: CMap, metrics: CMap, db_ch: chan[string], pkt: string, transport: string) {
+    let info = hep_decode(pkt)
+    if info.ok == 0 {
+        let _ = cmap_incr(metrics, "hep_err", 1)
+        return
+    }
+    if hep_password_ok(info) == 0 {
+        let _ = cmap_incr(metrics, "hep_auth_fail", 1)
+        return
+    }
+    let _ = cmap_incr(metrics, "hep_total", 1)
+    if str_eq(transport, "HEP3/TCP") {
+        let _ = cmap_incr(metrics, "hep_tcp", 1)
+    } else if str_eq(transport, "HEP3/TLS") {
+        let _ = cmap_incr(metrics, "hep_tls", 1)
+    } else {
+        let _ = cmap_incr(metrics, "hep_udp", 1)
+    }
+
+    let mut ptype = info.proto_type
+    if ptype == 0 {
+        if sip_ok(info.payload) == 1 {
+            ptype = 1
+        }
+    }
+    let pname = proto_type_name(ptype)
+    if ptype == 1 {
+        let _ = cmap_incr(metrics, "hep_sip", 1)
+    } else if ptype == 5 {
+        let _ = cmap_incr(metrics, "hep_rtcp", 1)
+    } else {
+        let _ = cmap_incr(metrics, "hep_other", 1)
+    }
+
+    let src = hep_endpoint(info.src_ip, info.src_port)
+    let dst = hep_endpoint(info.dst_ip, info.dst_port)
+    let agent = hep_agent_label(info)
+    let ts = hep_ts_ms(info)
+    let mut rec = make_record_ex(
+        db_ch,
+        metrics,
+        src,
+        dst,
+        transport,
+        info.payload,
+        agent,
+        pname,
+        ts,
+        info.node_id,
+        info.node_name,
+        info.correlation_id
+    )
+    // Enrich RTCP records with QoS metrics (jitter, loss, MOS)
+    if ptype == 5 {
+        rec = enrich_rtcp_record(rec, info.payload)
+    }
+    cap_push(store, metrics, rec)
+
+    if ptype == 1 && sip_ok(info.payload) == 1 {
+        if sip_is_request(info.payload) == 1 {
+            bump_method(metrics, sip_method(info.payload))
+            let _ = cmap_incr(metrics, "requests", 1)
+        } else {
+            let _ = cmap_incr(metrics, "responses", 1)
+            let code = sip_status_code(info.payload)
+            if code >= 200 && code < 300 {
+                let _ = cmap_incr(metrics, "status_2xx", 1)
+            } else if code >= 400 {
+                let _ = cmap_incr(metrics, "status_4xx_5xx", 1)
+            }
+        }
+    } else if ptype == 1 {
+        let _ = cmap_incr(metrics, "parse_err", 1)
+    }
+}
+
+// Drain complete HEP3 frames from a stream buffer; return remainder.
+fn hep_buffer_drain(store: CMap, metrics: CMap, db_ch: chan[string], buf: string, transport: string) -> string {
+    let mut b = buf
+    // Cap buffer to limit memory DoS on a single TCP/TLS session
+    if len(b) > 2097152 {
+        let _ = cmap_incr(metrics, "hep_err", 1)
+        return ""
+    }
+    while len(b) >= 6 {
+        if not str_eq(b[0:4], "HEP3") {
+            let idx = str_index(b, "HEP3")
+            if idx < 0 {
+                return ""
+            }
+            b = b[idx:]
+            continue
+        }
+        let total = u16be_at(b, 4)
+        if total < 6 || total > 65535 {
+            // corrupt length — skip one byte and resync
+            b = b[1:]
+            let _ = cmap_incr(metrics, "hep_err", 1)
+            continue
+        }
+        if len(b) < total {
+            return b
+        }
+        // Own the frame before decode (especially important for TLS-sourced buf).
+        let pkt = "" + b[0:total]
+        b = b[total:]
+        handle_hep_packet_via(store, metrics, db_ch, pkt, transport)
+    }
+    return b
+}
+
+// Returns int so it can be kicked as a per-connection crew job.
+fn hep_tcp_session(store: CMap, metrics: CMap, db_ch: chan[string], fd: int) -> int {
+    let peer = tcp_peer_addr(fd)
+    if hep_peer_allowed(peer) == 0 {
+        let _ = cmap_incr(metrics, "hep_deny", 1)
+        let _ = tcp_close(fd)
+        return 0
+    }
+    let mut buf = ""
+    while 1 == 1 {
+        let chunk = tcp_read(fd)
+        if str_eq(chunk, "") {
+            break
+        }
+        buf = buf + chunk
+        buf = hep_buffer_drain(store, metrics, db_ch, buf, "HEP3/TCP")
+        if str_eq(buf, "") && len(chunk) == 0 {
+            break
+        }
+    }
+    let _ = tcp_close(fd)
+    return 0
+}
+
+// TLS session: read all data, close TLS, then parse/enqueue.
+// The conn is already accepted (handshake serialized in the accept loop).
+// Kicked on a nested crew so the accept loop stays responsive.
+fn hep_tls_session(store: CMap, metrics: CMap, db_ch: chan[string], conn: TlsConn) -> int {
+    if tls_conn_fd(conn) < 0 {
+        return 0
+    }
+    let mut buf = ""
+    while 1 == 1 {
+        let chunk = tls_read(conn, 65536)
+        if str_eq(chunk, "") {
+            break
+        }
+        // Force-own TLS bytes before any later slice/parse.
+        buf = buf + ("" + chunk)
+        // Cap buffer to limit memory DoS on a single TLS session
+        if len(buf) > 2097152 {
+            let _ = cmap_incr(metrics, "hep_err", 1)
+            buf = ""
+            break
+        }
+    }
+    // Close TLS BEFORE parse — avoids malloc free-of-unallocated under crew.
+    let _ = tls_conn_close(conn)
+    if len(buf) >= 6 {
+        let owned = "" + buf
+        let _ = hep_buffer_drain(store, metrics, db_ch, owned, "HEP3/TLS")
+    }
+    return 0
+}
+
+// ---- HEP worker loops ----
+
+fn hep_worker(store: CMap, metrics: CMap, db_ch: chan[string], host: string, port: int) -> int {
+    let fd = sip_udp_bind(host, port)
+    if fd < 0 {
+        print("hep bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    let pw = env_get_or("ZAMAN_HEP_PASSWORD", "")
+    if str_eq(pw, "") {
+        print("hep  udp  " + host + ":" + string(port) + "  (HEPv3, no password)")
+    } else {
+        print("hep  udp  " + host + ":" + string(port) + "  (HEPv3, password required)")
+    }
+    let _ = io_set_nonblocking(fd, 1)
+    while 1 == 1 {
+        let pkt = sip_udp_recv(fd, 65535)
+        if not str_eq(pkt, "") {
+            let peer = udp_last_sender()
+            if hep_peer_allowed(peer) == 0 {
+                let _ = cmap_incr(metrics, "hep_deny", 1)
+            } else {
+                handle_hep_packet_via(store, metrics, db_ch, pkt, "HEP3")
+            }
+        } else {
+            sleep_ms(2)
+        }
+    }
+    return 0
+}
+
+// HEP/TCP accept loop — kicked from main crew. Each accepted peer is itself
+// kicked on a nested crew (Mako structured concurrency — never free `go`).
+// drain(0) detaches the session job so the accept loop keeps running.
+fn hep_tcp_worker(store: CMap, metrics: CMap, db_ch: chan[string], host: string, port: int) -> int {
+    let fd = tcp_listen_addr(host, port)
+    if fd < 0 {
+        print("hep tcp bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    print("hep  tcp  " + host + ":" + string(port) + "  (HEPv3, crew.kick/session)")
+    while 1 == 1 {
+        let c = tcp_accept(fd)
+        if c < 0 {
+            sleep_ms(5)
+            continue
+        }
+        crew sess {
+            let _ = sess.kick(hep_tcp_session(store, metrics, db_ch, c))
+            let _ = sess.drain(0)
+        }
+    }
+    return 0
+}
+
+// HEP/TLS accept loop — kicked from main crew.
+// All TLS I/O is inline (no nested kick): OpenSSL is not safe across
+// concurrent kicked handshakes, and drain(0) cancels mid-read.
+// HEP agents batch-send then close, so inline is fast enough.
+fn hep_tls_worker(
+    store: CMap,
+    metrics: CMap,
+    db_ch: chan[string],
+    host: string,
+    port: int,
+    cert: string,
+    key: string
+) -> int {
+    if tls_server_available() == 0 {
+        print("hep  tls  skipped (OpenSSL / tls_server_available=0)")
+        return idle_worker()
+    }
+    let srv = tls_server_new(cert, key)
+    let fd = tcp_listen_addr(host, port)
+    if fd < 0 {
+        print("hep tls bind failed on " + host + ":" + string(port))
+        return 1
+    }
+    print("hep  tls  " + host + ":" + string(port) + "  cert=" + cert + "  (inline session)")
+    while 1 == 1 {
+        let c = tcp_accept(fd)
+        if c < 0 {
+            sleep_ms(5)
+            continue
+        }
+        let peer = tcp_peer_addr(c)
+        if hep_peer_allowed(peer) == 0 {
+            let _ = cmap_incr(metrics, "hep_deny", 1)
+            let _ = tcp_close(c)
+            continue
+        }
+        let tls_c = tls_accept(srv, c)
+        if tls_conn_fd(tls_c) < 0 {
+            let _ = cmap_incr(metrics, "hep_err", 1)
+            let _ = tcp_close(c)
+            continue
+        }
+        let _ = hep_tls_session(store, metrics, db_ch, tls_c)
+    }
+    return 0
+}

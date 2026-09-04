@@ -8,10 +8,23 @@ data/
 *.db-wal
 *.db-shm
 
-# TLS certificates
+# TLS certificates & private keys
 *.crt
 *.key
 *.pem
+*.pfx
+*.p12
+*.cer
+*.der
+
+# SSH keys & secrets
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+*.pub
+authorized_keys
+known_hosts
 
 # Local secrets / runtime environment
 .env
@@ -19,11 +32,19 @@ data/
 *.env
 core.env
 web.env
+*.secret
+*.token
+
+# Dotfiles and directories (except .gitignore)
+.*
+!.gitignore
 
 # IDE / tools
 .claude/
 .tokensave/
 .DS_Store
+.vscode/
+.idea/
 vendor/
 weft.lock
 *.log

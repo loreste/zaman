@@ -33,6 +33,7 @@ bin/zaman-core: core/main.mko
 core: bin/zaman-core
 
 check: core/main.mko web/main.weft
+	makori check core/main.mko
 	weft check web/main.weft
 
 # ---- run ----

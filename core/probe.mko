@@ -1,0 +1,77 @@
+// Zaman core — Synthetic SIP OPTIONS probe client & validation.
+
+fn do_probe(metrics: CMap, host: string, port: int, wait_ms: int) -> string {
+    if probe_enabled() == 0 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"probe disabled (set ZAMAN_PROBE=1)\"}"
+    }
+    if host_is_blocked_for_probe(host) == 1 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"host blocked by probe policy\"}"
+    }
+    if port <= 0 || port > 65535 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"invalid port\"}"
+    }
+    // Cap wait — unbounded timeout freezes the single HTTP worker (H4).
+    let mut cap = wait_ms
+    if cap <= 0 {
+        cap = 2000
+    }
+    if cap > 5000 {
+        cap = 5000
+    }
+
+    let fd = sip_udp_bind("0.0.0.0", 0)
+    if fd < 0 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"bind failed\"}"
+    }
+    let branch = sip_branch()
+    let tag = sip_tag()
+    let call_id = sip_call_id_new("zaman.probe")
+    let mut h = ""
+    h = sip_headers_append(h, "Via", sip_via_value_rport("UDP", "127.0.0.1", 0, branch))
+    h = sip_headers_append(h, "From", sip_from_value("Zaman Probe", "sip:probe@zaman.local", tag))
+    h = sip_headers_append(h, "To", sip_to_value("", "sip:echo@" + host, ""))
+    h = sip_headers_append(h, "Call-ID", call_id)
+    h = sip_headers_append(h, "CSeq", sip_cseq_value(1, "OPTIONS"))
+    h = sip_headers_append(h, "Max-Forwards", "70")
+    h = sip_headers_append(h, "User-Agent", "Zaman-Probe/" + VERSION)
+    h = sip_headers_append(h, "Content-Length", "0")
+    let opts = sip_request("OPTIONS", "sip:echo@" + host + ":" + string(port), h, "")
+
+    let t0 = now_ms()
+    let sent = sip_udp_send(fd, host, port, opts)
+    if sent < 0 {
+        let _ = udp_close(fd)
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"send failed\"}"
+    }
+
+    let _ = io_set_nonblocking(fd, 1)
+    let mut waited = 0
+    let mut status = 0
+    let mut rtt = 0 - 1
+    while waited < cap {
+        let resp = sip_udp_recv(fd, 65535)
+        if not str_eq(resp, "") {
+            if sip_is_response(resp) == 1 {
+                status = sip_status_code(resp)
+                rtt = now_ms() - t0
+                break
+            }
+        }
+        sleep_ms(5)
+        waited = waited + 5
+    }
+    let _ = udp_close(fd)
+
+    if rtt < 0 {
+        let _ = cmap_incr(metrics, "probes_fail", 1)
+        return "{\"ok\":false,\"error\":\"timeout\",\"host\":\"" + jesc(host) + "\",\"port\":" + string(port) + ",\"timeout_ms\":" + string(cap) + "}"
+    }
+    cmap_set_i(metrics, "probe_rtt_ms", rtt)
+    let _ = cmap_incr(metrics, "probes_ok", 1)
+    return "{\"ok\":true,\"host\":\"" + jesc(host) + "\",\"port\":" + string(port) + ",\"status\":" + string(status) + ",\"rtt_ms\":" + string(rtt) + ",\"call_id\":\"" + jesc(call_id) + "\"}"
+}

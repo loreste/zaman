@@ -318,28 +318,39 @@ fn login_page(error_msg) {
     "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\"/>" +
     "<title>Login · Zaman</title>" +
     "<script src=\"https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4\"></script>" +
+    "<script>(function(){try{var t=localStorage.getItem('zaman-theme')||'dark';document.documentElement.dataset.theme=t}catch(e){document.documentElement.dataset.theme='dark'}})();</script>" +
     "<style type=\"text/tailwindcss\">" +
     "@theme{--color-ink:#fafafa;--color-bg:#09090b;--color-panel:#18181b;--color-line:#27272a;--color-accent:#a78bfa;}" +
+    ":root{--z-bg:#09090b;--z-surface:#111114;--z-panel:#18181b;--z-line:#1e1e22;--z-ink:#e4e4e7;--z-muted:#71717a;--z-soft:#52525b;--z-field:#111114;--z-glow:rgba(167,139,250,.06)}" +
+    "html[data-theme='light']{--z-bg:#f7f7f8;--z-surface:#ffffff;--z-panel:#ffffff;--z-line:#d9d9df;--z-ink:#18181b;--z-muted:#52525b;--z-soft:#71717a;--z-field:#ffffff;--z-glow:rgba(124,58,237,.08);color-scheme:light}" +
+    "html[data-theme='dark']{color-scheme:dark}" +
     "input:focus{border-color:#a78bfa!important;box-shadow:0 0 0 3px rgba(167,139,250,.15)!important}" +
-    ".login-card{background:rgba(24,24,27,.85);backdrop-filter:blur(20px)}" +
+    ".login-card{background:color-mix(in srgb,var(--z-panel) 88%,transparent);backdrop-filter:blur(20px)}" +
+    "html[data-theme='light'] .login-card{box-shadow:0 20px 60px rgba(24,24,27,.08)}" +
     "@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}" +
     ".fade-in{animation:fadein .4s ease-out}" +
     "</style></head>" +
-    "<body class=\"min-h-screen bg-[#0a0a0c] text-[#e4e4e7] flex items-center justify-center\" style=\"background:radial-gradient(ellipse at 50% 0%,rgba(167,139,250,.06) 0%,transparent 60%),#09090b\">" +
-    "<div class=\"w-full max-w-[380px] px-5 fade-in\">" +
-    "<div class=\"flex flex-col items-center mb-10\">" +
+    "<body class=\"min-h-screen\" style=\"background:var(--z-bg);color:var(--z-ink)\">" +
+    "<main class=\"min-h-screen grid place-items-center px-5 py-8\">" +
+    "<button type=\"button\" onclick=\"var h=document.documentElement,t=h.dataset.theme==='light'?'dark':'light';h.dataset.theme=t;try{localStorage.setItem('zaman-theme',t)}catch(e){}\" class=\"fixed right-5 top-5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors\" style=\"border-color:var(--z-line);background:var(--z-panel);color:var(--z-muted)\">Theme</button>" +
+    "<div class=\"w-full max-w-[420px] fade-in\">" +
+    "<div class=\"flex flex-col items-center mb-8\">" +
     "<div class=\"w-14 h-14 rounded-2xl bg-gradient-to-br from-[#a78bfa] to-[#6d28d9] grid place-items-center font-black text-xl text-[#09090b] mb-4 shadow-lg shadow-[rgba(167,139,250,.2)]\">Z</div>" +
     "<h1 class=\"text-2xl font-bold tracking-tight\">Zaman</h1>" +
-    "<p class=\"text-sm text-[#71717a] mt-1\">SIP monitoring · echo · metrics</p></div>" +
+    "<p class=\"text-sm mt-1\" style=\"color:var(--z-muted)\">SIP monitoring · echo · metrics</p></div>" +
     err +
-    "<form method=\"post\" action=\"/login\" class=\"login-card rounded-2xl border border-[#1e1e22] p-7 space-y-5 shadow-2xl shadow-black/30\">" +
-    "<div><label class=\"block text-[11px] font-medium text-[#71717a] uppercase tracking-wider mb-2\">Username</label>" +
-    "<input name=\"username\" required autofocus autocomplete=\"username\" class=\"w-full rounded-xl bg-[#111114] border border-[#1e1e22] px-4 py-2.5 text-sm transition-all duration-200 outline-none placeholder:text-[#3f3f46]\" placeholder=\"admin\"/></div>" +
-    "<div><label class=\"block text-[11px] font-medium text-[#71717a] uppercase tracking-wider mb-2\">Password</label>" +
-    "<input name=\"password\" type=\"password\" required autocomplete=\"current-password\" class=\"w-full rounded-xl bg-[#111114] border border-[#1e1e22] px-4 py-2.5 text-sm transition-all duration-200 outline-none placeholder:text-[#3f3f46]\" placeholder=\"········\"/></div>" +
-    "<button type=\"submit\" class=\"w-full rounded-xl px-4 py-3 text-sm font-semibold bg-gradient-to-r from-[#a78bfa] to-[#7c3aed] text-white shadow-lg shadow-[rgba(124,58,237,.25)] hover:shadow-[rgba(124,58,237,.4)] hover:brightness-110 transition-all duration-200 cursor-pointer\">Sign in</button></form>" +
-    "<p class=\"text-center text-xs text-[#52525b] mt-6\">Integrated SIP monitoring + echo system</p>" +
-    "</div></body></html>"
+    "<form method=\"post\" action=\"/login\" class=\"login-card rounded-xl border p-7 space-y-5\" style=\"border-color:var(--z-line);box-shadow:0 24px 80px rgba(0,0,0,.14)\">" +
+    "<div><label class=\"block text-[11px] font-semibold uppercase mb-2\" style=\"color:var(--z-muted);letter-spacing:.08em\">Username</label>" +
+    "<input name=\"username\" required autofocus autocomplete=\"username\" class=\"w-full rounded-lg border px-4 py-3 text-sm outline-none transition-all\" style=\"background:var(--z-field);border-color:var(--z-line);color:var(--z-ink)\" placeholder=\"admin\"/></div>" +
+    "<div><label class=\"block text-[11px] font-semibold uppercase mb-2\" style=\"color:var(--z-muted);letter-spacing:.08em\">Password</label>" +
+    "<input name=\"password\" type=\"password\" required autocomplete=\"current-password\" class=\"w-full rounded-lg border px-4 py-3 text-sm outline-none transition-all\" style=\"background:var(--z-field);border-color:var(--z-line);color:var(--z-ink)\"/></div>" +
+    "<button type=\"submit\" class=\"w-full rounded-lg px-4 py-3 text-sm font-semibold bg-gradient-to-r from-[#8b5cf6] to-[#7c3aed] text-white shadow-lg shadow-[rgba(124,58,237,.22)] hover:brightness-110 transition-all cursor-pointer\">Sign in</button>" +
+    "<div class=\"grid grid-cols-3 gap-2 border-t pt-4 text-center text-[11px]\" style=\"border-color:var(--z-line);color:var(--z-muted)\">" +
+    "<div><div class=\"font-semibold\" style=\"color:var(--z-ink)\">HEP</div><div>capture</div></div>" +
+    "<div><div class=\"font-semibold\" style=\"color:var(--z-ink)\">SIP</div><div>ladder</div></div>" +
+    "<div><div class=\"font-semibold\" style=\"color:var(--z-ink)\">RBAC</div><div>secure</div></div></div></form>" +
+    "<p class=\"text-center text-xs mt-6\" style=\"color:var(--z-muted)\">Integrated SIP monitoring and operations console</p>" +
+    "</div></main></body></html>"
 }
 
 // LDAP/HTTP auth: ZAMAN_LDAP_URL + ZAMAN_LDAP_BIND_DN
@@ -500,15 +511,40 @@ fn layout_inner(title, body, user, csrf) {
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>" +
     "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\"/>" +
     "<title>" + h(title) + " · " + brand_name() + "</title>" + cdn +
+    "<script>(function(){try{var t=localStorage.getItem('zaman-theme')||'dark';document.documentElement.dataset.theme=t}catch(e){document.documentElement.dataset.theme='dark'}})();</script>" +
     "<script src=\"https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4\"></script>" +
     "<style type=\"text/tailwindcss\">" +
     "@theme{--color-ink:#e4e4e7;--color-muted:#a1a1aa;--color-panel:#131316;--color-line:#1e1e22;--color-bg:#0a0a0c;--color-accent:#a78bfa;--color-ok:#34d399;--color-warn:#fbbf24;--color-bad:#f87171;}" +
+    ":root{--z-bg:#0a0a0c;--z-sidebar:#0e0e11;--z-surface:#131316;--z-panel:#18181b;--z-field:#09090b;--z-line:#1e1e22;--z-line-strong:#27272a;--z-ink:#e4e4e7;--z-muted:#a1a1aa;--z-soft:#71717a;--z-faint:#52525b;--z-hover:rgba(255,255,255,.035);--z-shadow:rgba(0,0,0,.45)}" +
+    "html[data-theme='light']{--z-bg:#f7f7f8;--z-sidebar:#ffffff;--z-surface:#ffffff;--z-panel:#f1f2f4;--z-field:#ffffff;--z-line:#d9d9df;--z-line-strong:#c7c7d0;--z-ink:#18181b;--z-muted:#3f3f46;--z-soft:#71717a;--z-faint:#8a8a94;--z-hover:rgba(24,24,27,.055);--z-shadow:rgba(24,24,27,.12);color-scheme:light}" +
+    "html[data-theme='dark']{color-scheme:dark}" +
     ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.8125rem}" +
     "@media(max-width:768px){table{font-size:0.75rem}th,td{padding:0.375rem 0.5rem!important}.hide-mobile{display:none}}" +
-    ".ladder-line{border-left:2px dashed #1e1e22;margin-left:1rem;padding-left:1rem}" +
-    ".card{background:#131316;border:1px solid #1e1e22;border-radius:0.75rem}" +
+    ".ladder-line{border-left:2px dashed var(--z-line);margin-left:1rem;padding-left:1rem}" +
+    ".card{background:var(--z-surface);border:1px solid var(--z-line);border-radius:0.75rem}" +
     "input:focus,select:focus{border-color:#a78bfa!important;box-shadow:0 0 0 2px rgba(167,139,250,.1)!important;outline:none}" +
-    "tr:hover td{background:rgba(255,255,255,.015)}" +
+    "html[data-theme='light'] body{background:var(--z-bg)!important;color:var(--z-ink)!important}" +
+    "html[data-theme='light'] aside{background:var(--z-sidebar)!important;border-color:var(--z-line)!important}" +
+    "html[data-theme='light'] main,html[data-theme='light'] .card{color:var(--z-ink)}" +
+    "html[data-theme='light'] input,html[data-theme='light'] select,html[data-theme='light'] textarea{background:var(--z-field)!important;border-color:var(--z-line)!important;color:var(--z-ink)!important}" +
+    "html[data-theme='light'] input::placeholder,html[data-theme='light'] textarea::placeholder{color:var(--z-faint)!important}" +
+    "html[data-theme='light'] table,html[data-theme='light'] th,html[data-theme='light'] td{border-color:var(--z-line)!important}" +
+    "html[data-theme='light'] [class*='border-[#1e1e22]'],html[data-theme='light'] [class*='border-[#27272a]']{border-color:var(--z-line)!important}" +
+    "html[data-theme='light'] [class*='bg-[#0a0a0c]'],html[data-theme='light'] [class*='bg-[#09090b]'],html[data-theme='light'] [class*='bg-[#111114]']{background:var(--z-field)!important}" +
+    "html[data-theme='light'] [class*='bg-[#0e0e11]'],html[data-theme='light'] [class*='bg-[#131316]'],html[data-theme='light'] [class*='bg-[#18181b]']{background:var(--z-surface)!important}" +
+    "html[data-theme='light'] [class*='bg-[#27272a]'],html[data-theme='light'] [class*='bg-[#3f3f46]']{background:var(--z-panel)!important}" +
+    "html[data-theme='light'] [class*='text-[#e4e4e7]']{color:var(--z-ink)!important}" +
+    "html[data-theme='light'] [class*='text-[#a1a1aa]'],html[data-theme='light'] [class*='text-[#71717a]']{color:var(--z-muted)!important}" +
+    "html[data-theme='light'] [class*='text-[#52525b]'],html[data-theme='light'] [class*='text-[#3f3f46]']{color:var(--z-soft)!important}" +
+    "html[data-theme='light'] aside a:hover,html[data-theme='light'] tr:hover td{background:var(--z-hover)!important}" +
+    "html[data-theme='light'] [class*='divide-[#27272a]']>*+*,html[data-theme='light'] [class*='divide-[#1e1e22]']>*+*{border-color:var(--z-line)!important}" +
+    "html[data-theme='light'] details.group{border:1px solid transparent}" +
+    "html[data-theme='light'] details.group:hover{background:#f6f7f9!important;border-color:var(--z-line)}" +
+    "html[data-theme='light'] details.group[open]{background:#fff!important;border-color:var(--z-line);box-shadow:0 8px 28px rgba(24,24,27,.08)}" +
+    "html[data-theme='light'] details.group summary+div{border-top:1px solid var(--z-line);background:#fff}" +
+    ".theme-toggle{border-color:var(--z-line);background:var(--z-field);color:var(--z-muted)}" +
+    ".theme-toggle:hover{background:var(--z-hover);color:var(--z-ink)}" +
+    "html[data-theme='light'] #zaman-cmd{background:rgba(244,244,245,.72)!important}" +
     ".section{margin-bottom:1.75rem}" +
     ".section-title{font-size:0.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#52525b;margin-bottom:0.75rem}" +
     "</style></head>" +
@@ -518,7 +554,11 @@ fn layout_inner(title, body, user, csrf) {
     "<aside class=\"border-b lg:border-b-0 lg:border-r border-[#1e1e22] bg-[#0e0e11] px-3 py-4 lg:sticky lg:top-0 lg:h-screen flex flex-col overflow-y-auto\">" +
     "<div class=\"flex items-center gap-2.5 mb-6 px-2\">" +
     "<div class=\"w-8 h-8 rounded-lg bg-gradient-to-br from-[#a78bfa] to-[#6d28d9] grid place-items-center font-bold text-sm text-white\">" + str.slice(brand_name(), 0, 1) + "</div>" +
-    "<span class=\"font-semibold text-sm\">" + h(brand_name()) + "</span></div>" +
+    "<span class=\"font-semibold text-sm flex-1\">" + h(brand_name()) + "</span>" +
+    "<button id=\"theme-toggle\" type=\"button\" class=\"theme-toggle w-8 h-8 rounded-md border grid place-items-center transition-colors\" title=\"Switch theme\" aria-label=\"Switch theme\">" +
+    "<svg data-theme-icon=\"dark\" class=\"w-4 h-4 hidden\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.6\" d=\"M21.752 15.002A9.718 9.718 0 0118 15.75 9.75 9.75 0 018.25 6c0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25 9.75 9.75 0 0012.75 21a9.753 9.753 0 009.002-5.998z\"/></svg>" +
+    "<svg data-theme-icon=\"light\" class=\"w-4 h-4 hidden\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.6\" d=\"M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z\"/></svg>" +
+    "</button></div>" +
     // Nav — grouped with labels
     "<div class=\"section-title px-2\">Monitor</div>" +
     "<nav class=\"flex flex-col gap-px text-[13px] mb-4\">" +
@@ -549,6 +589,7 @@ fn layout_inner(title, body, user, csrf) {
     (if csrf != "" { "<script>document.querySelectorAll('form[method=\"post\"]').forEach(function(f){if(!f.querySelector('[name=_csrf]')){var i=document.createElement('input');i.type='hidden';i.name='_csrf';i.value='" + csrf + "';f.appendChild(i)}})</script>" } else { "" }) +
     // Active nav highlighting + Command palette (Cmd+K) + Desktop notifications
     "<script>" +
+    "(function(){var b=document.getElementById('theme-toggle');function apply(t){document.documentElement.dataset.theme=t;try{localStorage.setItem('zaman-theme',t)}catch(e){}document.querySelectorAll('[data-theme-icon]').forEach(function(i){i.classList.toggle('hidden',i.dataset.themeIcon!==t)})}apply(document.documentElement.dataset.theme||'dark');if(b)b.addEventListener('click',function(){apply((document.documentElement.dataset.theme||'dark')==='dark'?'light':'dark')})})();" +
     // Active nav: highlight current page link
     "(function(){var p=location.pathname;document.querySelectorAll('aside nav a').forEach(function(a){" +
     "var h=a.getAttribute('href');if(h===p||(h!=='/'&&p.startsWith(h))){" +
@@ -642,14 +683,14 @@ fn is_call_method(method) {
 
 fn call_method_from_cseq(method, cseq) {
     if is_call_method(method) { return method }
-    if str.contains(cseq, "INVITE") { return "INVITE" }
-    if str.contains(cseq, "ACK") { return "ACK" }
-    if str.contains(cseq, "BYE") { return "BYE" }
-    if str.contains(cseq, "CANCEL") { return "CANCEL" }
-    if str.contains(cseq, "UPDATE") { return "UPDATE" }
-    if str.contains(cseq, "PRACK") { return "PRACK" }
-    if str.contains(cseq, "REFER") { return "REFER" }
-    if str.contains(cseq, "INFO") { return "INFO" }
+    if str.contains(method, "INVITE") || str.contains(cseq, "INVITE") { return "INVITE" }
+    if str.contains(method, "ACK") || str.contains(cseq, "ACK") { return "ACK" }
+    if str.contains(method, "BYE") || str.contains(cseq, "BYE") { return "BYE" }
+    if str.contains(method, "CANCEL") || str.contains(cseq, "CANCEL") { return "CANCEL" }
+    if str.contains(method, "UPDATE") || str.contains(cseq, "UPDATE") { return "UPDATE" }
+    if str.contains(method, "PRACK") || str.contains(cseq, "PRACK") { return "PRACK" }
+    if str.contains(method, "REFER") || str.contains(cseq, "REFER") { return "REFER" }
+    if str.contains(method, "INFO") || str.contains(cseq, "INFO") { return "INFO" }
     method
 }
 
@@ -822,7 +863,7 @@ fn call_groups_table(items) {
                     if !is_call_message(x) { continue }
                     count = count + 1
                     kind := x["kind"] ?? ""
-                    method := x["method"] ?? ""
+                    method := call_method_from_cseq(x["method"] ?? "", x["cseq"] ?? "")
                     status := x["status"] ?? 0
                     ts_ms := x["ts_ms"] ?? 0
                     if from_number == "" { from_number = x["from"] ?? "" }
@@ -1307,7 +1348,7 @@ fn noc_nodes_table(nodes, names, user, req, token_secret) {
         nrecent := nd["recent"] ?? 0
         ntotal := nd["total"] ?? 0
         nerrors := nd["errors"] ?? 0
-        ncalls := nd["calls"] ?? 0
+        ncalls := nd["active_calls"] ?? 0
         nage := nd["age_sec"] ?? 9999
         dot := if nstatus == "green" { "bg-[#34d399]" } else if nstatus == "yellow" { "bg-[#fbbf24]" } else { "bg-[#f87171]" }
         age_txt := node_age_label(nage)
@@ -1334,7 +1375,7 @@ fn noc_nodes_table(nodes, names, user, req, token_secret) {
     if rows == "" { rows = "<tr><td colspan=\"8\" class=\"py-10 text-center text-[#52525b] text-sm\">No nodes reporting yet. When HEP traffic arrives, each agent appears here automatically.</td></tr>" }
     "<table class=\"w-full text-left text-sm\"><thead><tr class=\"" + th + " border-b border-[#1e1e22]\">" +
     "<th class=\"py-2 px-3\">Node</th><th class=\"py-2 px-3\">Health</th><th class=\"py-2 px-3 text-right\">Traffic</th><th class=\"py-2 px-3 text-right\">Total</th>" +
-    "<th class=\"py-2 px-3 text-right\">Calls</th><th class=\"py-2 px-3 text-right\">Errors</th><th class=\"py-2 px-3 text-right\">Last seen</th><th class=\"py-2 px-3\"></th></tr></thead>" +
+    "<th class=\"py-2 px-3 text-right\">Concurrent</th><th class=\"py-2 px-3 text-right\">Errors</th><th class=\"py-2 px-3 text-right\">Last seen</th><th class=\"py-2 px-3\"></th></tr></thead>" +
     "<tbody class=\"divide-y divide-[#1e1e22]/50\">" + rows + "</tbody></table>"
 }
 
@@ -1529,11 +1570,12 @@ fn overview_realtime_panel_agent(agent) {
     fail_color := if failures > 0 { "#f87171" } else { "#34d399" }
     scope := if agent == "" { "all servers" } else { "selected server" }
     "<div class=\"grid grid-cols-2 xl:grid-cols-3 gap-3 mb-5\">" +
-    overview_metric_card("Concurrent calls", "" + (rt["active_calls"] ?? 0), "open dialogs, " + scope, "#f472b6") +
+    overview_metric_card("Concurrent calls", "" + (rt["active_calls"] ?? 0), "open dialogs active in last " + ("" + (rt["active_cutoff_sec"] ?? 120)) + "s, " + scope, "#f472b6") +
     overview_metric_card("CPS", per_second_label(rt["invites"] ?? 0, 60), "distinct INVITE Call-IDs per second, " + scope, "#34d399") +
     overview_metric_card("Message rate", per_second_label(rt["total"] ?? 0, 60) + "/s", "all captures per second, " + scope, "#38bdf8") +
     overview_metric_card("Call attempts", "" + (rt["invites"] ?? 0), "distinct INVITEs in the last 1m, " + scope, "#fbbf24") +
     overview_metric_card("Failures", "" + (failures), "4xx/5xx in the last 1m", fail_color) +
+    overview_metric_card("ACD", "" + (rt["acd_seconds"] ?? 0) + "s", "answered completed calls, " + scope, "#a78bfa") +
     overview_metric_card("ASR", "" + (rt["asr"] ?? 0) + "%", "answer rate, last 1m", if (rt["asr"] ?? 0) >= 70 { "#34d399" } else if (rt["asr"] ?? 0) >= 40 { "#fbbf24" } else { "#f87171" }) +
     "</div>"
 }
@@ -1567,6 +1609,7 @@ fn overview_body_v2(user) {
         else { red = red + 1 }
         recent := nd["recent"] ?? 0
         calls := nd["calls"] ?? 0
+        active_node := nd["active_calls"] ?? 0
         errs := nd["errors"] ?? 0
         recent_total = recent_total + recent
         tracked_calls = tracked_calls + calls
@@ -1576,7 +1619,7 @@ fn overview_body_v2(user) {
         dot := if status == "green" { "bg-[#34d399]" } else if status == "yellow" { "bg-[#fbbf24]" } else { "bg-[#f87171]" }
         node_rows = node_rows + "<a href=\"/noc\" class=\"flex items-center justify-between gap-3 px-3 py-2 rounded-md hover:bg-white/[0.03]\">" +
             "<span class=\"flex items-center gap-2 min-w-0\"><span class=\"w-2 h-2 rounded-full " + dot + " shrink-0\"></span><span class=\"text-sm truncate\">" + display + "</span></span>" +
-            "<span class=\"flex items-center gap-3 text-[11px] text-[#71717a] shrink-0\"><span><span class=\"mono text-[#e4e4e7]\">" + ("" + (recent)) + "</span> 5m</span><span><span class=\"mono text-[#e4e4e7]\">" + ("" + (calls)) + "</span> calls</span></span></a>"
+            "<span class=\"flex items-center gap-3 text-[11px] text-[#71717a] shrink-0\"><span><span class=\"mono text-[#e4e4e7]\">" + ("" + (recent)) + "</span> 5m</span><span><span class=\"mono text-[#e4e4e7]\">" + ("" + (active_node)) + "</span> active</span><span><span class=\"mono text-[#e4e4e7]\">" + ("" + (calls)) + "</span> call IDs</span></span></a>"
     }
     if node_rows == "" { node_rows = "<div class=\"px-3 py-6 text-sm text-[#71717a]\">No nodes reporting yet.</div>" }
     mut node_opts := "<option value=\"\">All servers</option>"
@@ -1597,6 +1640,7 @@ fn overview_body_v2(user) {
     hep_err := n(m, "hep_err")
     error_color := if parse_err + hep_err > 0 { "#fbbf24" } else { "#34d399" }
     active_calls := rt["active_calls"] ?? 0
+    stale_open := rt["stale_open_dialogs"] ?? 0
     active_now := rt1["active_calls"] ?? active_calls
     cps_1m := per_second_label(rt1["invites"] ?? 0, 60)
     msgps_1m := per_second_label(rt1["total"] ?? 0, 60)
@@ -1606,10 +1650,11 @@ fn overview_body_v2(user) {
     hero := "<div class=\"grid grid-cols-2 xl:grid-cols-4 gap-3 mb-5\">" +
         overview_metric_card("HEP captures", "" + (n(m, "hep_total")), "total HEP messages received", "#a78bfa") +
         overview_metric_card("CPS", cps_1m, "INVITE requests per second, last 1m", "#34d399") +
-        overview_metric_card("Concurrent calls", "" + (active_now), "open dialogs in the live window", "#f472b6") +
+        overview_metric_card("Concurrent calls", "" + (active_now), "open dialogs active in last " + ("" + (rt1["active_cutoff_sec"] ?? 120)) + "s", "#f472b6") +
+        overview_metric_card("ACD", "" + (rt1["acd_seconds"] ?? 0) + "s", "answered completed calls, last 1m", "#a78bfa") +
         overview_metric_card("Message rate", msgps_1m + "/s", "all captures per second, last 1m", "#38bdf8") +
         overview_metric_card("Recent traffic", "" + (recent_total), "messages seen in the last 5 minutes", "#38bdf8") +
-        overview_metric_card("Active calls", "" + (active_calls), "INVITEs in the last 5m without BYE", "#f472b6") +
+        overview_metric_card("Stale open dialogs", "" + (stale_open), "open rows older than realtime cutoff", "#fbbf24") +
         overview_metric_card("System health", "" + (green) + "/" + (len(nodes)), health_text, health_color) +
         overview_metric_card("Requests", "" + (n(m, "requests")), "parsed SIP requests", "#e4e4e7") +
         overview_metric_card("Responses", "" + (n(m, "responses")), "parsed SIP responses", "#e4e4e7") +
@@ -1743,7 +1788,7 @@ fn call_state_summary(items) {
     for m in items {
         if !is_call_message(m) { continue }
         kind := m["kind"] ?? ""
-        method := m["method"] ?? ""
+        method := call_method_from_cseq(m["method"] ?? "", m["cseq"] ?? "")
         status := m["status"] ?? 0
         ts_ms := m["ts_ms"] ?? 0
         if kind == "response" { responses = responses + 1 } else { requests = requests + 1 }
@@ -1801,11 +1846,13 @@ fn time_filter_fields(prefix, since_ms, until_ms, inp) {
     p := h(prefix)
     "<input type=\"hidden\" name=\"since_ms\" id=\"" + p + "-since-ms\" value=\"" + h(since_ms) + "\"/>" +
     "<input type=\"hidden\" name=\"until_ms\" id=\"" + p + "-until-ms\" value=\"" + h(until_ms) + "\"/>" +
-    "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">From date/time</label>" +
-    "<input type=\"datetime-local\" id=\"" + p + "-since\" data-ms=\"" + h(since_ms) + "\" class=\"w-full " + inp + "\"/></div>" +
-    "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">To date/time</label>" +
-    "<input type=\"datetime-local\" id=\"" + p + "-until\" data-ms=\"" + h(until_ms) + "\" class=\"w-full " + inp + "\"/></div>" +
-    "<script>(function(){var p='" + p + "';function init(k){var d=document.getElementById(p+'-'+k),h=document.getElementById(p+'-'+k+'-ms');if(!d||!h)return;var ms=parseInt(d.dataset.ms||h.value||'0',10);if(ms>0){var x=new Date(ms);x.setMinutes(x.getMinutes()-x.getTimezoneOffset());d.value=x.toISOString().slice(0,16)}d.form&&d.form.addEventListener('submit',function(){h.value=d.value?String(new Date(d.value).getTime()):''})}init('since');init('until')})();</script>"
+    "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">From</label>" +
+    "<div class=\"grid grid-cols-[1fr_92px] gap-2\"><input type=\"date\" id=\"" + p + "-since-date\" data-ms=\"" + h(since_ms) + "\" class=\"w-full " + inp + "\"/>" +
+    "<input type=\"time\" id=\"" + p + "-since-time\" step=\"60\" class=\"w-full " + inp + "\"/></div></div>" +
+    "<div><label class=\"block text-[10px] text-[#71717a] uppercase tracking-wider mb-1\">To</label>" +
+    "<div class=\"grid grid-cols-[1fr_92px] gap-2\"><input type=\"date\" id=\"" + p + "-until-date\" data-ms=\"" + h(until_ms) + "\" class=\"w-full " + inp + "\"/>" +
+    "<input type=\"time\" id=\"" + p + "-until-time\" step=\"60\" class=\"w-full " + inp + "\"/></div></div>" +
+    "<script>(function(){var p='" + p + "';function pad(n){return n<10?'0'+n:''+n}function init(k,def){var d=document.getElementById(p+'-'+k+'-date'),t=document.getElementById(p+'-'+k+'-time'),h=document.getElementById(p+'-'+k+'-ms');if(!d||!t||!h)return;var ms=parseInt(d.dataset.ms||h.value||'0',10);if(ms>0){var x=new Date(ms);d.value=x.getFullYear()+'-'+pad(x.getMonth()+1)+'-'+pad(x.getDate());t.value=pad(x.getHours())+':'+pad(x.getMinutes())}var f=d.form;if(f&&!f.dataset[p+'TimeBound']){f.dataset[p+'TimeBound']='1';f.addEventListener('submit',function(){['since','until'].forEach(function(k){var dd=document.getElementById(p+'-'+k+'-date'),tt=document.getElementById(p+'-'+k+'-time'),hh=document.getElementById(p+'-'+k+'-ms');if(!dd||!tt||!hh)return;if(!dd.value){hh.value='';return}var fallback=k==='until'?'23:59':'00:00';hh.value=String(new Date(dd.value+'T'+(tt.value||fallback)).getTime())})})}}init('since','00:00');init('until','23:59')})();</script>"
 }
 
 fn range_since_ms(range) {
@@ -2310,8 +2357,9 @@ fn calls_kpis_panel(agent) {
     rt5 := fetch_realtime_agent(5, agent)
     failures_5m := (rt5["resp_4xx"] ?? 0) + (rt5["resp_5xx"] ?? 0)
     "<div class=\"grid grid-cols-2 md:grid-cols-5 gap-3 mb-5\">" +
-    call_fact("Concurrent calls", "" + (rt1["active_calls"] ?? rt5["active_calls"] ?? 0), "open dialogs in the live window", "#f472b6") +
+    call_fact("Concurrent calls", "" + (rt1["active_calls"] ?? rt5["active_calls"] ?? 0), "open dialogs active in last " + ("" + (rt1["active_cutoff_sec"] ?? 120)) + "s", "#f472b6") +
     call_fact("CPS", per_second_label(rt1["invites"] ?? 0, 60), "INVITE requests per second", "#34d399") +
+    call_fact("ACD", "" + (rt5["acd_seconds"] ?? 0) + "s", "answered completed calls", "#a78bfa") +
     call_fact("Message rate", per_second_label(rt1["total"] ?? 0, 60) + "/s", "all captures, last 1m", "#38bdf8") +
     call_fact("Attempts", "" + (rt5["invites"] ?? 0), "INVITEs, last 5m", "#fbbf24") +
     call_fact("Failures", "" + (failures_5m), "4xx/5xx, last 5m", if failures_5m > 0 { "#f87171" } else { "#34d399" }) +
@@ -3735,7 +3783,7 @@ fn main {
             else { red = red + 1 }
             if (nd["errors"] ?? 0) > 0 { error_nodes = error_nodes + 1 }
             recent_total = recent_total + (nd["recent"] ?? 0)
-            active_calls = active_calls + (nd["calls"] ?? 0)
+            active_calls = active_calls + (nd["active_calls"] ?? 0)
         }
         mut alerts := ""
         if red > 0 {
@@ -3748,7 +3796,7 @@ fn main {
             "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Healthy</div><div class=\"text-2xl font-bold mono mt-1 text-[#34d399]\">" + ("" + (green)) + "</div></div>" +
             "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Degraded</div><div class=\"text-2xl font-bold mono mt-1 text-[#fbbf24]\">" + ("" + (yellow)) + "</div></div>" +
             "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Offline</div><div class=\"text-2xl font-bold mono mt-1 text-[#f87171]\">" + ("" + (red)) + "</div></div>" +
-            "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Tracked calls</div><div class=\"text-2xl font-bold mono mt-1 text-[#a78bfa]\">" + ("" + (active_calls)) + "</div></div>" +
+            "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Concurrent calls</div><div class=\"text-2xl font-bold mono mt-1 text-[#a78bfa]\">" + ("" + (active_calls)) + "</div><div class=\"text-[10px] text-[#52525b] mt-1\">strict realtime</div></div>" +
             "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Messages 5m</div><div class=\"text-2xl font-bold mono mt-1\">" + ("" + (recent_total)) + "</div></div>" +
             "<div class=\"card p-4\"><div class=\"text-[10px] text-[#52525b] uppercase tracking-wider font-semibold\">Error nodes</div><div class=\"text-2xl font-bold mono mt-1 " + (if error_nodes > 0 { "text-[#f87171]" } else { "text-[#34d399]" }) + "\">" + ("" + (error_nodes)) + "</div></div></div>"
 
@@ -3877,7 +3925,7 @@ fn main {
             call_fact("CPS 5m", cps5, "INVITEs / second", "#38bdf8") +
             call_fact("Invite rows", "" + (len(invite_items)), "sample used below", "#a78bfa") +
             call_fact("Calls / min", "" + (cpm5), "5m average", "#fbbf24") +
-    call_fact("Concurrent calls", "" + (active), "open dialogs in the live window", "#f472b6") +
+            call_fact("Concurrent calls", "" + (active), "open dialogs active in last " + ("" + (rt5["active_cutoff_sec"] ?? 120)) + "s", "#f472b6") +
             call_fact("Attempts", "" + (inv5), "INVITEs in 5m", "#e4e4e7") +
             call_fact("Completions", "" + (byes), "BYE in 5m", "#34d399") +
             call_fact("Registers", "" + (registers), "separate from calls", "#22d3ee") +
@@ -4391,6 +4439,7 @@ fn main {
         responses := summary["responses"] ?? 0
         mut unique_calls := 0
         mut seen_calls := ""
+        mut report_call_ids := []
         for m in items {
             cid := m["call_id"] ?? ""
             if cid != "" && !str.contains(seen_calls, "|" + cid + "|") {
@@ -4691,8 +4740,9 @@ fn main {
             "<span class=\"rounded-full border px-2.5 py-1 text-xs font-semibold " + health_cls + "\">" + health_label + "</span></div>" +
             "<div class=\"grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3\">" +
             call_fact("5m messages", "" + (rt_total), "recent captures", "#e4e4e7") +
-            call_fact("Active calls", "" + (active_calls), "current dialogs", "#38bdf8") +
+            call_fact("Concurrent calls", "" + (active_calls), "active in realtime cutoff", "#38bdf8") +
             call_fact("ASR", "" + (asr) + "%", "answer seizure", asr_color) +
+            call_fact("ACD", "" + (rt["acd_seconds"] ?? 0) + "s", "answered completed calls", "#a78bfa") +
             call_fact("Errors", "" + (err_window), "4xx/5xx in window", if err_window == 0 { "#34d399" } else { "#f87171" }) +
             call_fact("HEP total", "" + (total_hep), "accepted packets", "#a78bfa") +
             call_fact("Uptime", ("" + (up_h)) + "h " + ("" + (up_m)) + "m", "zaman-core", "#fbbf24") +
@@ -4703,8 +4753,9 @@ fn main {
             "<div class=\"grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3\">" +
             stat_card("Messages", rt_total, "all SIP/HEP") +
             stat_card("INVITEs", rt["invites"] ?? 0, "call attempts") +
-            stat_card("Active calls", active_calls, "in progress") +
+            stat_card("Concurrent calls", active_calls, "active in realtime cutoff") +
             stat_card("ASR", ("" + (rt["asr"] ?? 0)) + "%", "recent answer rate") +
+            stat_card("ACD", ("" + (rt["acd_seconds"] ?? 0)) + "s", "answered completed") +
             stat_card("2xx", rt["resp_2xx"] ?? 0, "success") +
             stat_card("4xx", rt["resp_4xx"] ?? 0, "client errors") +
             stat_card("5xx", rt["resp_5xx"] ?? 0, "server errors") +
@@ -4967,8 +5018,9 @@ fn main {
             "<div class=\"grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3\">" +
             stat_card("Messages", rt["total"] ?? 0, "5-min window") +
             stat_card("INVITEs", rt["invites"] ?? 0, "call attempts") +
-            stat_card("Active calls", rt["active_calls"] ?? 0, "in progress") +
+            stat_card("Concurrent calls", rt["active_calls"] ?? 0, "active in realtime cutoff") +
             stat_card("ASR", ("" + (rt["asr"] ?? 0)) + "%", "answer-seizure") +
+            stat_card("ACD", ("" + (rt["acd_seconds"] ?? 0)) + "s", "answered completed") +
             stat_card("4xx errors", rt["resp_4xx"] ?? 0, "client errors") +
             stat_card("5xx errors", rt["resp_5xx"] ?? 0, "server errors") +
             "</div></div>"
@@ -5027,8 +5079,12 @@ fn main {
         src := req.query_map["ip"] ?? req.query_map["src"] ?? ""
         from_number := req.query_map["from_number"] ?? ""
         to_number := req.query_map["to_number"] ?? ""
-        since_ms := req.query_map["since_ms"] ?? ""
-        until_ms := req.query_map["until_ms"] ?? ""
+        mut since_ms := req.query_map["since_ms"] ?? ""
+        mut until_ms := req.query_map["until_ms"] ?? ""
+        range := req.query_map["range"] ?? ""
+        if since_ms == "" && until_ms == "" && range != "" {
+            since_ms = range_since_ms(range)
+        }
         view := req.query_map["view"] ?? "calls"
         limit := int.parse(req.query_map["limit"] ?? "120").unwrap_or(120)
         mut safe_limit := limit
@@ -5053,14 +5109,25 @@ fn main {
         limit_h := h("" + (safe_limit))
 
         mut parts := []
+        mut range_parts := []
         if cid != "" { parts = list_append(parts, "call_id=" + q(cid)) }
+        if cid != "" { range_parts = list_append(range_parts, "call_id=" + q(cid)) }
         if agent != "" { parts = list_append(parts, "agent=" + q(agent)) }
+        if agent != "" { range_parts = list_append(range_parts, "agent=" + q(agent)) }
         if method != "" { parts = list_append(parts, "method=" + q(method)) }
+        if method != "" { range_parts = list_append(range_parts, "method=" + q(method)) }
         if transport != "" { parts = list_append(parts, "transport=" + q(transport)) }
+        if transport != "" { range_parts = list_append(range_parts, "transport=" + q(transport)) }
         if src != "" { parts = list_append(parts, "ip=" + q(src)) }
+        if src != "" { range_parts = list_append(range_parts, "ip=" + q(src)) }
         if from_number != "" { parts = list_append(parts, "from_number=" + q(from_number)) }
+        if from_number != "" { range_parts = list_append(range_parts, "from_number=" + q(from_number)) }
         if to_number != "" { parts = list_append(parts, "to_number=" + q(to_number)) }
+        if to_number != "" { range_parts = list_append(range_parts, "to_number=" + q(to_number)) }
         if status != "" { parts = list_append(parts, "status=" + q(status)) }
+        if status != "" { range_parts = list_append(range_parts, "status=" + q(status)) }
+        range_parts = list_append(range_parts, "view=" + q(view))
+        range_parts = list_append(range_parts, "limit=" + limit_h)
         if since_ms != "" { parts = list_append(parts, "since_ms=" + q(since_ms)) }
         if until_ms != "" { parts = list_append(parts, "until_ms=" + q(until_ms)) }
         mut qs := ""
@@ -5068,6 +5135,13 @@ fn main {
         while pi < len(parts) {
             if pi > 0 { qs = qs + "&" }
             qs = qs + parts[pi]
+            pi = pi + 1
+        }
+        mut range_qs := ""
+        pi = 0
+        while pi < len(range_parts) {
+            if pi > 0 { range_qs = range_qs + "&" }
+            range_qs = range_qs + range_parts[pi]
             pi = pi + 1
         }
         mut table_qs := qs
@@ -5079,6 +5153,7 @@ fn main {
         endpoints := ladder_endpoints(items)
         mut unique_calls := 0
         mut seen_calls := ""
+        mut report_call_ids := []
         mut response_errors := 0
         mut invites := 0
         mut answered_2xx := 0
@@ -5100,6 +5175,7 @@ fn main {
             if mcid != "" && !str.contains(seen_calls, "|" + mcid + "|") {
                 seen_calls = seen_calls + "|" + mcid + "|"
                 unique_calls = unique_calls + 1
+                report_call_ids = list_append(report_call_ids, mcid)
             }
             mmethod := m["method"] ?? ""
             if mmethod == "INVITE" { invites = invites + 1 }
@@ -5124,8 +5200,37 @@ fn main {
                 if mmethod == "REGISTER" { reg_fail = reg_fail + 1 }
             }
         }
-        filtered_asr := if invites > 0 { answered_2xx * 100 / invites } else { 0 }
-        filtered_ner := if invites > 0 { (invites - failed_4xx5xx) * 100 / invites } else { 0 }
+        mut attempt_calls := 0
+        mut answered_calls := 0
+        mut failed_calls := 0
+        mut edge_reject_calls := 0
+        for rcid in report_call_ids {
+            mut has_invite := false
+            mut has_answer := false
+            mut has_failure := false
+            mut has_edge_reject := false
+            for cm in items {
+                if (cm["call_id"] ?? "") != rcid { continue }
+                cmethod := call_method_from_cseq(cm["method"] ?? "", cm["cseq"] ?? "")
+                ckind := cm["kind"] ?? ""
+                cstatus := cm["status"] ?? 0
+                if cmethod == "INVITE" && ckind == "request" { has_invite = true }
+                if cmethod == "INVITE" && ckind == "response" && cstatus >= 200 && cstatus < 300 { has_answer = true }
+                if cmethod == "INVITE" && ckind == "response" && cstatus >= 300 { has_failure = true }
+                if cmethod == "INVITE" && ckind == "response" && (cstatus == 403 || cstatus == 503) { has_edge_reject = true }
+            }
+            if has_invite {
+                if has_edge_reject && !has_answer {
+                    edge_reject_calls = edge_reject_calls + 1
+                    continue
+                }
+                attempt_calls = attempt_calls + 1
+                if has_answer { answered_calls = answered_calls + 1 }
+                if has_failure && !has_answer { failed_calls = failed_calls + 1 }
+            }
+        }
+        filtered_asr := if attempt_calls > 0 { answered_calls * 100 / attempt_calls } else { 0 }
+        filtered_ner := if attempt_calls > 0 { (attempt_calls - failed_calls) * 100 / attempt_calls } else { 0 }
         filtered_err_rate := if (summary["responses"] ?? 0) > 0 { response_errors * 100 / (summary["responses"] ?? 1) } else { 0 }
         timeout_rate := if (summary["responses"] ?? 0) > 0 { timeout_408 * 100 / (summary["responses"] ?? 1) } else { 0 }
         filt_asr_c := if filtered_asr >= 70 { "#34d399" } else if filtered_asr >= 40 { "#fbbf24" } else { "#f87171" }
@@ -5142,6 +5247,13 @@ fn main {
         inp := "rounded-lg bg-[#0a0a0c] border border-[#1e1e22] px-3 py-2 text-sm mono"
         selected_calls := if view == "calls" { " selected" } else { "" }
         selected_messages := if view == "messages" { " selected" } else { "" }
+        mut range_buttons := "<div class=\"flex flex-wrap items-center gap-2 text-xs\"><span class=\"text-[#71717a]\">Quick range</span>"
+        for rv in ["5m", "1h", "24h", "7d"] {
+            cls := if range == rv { "bg-[#27272a] text-[#e4e4e7]" } else { "text-[#a1a1aa]" }
+            range_buttons = range_buttons + "<a href=\"/report?" + range_qs + "&range=" + rv + "\" class=\"rounded-md border border-[#27272a] px-2.5 py-1 " + cls + "\">" + rv + "</a>"
+        }
+        range_buttons = range_buttons + "<a href=\"/report?" + range_qs + "\" class=\"rounded-md border border-[#27272a] px-2.5 py-1 text-[#a1a1aa]\">All retained</a></div>"
+        range_note := if since_ms != "" || until_ms != "" { "<div class=\"text-[10px] text-[#52525b] mono\">" + (if range != "" { "range=" + h(range) + " " } else { "" }) + (if since_ms != "" { "from " + since_h } else { "" }) + (if until_ms != "" { " to " + until_h } else { "" }) + "</div>" } else { "<div class=\"text-[10px] text-[#52525b] mono\">all retained history</div>" }
         builder := "<form class=\"card p-4 mb-5\" method=\"get\" action=\"/report\">" +
             "<div class=\"flex flex-wrap items-center justify-between gap-3 mb-4\">" +
             "<div><div class=\"section-title mb-1\">Report Builder</div><div class=\"text-sm text-[#71717a]\">Filter stored SIP/HEP history, preview the result, then export JSON or CSV.</div></div>" +
@@ -5164,7 +5276,7 @@ fn main {
             "<a href=\"/report\" class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7]\">Clear</a>" +
             "<a href=\"" + open_messages + "\" class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7]\">Open in Messages</a>" +
             (if cid != "" { "<a " + ladder_nav_attrs(cid) + " class=\"rounded-lg px-4 py-2 text-sm border border-[#27272a] text-[#a1a1aa] hover:text-[#e4e4e7]\">Call ladder</a>" } else { "" }) +
-            "</div></form>"
+            "</div><div class=\"mt-4 flex flex-wrap items-center justify-between gap-3\">" + range_buttons + range_note + "</div></form>"
 
         quick := "<div class=\"grid md:grid-cols-2 xl:grid-cols-4 gap-3 mb-5\">" +
             "<a href=\"/report?method=INVITE&view=calls\" class=\"rounded-md border border-[#27272a] bg-[#0a0a0c] p-3 text-sm hover:border-[#3f3f46]\"><div class=\"font-semibold\">Call attempts</div><div class=\"text-xs text-[#71717a] mt-1\">INVITE traffic grouped by Call-ID</div></a>" +
@@ -5175,7 +5287,7 @@ fn main {
             "</div>"
 
         telecom_kpis := "<div class=\"section\">" +
-            "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Telecom KPIs</div><span class=\"text-[10px] text-[#52525b]\">all-time + filtered preview</span></div>" +
+            "<div class=\"flex items-center justify-between mb-3\"><div class=\"section-title mb-0\">Telecom KPIs</div><span class=\"text-[10px] text-[#52525b]\">filtered preview uses the indexed date/result window</span></div>" +
             "<div class=\"grid xl:grid-cols-[.75fr_1.25fr] gap-4\">" +
             "<div class=\"card p-4\"><div class=\"text-sm font-semibold mb-3\">All-time network health</div>" +
             "<div id=\"report-telecom-kpis\" hx-get=\"/partials/report-telecom-kpis\" hx-trigger=\"load\" hx-swap=\"innerHTML\">" +
@@ -5186,9 +5298,10 @@ fn main {
             call_fact("Filtered NER", "" + (filtered_ner) + "%", "INVITEs minus failures", filt_ner_c) +
             call_fact("Error rate", "" + (filtered_err_rate) + "%", "4xx/5xx responses", err_c) +
             call_fact("408 timeout rate", "" + (timeout_rate) + "%", "408 / responses", timeout_c) +
-            call_fact("Call attempts", "" + (invites), "INVITE messages", "#38bdf8") +
-            call_fact("Answered", "" + (answered_2xx), "2xx responses", "#34d399") +
-            call_fact("Failed", "" + (failed_4xx5xx), "4xx/5xx responses", "#f87171") +
+            call_fact("Call attempts", "" + (attempt_calls), "unique INVITE Call-IDs", "#38bdf8") +
+            call_fact("Answered", "" + (answered_calls), "unique calls with 2xx", "#34d399") +
+            call_fact("Failed", "" + (failed_calls), "unique failed calls", "#f87171") +
+            call_fact("Edge rejects", "" + (edge_reject_calls), "403/503 excluded from ASR", "#fbbf24") +
             call_fact("Registers", "" + (registers), "ok " + ("" + (reg_ok)) + " fail " + ("" + (reg_fail)), "#a78bfa") +
             call_fact("Teardowns", "" + (byes + cancels), "BYE/CANCEL", "#fbbf24") +
             "</div><div class=\"mt-3 grid md:grid-cols-3 gap-3 text-xs text-[#71717a]\">" +

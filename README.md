@@ -51,7 +51,7 @@ make build
 ./scripts/demo.sh
 ```
 
-Manual builds require Makori >= 0.6.1 and Weft >= 0.6.0.
+Manual builds require Makori >= 0.6.24 and Weft >= 0.6.0.
 
 ---
 
@@ -174,6 +174,7 @@ zaman/
   docker-compose.yml      # SQLite / PostgreSQL / ClickHouse profiles
   deploy/                 # systemd units and deployment helpers
   scripts/                # smoke tests, demo, CLI, SIP/HEP clients
+  docs/MODULE_SPLIT.md    # planned Makori/Weft module boundaries
   docs/DEPLOYMENT.md      # deployment guide
   spec.md                 # engineering spec
   SECURITY_REVIEW.md      # threat model and hardening status

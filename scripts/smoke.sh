@@ -136,7 +136,7 @@ wait_health 19093 "$TLS_PID" || { cat data/smoke-tls.log; exit 1; }
 CIDL="hep-tls-$(date +%s)@local"
 python3 scripts/send_hep.py --tls --insecure --host 127.0.0.1 --port 19063 \
   --node-name smoke-tls --call-id "$CIDL"
-sleep 0.5
+sleep 0.8
 HEPL=$(curl -fsS "http://127.0.0.1:19093/api/messages?limit=10&call_id=${CIDL}")
 echo "$HEPL" | head -c 400; echo
 echo "$HEPL" | grep -q "HEP3/TLS" || { echo "HEP TLS fail: $HEPL"; exit 1; }

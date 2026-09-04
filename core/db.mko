@@ -1,0 +1,726 @@
+// Zaman core — Database persistence, drivers, DDL, writer loops, and call state tracking.
+// Backend: SQLite (default), PostgreSQL, or ClickHouse.
+
+fn db_driver() -> string {
+    return env_get_or("ZAMAN_DB_DRIVER", "sqlite")
+}
+
+fn db_is_postgres() -> int {
+    let d = db_driver()
+    if str_eq(d, "postgres") || str_eq(d, "postgresql") || str_eq(d, "pg") {
+        return 1
+    }
+    return 0
+}
+
+fn db_is_clickhouse() -> int {
+    let d = db_driver()
+    if str_eq(d, "clickhouse") || str_eq(d, "ch") {
+        return 1
+    }
+    return 0
+}
+
+fn db_path() -> string {
+    return env_get_or("ZAMAN_DB", "data/zaman.db")
+}
+
+fn db_dsn() -> string {
+    return env_get_or("ZAMAN_DB_DSN", "host=localhost dbname=zaman sslmode=disable")
+}
+
+fn ch_url() -> string {
+    return env_get_or("ZAMAN_CH_URL", "http://localhost:8123")
+}
+
+fn ch_db() -> string {
+    return env_get_or("ZAMAN_CH_DB", "zaman")
+}
+
+// ClickHouse HTTP query: POST sql to http://host:8123/?database=db
+fn ch_exec(sql: string) -> string {
+    let url = ch_url() + "/?database=" + ch_db()
+    return http_post(url, sql)
+}
+
+fn ch_query(sql: string) -> string {
+    let url = ch_url() + "/?database=" + ch_db()
+    return http_post(url, sql + " FORMAT JSONEachRow")
+}
+
+fn ch_query_tsv(sql: string) -> string {
+    let url = ch_url() + "/?database=" + ch_db()
+    return http_post(url, sql + " FORMAT TabSeparated")
+}
+
+fn sql_quote(s: string) -> string {
+    let s1 = str_replace(s, "\\", "\\\\")
+    return "'" + str_replace(s1, "'", "''") + "'"
+}
+
+fn asr_excluded_status_list_sql() -> string {
+    let raw = env_get_or("ZAMAN_ASR_EXCLUDE_STATUS_CODES", "403,503")
+    let parts = str_split(raw, ",")
+    let mut out = ""
+    let mut i = 0
+    while i < len(parts) {
+        let code = parse_int_or(str_trim(parts[i], " \t\r\n"), 0)
+        if code >= 100 && code <= 699 {
+            if not str_eq(out, "") {
+                out = out + ","
+            }
+            out = out + string(code)
+        }
+        i = i + 1
+    }
+    if str_eq(out, "") {
+        return "403,503"
+    }
+    return out
+}
+
+fn asr_edge_reject_call_sql() -> string {
+    let codes = asr_excluded_status_list_sql()
+    return "answered = 0 AND EXISTS (SELECT 1 FROM captures c WHERE c.call_id = call_state.call_id AND c.agent = call_state.agent AND c.kind = 'response' AND (c.method = 'INVITE' OR c.method LIKE '% INVITE') AND c.status IN (" + codes + "))"
+}
+
+fn asr_eligible_call_sql() -> string {
+    return "NOT (" + asr_edge_reject_call_sql() + ")"
+}
+
+fn acd_duration_sec_sql() -> string {
+    return "(last_ts_ms - answer_ts_ms) / 1000"
+}
+
+fn concurrent_call_max_age_ms() -> int {
+    let mut sec = parse_int_or(env_get_or("ZAMAN_CONCURRENT_CALL_MAX_AGE_SEC", "7200"), 7200)
+    if sec <= 0 {
+        return 0
+    }
+    if sec > 86400 {
+        sec = 86400
+    }
+    return sec * 1000
+}
+
+fn concurrent_ringing_max_age_ms() -> int {
+    let mut sec = parse_int_or(env_get_or("ZAMAN_CONCURRENT_RINGING_MAX_AGE_SEC", "300"), 300)
+    if sec <= 0 {
+        return 300000
+    }
+    if sec > 3600 {
+        sec = 3600
+    }
+    return sec * 1000
+}
+
+fn active_call_where_sql(ts_now: int) -> string {
+    let answered_age = concurrent_call_max_age_ms()
+    let ringing_age = concurrent_ringing_max_age_ms()
+    let mut answered_sql = "answered = 1"
+    if answered_age > 0 {
+        answered_sql = answered_sql + " AND last_ts_ms > " + string(ts_now - answered_age)
+    }
+    let mut ringing_sql = "answered = 0"
+    if ringing_age > 0 {
+        ringing_sql = ringing_sql + " AND last_ts_ms > " + string(ts_now - ringing_age)
+    }
+    return "open = 1 AND ((" + answered_sql + ") OR (" + ringing_sql + "))"
+}
+
+fn stale_call_where_sql(ts_now: int) -> string {
+    return "open = 1 AND NOT (" + active_call_where_sql(ts_now) + ")"
+}
+
+fn call_state_filter_sql(state_filter: string) -> string {
+    if str_eq(state_filter, "") {
+        return ""
+    }
+    if str_eq(state_filter, "active") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE " + active_call_where_sql(now_ms()) + ")"
+    }
+    if str_eq(state_filter, "ringing") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE " + active_call_where_sql(now_ms()) + " AND answered = 0 AND invite_id > 0)"
+    }
+    if str_eq(state_filter, "answered") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE " + active_call_where_sql(now_ms()) + " AND answered = 1)"
+    }
+    if str_eq(state_filter, "ended") || str_eq(state_filter, "completed") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 0 AND answered = 1)"
+    }
+    if str_eq(state_filter, "failed") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 0 AND answered = 0 AND last_status >= 300)"
+    }
+    if str_eq(state_filter, "canceled") {
+        return " AND call_id IN (SELECT call_id FROM call_state WHERE open = 0 AND last_method = 'CANCEL')"
+    }
+    return ""
+}
+
+fn call_state_where_sql(state_filter: string) -> string {
+    if str_eq(state_filter, "") {
+        return ""
+    }
+    if str_eq(state_filter, "active") {
+        return " AND open = 1 AND answered = 0 AND invite_id = 0"
+    }
+    if str_eq(state_filter, "ringing") {
+        return " AND open = 1 AND answered = 0 AND invite_id > 0"
+    }
+    if str_eq(state_filter, "answered") {
+        return " AND open = 1 AND answered = 1"
+    }
+    if str_eq(state_filter, "ended") || str_eq(state_filter, "completed") {
+        return " AND open = 0 AND answered = 1"
+    }
+    if str_eq(state_filter, "failed") {
+        return " AND open = 0 AND answered = 0 AND last_status >= 300"
+    }
+    if str_eq(state_filter, "canceled") {
+        return " AND open = 0 AND last_method = 'CANCEL'"
+    }
+    return ""
+}
+
+fn db_ensure_dir() {
+    if db_is_postgres() == 1 || db_is_clickhouse() == 1 {
+        return
+    }
+    let p = db_path()
+    let dir = path_dir(p)
+    if not str_eq(dir, "") && not str_eq(dir, ".") {
+        let _ = mkdir(dir)
+    }
+}
+
+fn db_open() -> SqlDB {
+    if db_is_postgres() == 1 {
+        return sql_open_postgres(db_dsn())
+    }
+    db_ensure_dir()
+    let db = sql_open_sqlite(db_path())
+    if sql_ok(db) == 1 {
+        let _ = sql_exec_plain(db, "PRAGMA busy_timeout=5000")
+        let _ = sql_exec_plain(db, "PRAGMA journal_mode=WAL")
+        let _ = sql_exec_plain(db, "PRAGMA synchronous=NORMAL")
+    }
+    return db
+}
+
+fn ch_init() -> int {
+    // Create database
+    let _ = http_post(ch_url(), "CREATE DATABASE IF NOT EXISTS " + ch_db())
+    // Captures table: MergeTree ordered by ts_ms for fast time-range scans
+    let _ = ch_exec(
+        "CREATE TABLE IF NOT EXISTS captures (" +
+        "id UInt64 DEFAULT generateSnowflakeID()," +
+        "ts_ms Int64," +
+        "src String DEFAULT ''," +
+        "dst String DEFAULT ''," +
+        "transport String DEFAULT ''," +
+        "proto String DEFAULT ''," +
+        "agent String DEFAULT ''," +
+        "kind String DEFAULT ''," +
+        "method String DEFAULT ''," +
+        "status Int32 DEFAULT 0," +
+        "call_id String DEFAULT ''," +
+        "from_h String DEFAULT ''," +
+        "to_h String DEFAULT ''," +
+        "cseq String DEFAULT ''," +
+        "ruri String DEFAULT ''," +
+        "hep_node_id Int32 DEFAULT 0," +
+        "hep_node String DEFAULT ''," +
+        "hep_cid String DEFAULT ''," +
+        "size Int32 DEFAULT 0," +
+        "raw_b64 String DEFAULT ''," +
+        "record_json String DEFAULT ''" +
+        ") ENGINE = MergeTree() ORDER BY (ts_ms, call_id) PARTITION BY toYYYYMM(fromUnixTimestamp64Milli(ts_ms))")
+    let _ = ch_exec("CREATE TABLE IF NOT EXISTS report_daily (" +
+        "day String," +
+        "method String," +
+        "transport String," +
+        "cnt Int64 DEFAULT 0" +
+        ") ENGINE = SummingMergeTree(cnt) ORDER BY (day, method, transport)")
+    print("db   clickhouse " + ch_url() + " db=" + ch_db())
+    return 1
+}
+
+fn db_init() -> int {
+    if db_is_clickhouse() == 1 {
+        return ch_init()
+    }
+    let db = db_open()
+    if sql_ok(db) == 0 {
+        if db_is_postgres() == 1 {
+            print("db  open failed: postgres " + db_dsn())
+        } else {
+            print("db  open failed: " + db_path())
+        }
+        return 0
+    }
+    if db_is_postgres() == 1 {
+        // PostgreSQL schema — SERIAL instead of AUTOINCREMENT, TEXT defaults
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS captures (" +
+            "id SERIAL PRIMARY KEY," +
+            "ts_ms BIGINT NOT NULL," +
+            "src TEXT," +
+            "dst TEXT," +
+            "transport TEXT," +
+            "proto TEXT," +
+            "agent TEXT," +
+            "kind TEXT," +
+            "method TEXT," +
+            "status INTEGER DEFAULT 0," +
+            "call_id TEXT," +
+            "from_h TEXT," +
+            "to_h TEXT," +
+            "cseq TEXT," +
+            "ruri TEXT," +
+            "hep_node_id INTEGER DEFAULT 0," +
+            "hep_node TEXT," +
+            "hep_cid TEXT," +
+            "size INTEGER DEFAULT 0," +
+            "raw_b64 TEXT," +
+            "record_json TEXT NOT NULL DEFAULT ''" +
+            ")")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts ON captures(ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call ON captures(call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method ON captures(method)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport ON captures(transport)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent ON captures(agent)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_from ON captures(from_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_to ON captures(to_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_invite_outcome ON captures(call_id, method, kind, status) WHERE call_id IS NOT NULL AND call_id != '' AND (method = 'INVITE' OR method LIKE '% INVITE')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_invite_2xx_answer_ts ON captures(call_id, agent, ts_ms) WHERE kind = 'response' AND status >= 200 AND status < 300 AND (method = 'INVITE' OR method LIKE '% INVITE')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_id ON captures(agent, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_status_id ON captures(agent, status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_ts_id ON captures(agent, ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_id_desc ON captures(call_id, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_id ON captures(status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_id ON captures(method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport_id ON captures(transport, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts_id ON captures(ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_hep_cid_call ON captures(hep_cid, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_invite_from_to_ts ON captures(from_h, to_h, ts_ms DESC, call_id) WHERE method = 'INVITE'")
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
+            "call_id TEXT NOT NULL," +
+            "agent TEXT NOT NULL DEFAULT ''," +
+            "first_ts_ms BIGINT NOT NULL," +
+            "answer_ts_ms BIGINT NOT NULL DEFAULT 0," +
+            "last_ts_ms BIGINT NOT NULL," +
+            "last_id BIGINT NOT NULL DEFAULT 0," +
+            "invite_id BIGINT NOT NULL DEFAULT 0," +
+            "last_method TEXT," +
+            "last_status INTEGER DEFAULT 0," +
+            "answered INTEGER DEFAULT 0," +
+            "open INTEGER DEFAULT 1," +
+            "src TEXT," +
+            "dst TEXT," +
+            "from_h TEXT," +
+            "to_h TEXT," +
+            "record_json TEXT NOT NULL DEFAULT ''," +
+            "PRIMARY KEY(call_id, agent)" +
+            ")")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_open_agent_last ON call_state(open, agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first ON call_state(first_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_answered ON call_state(first_ts_ms DESC, answered)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_src_last ON call_state(src, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_from_last ON call_state(from_h, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_to_last ON call_state(to_h, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_state_lookup ON call_state(open, answered, last_status, last_method, invite_id, call_id)")
+        let _ = sql_exec_plain(db, "ALTER TABLE call_state ADD COLUMN IF NOT EXISTS answer_ts_ms BIGINT NOT NULL DEFAULT 0")
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
+            "day TEXT NOT NULL," +
+            "method TEXT NOT NULL," +
+            "transport TEXT NOT NULL," +
+            "cnt INTEGER NOT NULL DEFAULT 0," +
+            "PRIMARY KEY(day, method, transport)" +
+            ")")
+        let _ = sql_close(db)
+        print("db   postgres " + db_dsn())
+    } else {
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS captures (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "ts_ms INTEGER NOT NULL," +
+            "src TEXT," +
+            "dst TEXT," +
+            "transport TEXT," +
+            "proto TEXT," +
+            "agent TEXT," +
+            "kind TEXT," +
+            "method TEXT," +
+            "status INTEGER DEFAULT 0," +
+            "call_id TEXT," +
+            "from_h TEXT," +
+            "to_h TEXT," +
+            "cseq TEXT," +
+            "ruri TEXT," +
+            "hep_node_id INTEGER DEFAULT 0," +
+            "hep_node TEXT," +
+            "hep_cid TEXT," +
+            "size INTEGER DEFAULT 0," +
+            "raw_b64 TEXT," +
+            "record_json TEXT NOT NULL DEFAULT ''" +
+            ")")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts ON captures(ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call ON captures(call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method ON captures(method)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport ON captures(transport)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent ON captures(agent)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_from ON captures(from_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_to ON captures(to_h)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_nonzero ON captures(status) WHERE status > 0")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_methods_recent ON captures(id DESC, call_id, ts_ms) WHERE call_id IS NOT NULL AND call_id != '' AND method IN ('INVITE','ACK','BYE','CANCEL','UPDATE','PRACK','REFER','INFO')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_ts_call ON captures(method, kind, ts_ms DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_invite_outcome ON captures(call_id, method, kind, status) WHERE call_id IS NOT NULL AND call_id != '' AND (method = 'INVITE' OR method LIKE '% INVITE')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_invite_2xx_answer_ts ON captures(call_id, agent, ts_ms) WHERE kind = 'response' AND status >= 200 AND status < 300 AND (method = 'INVITE' OR method LIKE '% INVITE')")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_kind_id_call ON captures(method, kind, id DESC, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_id ON captures(agent, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_method_id ON captures(agent, method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_status_id ON captures(agent, status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_agent_ts_id ON captures(agent, ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_call_id_desc ON captures(call_id, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_status_id ON captures(status, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_method_id ON captures(method, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_transport_id ON captures(transport, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_ts_id ON captures(ts_ms DESC, id DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_hep_cid_call ON captures(hep_cid, call_id)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_cap_invite_from_to_ts ON captures(from_h, to_h, ts_ms DESC, call_id) WHERE method = 'INVITE'")
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS call_state (" +
+            "call_id TEXT NOT NULL," +
+            "agent TEXT NOT NULL DEFAULT ''," +
+            "first_ts_ms INTEGER NOT NULL," +
+            "answer_ts_ms INTEGER NOT NULL DEFAULT 0," +
+            "last_ts_ms INTEGER NOT NULL," +
+            "last_id INTEGER NOT NULL DEFAULT 0," +
+            "invite_id INTEGER NOT NULL DEFAULT 0," +
+            "last_method TEXT," +
+            "last_status INTEGER DEFAULT 0," +
+            "answered INTEGER DEFAULT 0," +
+            "open INTEGER DEFAULT 1," +
+            "src TEXT," +
+            "dst TEXT," +
+            "from_h TEXT," +
+            "to_h TEXT," +
+            "record_json TEXT NOT NULL DEFAULT ''," +
+            "PRIMARY KEY(call_id, agent)" +
+            ")")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_open_agent_last ON call_state(open, agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first ON call_state(first_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_answered ON call_state(first_ts_ms DESC, answered)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state(first_ts_ms DESC, open, last_status)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state(agent, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_src_last ON call_state(src, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_dst_last ON call_state(dst, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_from_last ON call_state(from_h, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_to_last ON call_state(to_h, last_ts_ms DESC)")
+        let _ = sql_exec_plain(db, "CREATE INDEX IF NOT EXISTS idx_call_state_state_lookup ON call_state(open, answered, last_status, last_method, invite_id, call_id)")
+        let has_answer_ts = sql_query_int(db, "SELECT COUNT(*) FROM pragma_table_info('call_state') WHERE name = 'answer_ts_ms'", [])
+        if has_answer_ts == 0 {
+            let _ = sql_exec_plain(db, "ALTER TABLE call_state ADD COLUMN answer_ts_ms INTEGER NOT NULL DEFAULT 0")
+        }
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS report_daily (" +
+            "day TEXT NOT NULL," +
+            "method TEXT NOT NULL," +
+            "transport TEXT NOT NULL," +
+            "cnt INTEGER NOT NULL DEFAULT 0," +
+            "PRIMARY KEY(day, method, transport)" +
+            ")")
+        // Schema version tracking
+        let _ = sql_exec_plain(db, "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+        let sv = sql_query_int(db, "SELECT version FROM schema_version LIMIT 1", [])
+        if sv <= 0 {
+            let _ = sql_exec_plain(db, "INSERT INTO schema_version(version) VALUES (2)")
+        } else if sv < 2 {
+            let _ = sql_exec_plain(db, "UPDATE schema_version SET version = 2")
+        }
+        let _ = sql_close(db)
+        print("db   sqlite " + db_path() + " schema=v2")
+    }
+    return 1
+}
+
+// ClickHouse insert: single INSERT with all fields (no UPDATE, append-only).
+fn ch_insert_json(record_json: string) -> int {
+    let ts_ms = json_get_int(record_json, "ts_ms")
+    let status = json_get_int(record_json, "status")
+    let hep_node_id = json_get_int(record_json, "hep_node_id")
+    let size = json_get_int(record_json, "size")
+    let src = json_get_string(record_json, "src")
+    let dst = json_get_string(record_json, "dst")
+    let transport = json_get_string(record_json, "transport")
+    let proto = json_get_string(record_json, "proto")
+    let agent = json_get_string(record_json, "agent")
+    let kind = json_get_string(record_json, "kind")
+    let method = json_get_string(record_json, "method")
+    let call_id = json_get_string(record_json, "call_id")
+    let from_h = json_get_string(record_json, "from")
+    let to_h = json_get_string(record_json, "to")
+    let cseq = json_get_string(record_json, "cseq")
+    let ruri = json_get_string(record_json, "ruri")
+    let hep_node = json_get_string(record_json, "hep_node")
+    let hep_cid = json_get_string(record_json, "hep_cid")
+    let raw_b64 = json_get_string(record_json, "raw_b64")
+    let sql = "INSERT INTO captures (ts_ms, src, dst, transport, proto, agent, kind, method, status, call_id, from_h, to_h, cseq, ruri, hep_node_id, hep_node, hep_cid, size, raw_b64, record_json) VALUES (" +
+        string(ts_ms) + "," +
+        sql_quote(src) + "," + sql_quote(dst) + "," + sql_quote(transport) + "," +
+        sql_quote(proto) + "," + sql_quote(agent) + "," + sql_quote(kind) + "," +
+        sql_quote(method) + "," + string(status) + "," + sql_quote(call_id) + "," +
+        sql_quote(from_h) + "," + sql_quote(to_h) + "," + sql_quote(cseq) + "," +
+        sql_quote(ruri) + "," + string(hep_node_id) + "," + sql_quote(hep_node) + "," +
+        sql_quote(hep_cid) + "," + string(size) + "," + sql_quote(raw_b64) + "," +
+        sql_quote(record_json) + ")"
+    let _ = ch_exec(sql)
+    // Daily rollup via SummingMergeTree
+    let mut m = method
+    if str_eq(m, "") {
+        m = "UNKNOWN"
+    }
+    let mut tr = transport
+    if str_eq(tr, "") {
+        tr = "UDP"
+    }
+    let _ = ch_exec("INSERT INTO report_daily (day, method, transport, cnt) VALUES (" +
+        sql_quote(day_key(ts_ms)) + "," + sql_quote(m) + "," + sql_quote(tr) + ",1)")
+    return 1
+}
+
+fn db_update_call_state(db: SqlDB, id: int, record_json: string) -> int {
+    let ts_ms = json_get_int(record_json, "ts_ms")
+    let status = json_get_int(record_json, "status")
+    let src = json_get_string(record_json, "src")
+    let dst = json_get_string(record_json, "dst")
+    let agent = json_get_string(record_json, "agent")
+    let kind = json_get_string(record_json, "kind")
+    let method = json_get_string(record_json, "method")
+    let call_id = json_get_string(record_json, "call_id")
+    let from_h = json_get_string(record_json, "from")
+    let to_h = json_get_string(record_json, "to")
+    if str_eq(call_id, "") {
+        return 1
+    }
+    let is_invite = str_eq(method, "INVITE") || str_contains(method, " INVITE")
+    let is_bye = str_eq(method, "BYE") || str_contains(method, " BYE")
+    let is_cancel = str_eq(method, "CANCEL") || str_contains(method, " CANCEL")
+
+    let mut open_v = 1
+    let mut answered_v = 0
+    let mut invite_id = 0
+    let mut relevant = 0
+    if is_invite {
+        if str_eq(kind, "request") {
+            relevant = 1
+            open_v = 1
+            invite_id = id
+        } else if status >= 200 && status < 300 {
+            relevant = 1
+            open_v = 1
+            answered_v = 1
+        } else if status >= 300 {
+            relevant = 1
+            open_v = 0
+        }
+    } else if (is_bye || is_cancel) && str_eq(kind, "request") {
+        relevant = 1
+        open_v = 0
+    }
+    if relevant == 0 {
+        return 1
+    }
+
+    let answer_ts = if answered_v == 1 { ts_ms } else { 0 }
+    let up = "INSERT INTO call_state(call_id, agent, first_ts_ms, answer_ts_ms, last_ts_ms, last_id, invite_id, last_method, last_status, answered, open, src, dst, from_h, to_h) VALUES (" +
+        sql_quote(call_id) + "," + sql_quote(agent) + "," + string(ts_ms) + "," + string(answer_ts) + "," + string(ts_ms) + "," + string(id) + "," + string(invite_id) + "," +
+        sql_quote(method) + "," + string(status) + "," + string(answered_v) + "," + string(open_v) + "," +
+        sql_quote(src) + "," + sql_quote(dst) + "," + sql_quote(from_h) + "," + sql_quote(to_h) + ") " +
+        "ON CONFLICT(call_id, agent) DO UPDATE SET " +
+        "last_ts_ms=excluded.last_ts_ms,last_id=excluded.last_id," +
+        "invite_id=CASE WHEN excluded.invite_id > 0 THEN excluded.invite_id ELSE call_state.invite_id END," +
+        "last_method=excluded.last_method,last_status=excluded.last_status," +
+        "answer_ts_ms=CASE WHEN excluded.answer_ts_ms > 0 AND call_state.answer_ts_ms = 0 THEN excluded.answer_ts_ms ELSE call_state.answer_ts_ms END," +
+        "answered=CASE WHEN excluded.answered = 1 THEN 1 ELSE call_state.answered END," +
+        "open=CASE WHEN excluded.last_method = 'INVITE' AND call_state.open = 0 THEN 0 WHEN excluded.last_method = 'INVITE' AND excluded.last_status >= 300 AND call_state.answered = 1 THEN call_state.open ELSE excluded.open END," +
+        "src=CASE WHEN excluded.src != '' THEN excluded.src ELSE call_state.src END," +
+        "dst=CASE WHEN excluded.dst != '' THEN excluded.dst ELSE call_state.dst END," +
+        "from_h=CASE WHEN excluded.from_h != '' THEN excluded.from_h ELSE call_state.from_h END," +
+        "to_h=CASE WHEN excluded.to_h != '' THEN excluded.to_h ELSE call_state.to_h END"
+    let _ = sql_exec_plain(db, up)
+    if is_invite && str_eq(kind, "response") && status >= 200 && status < 300 {
+        let _ = sql_exec_plain(db, "UPDATE call_state SET answered = 1, answer_ts_ms = CASE WHEN answer_ts_ms = 0 THEN " + string(ts_ms) + " ELSE answer_ts_ms END, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = 'INVITE', last_status = " + string(status) + " WHERE call_id = " + sql_quote(call_id))
+    } else if is_invite && str_eq(kind, "response") && status >= 300 {
+        let _ = sql_exec_plain(db, "UPDATE call_state SET open = 0, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = 'INVITE', last_status = " + string(status) + " WHERE call_id = " + sql_quote(call_id) + " AND answered = 0")
+    } else if (is_bye || is_cancel) && str_eq(kind, "request") {
+        let _ = sql_exec_plain(db, "UPDATE call_state SET open = 0, last_ts_ms = " + string(ts_ms) + ", last_id = " + string(id) + ", last_method = " + sql_quote(method) + ", last_status = " + string(status) + " WHERE call_id = " + sql_quote(call_id))
+    }
+    return 1
+}
+
+// Insert one capture from record JSON on an already-open connection.
+// Uses chan[string] (not multi-field struct) — large struct channels have
+// triggered libmalloc free-of-unallocated under multi-worker stress.
+fn db_insert_json(db: SqlDB, record_json: string) -> int {
+    if sql_ok(db) == 0 {
+        return 0
+    }
+    let ts_ms = json_get_int(record_json, "ts_ms")
+    let status = json_get_int(record_json, "status")
+    let hep_node_id = json_get_int(record_json, "hep_node_id")
+    let size = json_get_int(record_json, "size")
+    let src = json_get_string(record_json, "src")
+    let dst = json_get_string(record_json, "dst")
+    let transport = json_get_string(record_json, "transport")
+    let proto = json_get_string(record_json, "proto")
+    let agent = json_get_string(record_json, "agent")
+    let kind = json_get_string(record_json, "kind")
+    let method = json_get_string(record_json, "method")
+    let call_id = json_get_string(record_json, "call_id")
+    let from_h = json_get_string(record_json, "from")
+    let to_h = json_get_string(record_json, "to")
+    let cseq = json_get_string(record_json, "cseq")
+    let ruri = json_get_string(record_json, "ruri")
+    let hep_node = json_get_string(record_json, "hep_node")
+    let hep_cid = json_get_string(record_json, "hep_cid")
+    let raw_b64 = json_get_string(record_json, "raw_b64")
+
+    // Shell row with integers + empty record_json; fill text via bound UPDATEs.
+    let mut id = 0
+    if db_is_postgres() == 1 {
+        // PostgreSQL: use RETURNING to get the new id
+        let ret_rows = sql_query_rows(db,
+            "INSERT INTO captures(ts_ms, status, hep_node_id, size, record_json) VALUES (" +
+            string(ts_ms) + "," + string(status) + "," + string(hep_node_id) + "," +
+            string(size) + ",'') RETURNING id", [])
+        if sql_rows_ok(ret_rows) == 1 && sql_rows_next(ret_rows) == 1 {
+            id = sql_rows_int(ret_rows, 0)
+        }
+        let _ = sql_rows_close(ret_rows)
+    } else {
+        let _ = sql_exec_plain(db,
+            "INSERT INTO captures(ts_ms, status, hep_node_id, size, record_json) VALUES (" +
+            string(ts_ms) + "," + string(status) + "," + string(hep_node_id) + "," +
+            string(size) + ",'')")
+        id = sql_last_insert_id(db)
+    }
+    if id <= 0 {
+        return 0
+    }
+    let id_s = string(id)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET src=?, dst=?, transport=?, proto=? WHERE id=" + id_s,
+        src, dst, transport, proto)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET agent=?, kind=?, method=?, call_id=? WHERE id=" + id_s,
+        agent, kind, method, call_id)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET from_h=?, to_h=?, cseq=?, ruri=? WHERE id=" + id_s,
+        from_h, to_h, cseq, ruri)
+    let _ = sql_exec_str4(db,
+        "UPDATE captures SET hep_node=?, hep_cid=?, raw_b64=?, record_json=? WHERE id=" + id_s,
+        hep_node, hep_cid, raw_b64, record_json)
+    let _ = db_update_call_state(db, id, record_json)
+    // daily rollup
+    let day = day_key(ts_ms)
+    let mut m = method
+    if str_eq(m, "") {
+        m = "UNKNOWN"
+    }
+    let mut tr = transport
+    if str_eq(tr, "") {
+        tr = "UDP"
+    }
+    let up_expr = if db_is_postgres() == 1 {
+        "cnt = report_daily.cnt + 1"
+    } else {
+        "cnt = cnt + 1"
+    }
+    let up = "INSERT INTO report_daily(day, method, transport, cnt) VALUES (" +
+        sql_quote(day) + "," + sql_quote(m) + "," + sql_quote(tr) + ",1) " +
+        "ON CONFLICT(day, method, transport) DO UPDATE SET " + up_expr
+    let _ = sql_exec_plain(db, up)
+    // opportunistic retention
+    if id % 64 == 0 {
+        let days = retention_days()
+        if days > 0 {
+            let cutoff = retention_cutoff_ms(days)
+            let _ = sql_exec_plain(db, "DELETE FROM captures WHERE ts_ms < " + string(cutoff))
+            let _ = sql_exec_plain(db, "DELETE FROM call_state WHERE last_ts_ms < " + string(cutoff))
+            let _ = sql_exec_plain(db, "DELETE FROM report_daily WHERE day < " + sql_quote(day_key(cutoff)))
+        }
+    }
+    return 1
+}
+
+// Enqueue record JSON for the single kicked DB writer (blocks if channel full).
+fn db_enqueue(ch: chan[string], record_json: string) -> int {
+    return ch.send_timeout(record_json, 25)
+}
+
+// Single-writer job: owns one SQLite connection, drains via range.
+// Range exits when the channel is closed (graceful shutdown).
+fn db_writer(ch: chan[string], metrics: CMap) -> int {
+    if db_is_clickhouse() == 1 {
+        return ch_writer(ch, metrics)
+    }
+    print("db   writer kick (chan[string] cap=" + string(DB_CH_CAP) + ")")
+    let mut db = db_open()
+    if sql_ok(db) == 0 {
+        print("db   writer open failed: " + db_path())
+        for j in range ch {
+            let _ = cmap_incr(metrics, "db_err", 1)
+        }
+        return 0
+    }
+    let mut n = 0
+    let mut fail_streak = 0
+    for j in range ch {
+        if db_insert_json(db, j) == 1 {
+            n = n + 1
+            fail_streak = 0
+            let _ = cmap_incr(metrics, "db_ok", 1)
+        } else {
+            fail_streak = fail_streak + 1
+            let _ = cmap_incr(metrics, "db_err", 1)
+            if db_is_postgres() == 1 && fail_streak >= 3 {
+                print("db   writer reconnect after " + string(fail_streak) + " failed inserts")
+                let _ = sql_close(db)
+                sleep_ms(250)
+                db = db_open()
+                fail_streak = 0
+                if sql_ok(db) == 0 {
+                    print("db   writer reconnect failed")
+                    sleep_ms(1000)
+                } else {
+                    print("db   writer reconnected")
+                }
+            }
+        }
+    }
+    let _ = sql_close(db)
+    print("db   writer stop after " + string(n) + " inserts")
+    return n
+}
+
+// ClickHouse writer: batch inserts for high throughput.
+// Buffers rows and flushes every BATCH_SIZE or when channel drains.
+fn ch_writer(ch: chan[string], metrics: CMap) -> int {
+    print("db   writer kick clickhouse (chan[string] cap=" + string(DB_CH_CAP) + ")")
+    let mut n = 0
+    for j in range ch {
+        if ch_insert_json(j) == 1 {
+            n = n + 1
+            let _ = cmap_incr(metrics, "db_ok", 1)
+        } else {
+            let _ = cmap_incr(metrics, "db_err", 1)
+        }
+    }
+    print("db   writer stop after " + string(n) + " inserts")
+    return n
+}
