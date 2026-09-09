@@ -3,7 +3,8 @@
 const RING = 512
 const VERSION = "0.3.0"
 // Capture enqueue buffer — backpressures SIP/HEP workers when the DB lags.
-const DB_CH_CAP = 1024
+// ponytail: 4096 absorbs ~1s burst at 4k msg/s; raise if drop rate exceeds 1%
+const DB_CH_CAP = 4096
 
 // ---- small helpers ----
 
