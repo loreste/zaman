@@ -645,13 +645,19 @@ fn db_insert_json(db: SqlDB, record_json: string) -> int {
         sql_quote(day) + "," + sql_quote(m) + "," + sql_quote(tr) + ",1) " +
         "ON CONFLICT(day, method, transport) DO UPDATE SET " + up_expr
     let _ = sql_exec_plain(db, up)
-    // opportunistic retention
-    if id % 64 == 0 {
+    // opportunistic retention — small batches to avoid blocking the writer
+    // ponytail: LIMIT 500 caps unbounded scan on large tables; raise if retention falls behind
+    if id % 1024 == 0 {
         let days = retention_days()
         if days > 0 {
             let cutoff = retention_cutoff_ms(days)
-            let _ = sql_exec_plain(db, "DELETE FROM captures WHERE ts_ms < " + string(cutoff))
-            let _ = sql_exec_plain(db, "DELETE FROM call_state WHERE last_ts_ms < " + string(cutoff))
+            if db_is_postgres() == 1 {
+                let _ = sql_exec_plain(db, "DELETE FROM captures WHERE ctid IN (SELECT ctid FROM captures WHERE ts_ms < " + string(cutoff) + " LIMIT 500)")
+                let _ = sql_exec_plain(db, "DELETE FROM call_state WHERE ctid IN (SELECT ctid FROM call_state WHERE last_ts_ms < " + string(cutoff) + " LIMIT 500)")
+            } else {
+                let _ = sql_exec_plain(db, "DELETE FROM captures WHERE rowid IN (SELECT rowid FROM captures WHERE ts_ms < " + string(cutoff) + " LIMIT 500)")
+                let _ = sql_exec_plain(db, "DELETE FROM call_state WHERE rowid IN (SELECT rowid FROM call_state WHERE last_ts_ms < " + string(cutoff) + " LIMIT 500)")
+            }
             let _ = sql_exec_plain(db, "DELETE FROM report_daily WHERE day < " + sql_quote(day_key(cutoff)))
         }
     }

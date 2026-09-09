@@ -95,57 +95,22 @@ fn main() {
         print("hep  tls  disabled (set ZAMAN_HEP_TLS_CERT and ZAMAN_HEP_TLS_KEY)")
     }
 
-    if want_tcp == 0 && want_tls == 0 {
-        crew t {
-            let w = t.kick(db_writer(db_ch, metrics))
-            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
-            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
-            let _ = w.join()
-            let _ = s.join()
-            let _ = h.join()
-            let _ = a.join()
-        }
-    } else if want_tcp == 1 && want_tls == 0 {
-        crew t {
-            let w = t.kick(db_writer(db_ch, metrics))
-            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
-            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
+    crew(fail_fast=true) t {
+        let w = t.kick(db_writer(db_ch, metrics))
+        let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
+        let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
+        let a = t.kick(http_worker(store, metrics, db_ch, api_port))
+        if want_tcp == 1 {
             let ht = t.kick(hep_tcp_worker(store, metrics, db_ch, sip_host, hep_tcp_port))
-            let _ = w.join()
-            let _ = s.join()
-            let _ = h.join()
-            let _ = a.join()
             let _ = ht.join()
         }
-    } else if want_tcp == 0 && want_tls == 1 {
-        crew t {
-            let w = t.kick(db_writer(db_ch, metrics))
-            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
-            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
+        if want_tls == 1 {
             let hl = t.kick(hep_tls_worker(store, metrics, db_ch, sip_host, hep_tls_port, tls_cert, tls_key))
-            let _ = w.join()
-            let _ = s.join()
-            let _ = h.join()
-            let _ = a.join()
             let _ = hl.join()
         }
-    } else {
-        crew t {
-            let w = t.kick(db_writer(db_ch, metrics))
-            let s = t.kick(sip_worker(store, metrics, db_ch, sip_host, sip_port, echo_all))
-            let h = t.kick(hep_worker(store, metrics, db_ch, sip_host, hep_port))
-            let a = t.kick(http_worker(store, metrics, db_ch, api_port))
-            let ht = t.kick(hep_tcp_worker(store, metrics, db_ch, sip_host, hep_tcp_port))
-            let hl = t.kick(hep_tls_worker(store, metrics, db_ch, sip_host, hep_tls_port, tls_cert, tls_key))
-            let _ = w.join()
-            let _ = s.join()
-            let _ = h.join()
-            let _ = a.join()
-            let _ = ht.join()
-            let _ = hl.join()
-        }
+        let _ = w.join()
+        let _ = s.join()
+        let _ = h.join()
+        let _ = a.join()
     }
 }

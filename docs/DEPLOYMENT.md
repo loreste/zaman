@@ -168,8 +168,13 @@ sites, and private routing identifiers. Do not commit those values.
 | 365 days | 18 GB | 180 GB | 1.8 TB |
 
 Set `ZAMAN_DB_RETENTION_DAYS` in `/etc/zaman/core.env`. It prunes raw captures,
-call summaries, and daily rollups. Use `0` only when an external retention
-process is in place.
+call summaries, and daily rollups in small batches (LIMIT 500) every 1024
+inserts to avoid blocking the DB writer. Use `0` only when an external
+retention process is in place.
+
+For PostgreSQL deployments, schedule a daily `VACUUM` cron to reclaim disk
+from deleted rows. Without VACUUM, PostgreSQL marks dead tuples as reusable
+but does not return space to the OS.
 
 ---
 

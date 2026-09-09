@@ -1,37 +1,29 @@
 # Zaman Module Split
 
-Zaman should not stay as two large executable files. Makori 0.6.24 has stable
-`pack` / `pull` support, local path dependencies, improved ownership safety for
-channels and kicked jobs, and better diagnostics. Use those features to split
-the app in small, reviewable passes.
+The core was split into focused modules using Makori `pull` imports. Makori
+0.6.32 adds `crew(fail_fast=true)` structured concurrency, zero-allocation
+small channels, and position-aware move semantics — all used in the current
+layout.
 
-## Current Size
-
-- `core/main.mko`: core runtime, SIP/HEP parsing, DB persistence, reports, API.
-- `web/main.weft`: RBAC, layout, all pages, report builder, ladder rendering.
-
-## Target Core Layout
+## Core Layout
 
 - `core/main.mko`
-  - Process startup, ports, worker wiring, route registration.
+  - Process startup, ports, single `crew(fail_fast=true)` worker orchestration.
 - `core/config.mko`
   - Env parsing, feature flags, API key handling, retention settings.
 - `core/sip.mko`
   - SIP parsing, header extraction, redaction, call state helpers.
 - `core/hep.mko`
-  - HEP3 decode, peer allow rules, protocol helpers.
+  - HEP3 decode, peer allow rules, UDP/TCP/TLS workers.
 - `core/db.mko`
-  - DB open/init, SQLite/PostgreSQL/ClickHouse helpers, writer loop.
+  - DB open/init, SQLite/PostgreSQL/ClickHouse helpers, writer loop,
+    batched retention (LIMIT 500 per backend).
 - `core/reports.mko`
   - Report, KPI, SLA, realtime, active-call queries.
 - `core/http_api.mko`
   - HTTP routing and JSON response assembly.
 - `core/probe.mko`
   - OPTIONS probe safety checks and probe execution.
-
-Core modules should be introduced with `pull . "./module.mko"` first so call
-sites do not churn. After each chunk builds and passes integration tests, convert
-high-cohesion modules to qualified packs where that improves clarity.
 
 ## Target Web Layout
 
