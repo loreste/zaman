@@ -183,7 +183,28 @@ func apiWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, r
 	mux.HandleFunc("/api/metrics", withRateLimit(requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		metrics.mu.Lock()
 		uptime := time.Since(metrics.StartTime).Milliseconds()
-		m := *metrics
+		msgsTotal := metrics.MsgsTotal
+		dbOk := metrics.DBOk
+		dbErr := metrics.DBErr
+		dbDrop := metrics.DBDrop
+		requests := metrics.Requests
+		responses := metrics.Responses
+		echoes := metrics.Echoes
+		hepTotal := metrics.HEPTotal
+		hepUDP := metrics.HEPUDP
+		hepTCP := metrics.HEPTCP
+		hepTLS := metrics.HEPTLS
+		hepErr := metrics.HEPErr
+		hepAuthFail := metrics.HEPAuthFail
+		hepDeny := metrics.HEPDeny
+		hepSIP := metrics.HEPSIP
+		hepRTCP := metrics.HEPRTCP
+		hepRTP := metrics.HEPRTP
+		hepRTCPXR := metrics.HEPRTCPXR
+		hepOther := metrics.HEPOther
+		parseErr := metrics.ParseErr
+		s2xx := metrics.Status2xx
+		s4xx5xx := metrics.Status4xx5xx
 		methods := make(map[string]int64)
 		for k, v := range metrics.Methods {
 			methods[k] = v
@@ -196,24 +217,31 @@ func apiWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, r
 		}
 
 		json(w, fmt.Sprintf(`{"service":"zaman-core","version":"%s","uptime_ms":%d,"msgs_total":%d,"db_ok":%d,"db_err":%d,"db_drop":%d,"requests":%d,"responses":%d,"echoes":%d,"hep_total":%d,"hep_udp":%d,"hep_tcp":%d,"hep_tls":%d,"hep_err":%d,"hep_auth_fail":%d,"hep_deny":%d,"hep_sip":%d,"hep_rtcp":%d,"hep_rtp":%d,"hep_rtcpxr":%d,"hep_other":%d,"parse_err":%d,"status_2xx":%d,"status_4xx_5xx":%d,"methods":{%s}}`,
-			Version, uptime, m.MsgsTotal, m.DBOk, m.DBErr, m.DBDrop,
-			m.Requests, m.Responses, m.Echoes,
-			m.HEPTotal, m.HEPUDP, m.HEPTCP, m.HEPTLS, m.HEPErr, m.HEPAuthFail, m.HEPDeny,
-			m.HEPSIP, m.HEPRTCP, m.HEPRTP, m.HEPRTCPXR, m.HEPOther,
-			m.ParseErr, m.Status2xx, m.Status4xx5xx,
+			Version, uptime, msgsTotal, dbOk, dbErr, dbDrop,
+			requests, responses, echoes,
+			hepTotal, hepUDP, hepTCP, hepTLS, hepErr, hepAuthFail, hepDeny,
+			hepSIP, hepRTCP, hepRTP, hepRTCPXR, hepOther,
+			parseErr, s2xx, s4xx5xx,
 			strings.Join(methodParts, ",")))
 	})))
 
 	// Prometheus
 	mux.HandleFunc("/metrics", withRateLimit(requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		metrics.mu.Lock()
-		m := *metrics
 		uptime := time.Since(metrics.StartTime).Milliseconds()
+		mt := metrics.MsgsTotal
+		dok := metrics.DBOk
+		derr := metrics.DBErr
+		ddrop := metrics.DBDrop
+		ht := metrics.HEPTotal
+		req := metrics.Requests
+		resp := metrics.Responses
+		ech := metrics.Echoes
 		metrics.mu.Unlock()
 
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "zaman_up 1\nzaman_uptime_ms %d\nzaman_messages_total %d\nzaman_db_ok %d\nzaman_db_err %d\nzaman_db_dropped %d\nzaman_hep_total %d\nzaman_requests %d\nzaman_responses %d\nzaman_echoes %d\n",
-			uptime, m.MsgsTotal, m.DBOk, m.DBErr, m.DBDrop, m.HEPTotal, m.Requests, m.Responses, m.Echoes)
+			uptime, mt, dok, derr, ddrop, ht, req, resp, ech)
 	})))
 
 	// ---- Messages ----

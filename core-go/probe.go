@@ -38,7 +38,7 @@ func doProbe(cfg *Config, metrics *Metrics, bodyJSON string) string {
 		return `{"ok":false,"error":"host blocked"}`
 	}
 
-	addr := fmt.Sprintf("%s:%d", req.Host, req.Port)
+	addr := net.JoinHostPort(req.Host, fmt.Sprintf("%d", req.Port))
 	conn, err := net.DialTimeout("udp", addr, time.Duration(req.WaitMs)*time.Millisecond)
 	if err != nil {
 		metrics.Inc(&metrics.ProbesFail, 1)
