@@ -1,8 +1,9 @@
 # Zaman — multi-stage build
 # Stage 1: build the Makori core binary
-# Stage 2: runtime with core + weft dashboard
+# Stage 2: build the Go web binary
+# Stage 3: runtime
 
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:24.04 AS core-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates clang make && \
@@ -22,24 +23,24 @@ COPY core/ core/
 
 RUN makori build --release core/main.mko -o bin/zaman-core
 
-# Stage 2: runtime
+FROM golang:1.27 AS web-builder
+
+WORKDIR /build/web
+COPY web/go.mod web/main.go ./
+RUN go build -o /build/bin/zaman-web .
+
+# Stage 3: runtime
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Weft
-RUN mkdir -p /usr/local/bin && \
-    curl -fsSL https://weft.dev/install.sh | bash || \
-    (curl -fsSL -o /usr/local/bin/weft https://weft.dev/dl/weft-linux-amd64 && \
-     chmod +x /usr/local/bin/weft)
-ENV PATH="/usr/local/bin:/root/.local/bin:${PATH}"
-
 WORKDIR /app
 
-COPY --from=builder /build/bin/zaman-core /app/bin/zaman-core
-COPY web/ /app/web/
+COPY --from=core-builder /build/bin/zaman-core /app/bin/zaman-core
+COPY --from=web-builder /build/bin/zaman-web /app/bin/zaman-web
+COPY web/static/ /app/web/static/
 COPY scripts/ /app/scripts/
 
 RUN mkdir -p /app/data

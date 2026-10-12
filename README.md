@@ -1,6 +1,6 @@
 # Zaman
 
-Zaman is a SIP and HEP monitoring stack built with Makori and Weft. It captures
+Zaman is a SIP and HEP monitoring stack built with Makori and Go. It captures
 SIP signaling, receives HEP3 from SIP infrastructure, stores the data, and
 serves a realtime operations UI for troubleshooting calls, peers, KPIs, reports,
 SLA, and alerts.
@@ -51,7 +51,7 @@ make build
 ./scripts/demo.sh
 ```
 
-Manual builds require Makori >= 0.6.24 and Weft >= 0.6.0.
+Manual builds require Makori >= 0.6.24 and Go >= 1.22.
 
 ---
 
@@ -168,7 +168,8 @@ for nodes and IPs are managed from the UI and are not committed to source.
 ```text
 zaman/
   core/main.mko           # zaman-core: capture, HEP, echo, API, DB, metrics
-  web/main.weft           # zaman-web: dashboard, RBAC, reports, ladder, alerts
+  web/main.go             # zaman-web: Go dashboard server, auth, API proxy
+  web/static/             # SPA: HTML + JS dashboard (Tailwind, Chart.js)
   install.sh              # Linux installer
   Dockerfile              # multi-stage container build
   docker-compose.yml      # SQLite / PostgreSQL / ClickHouse profiles
@@ -193,7 +194,7 @@ Useful direct checks:
 
 ```bash
 makori check core/main.mko
-weft check web/main.weft
+cd web && go vet . && cd ..
 ./scripts/smoke.sh
 ```
 

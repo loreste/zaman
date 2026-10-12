@@ -1,5 +1,5 @@
 # Zaman — SIP monitoring
-#   make build   → bin/zaman-core
+#   make build   → bin/zaman-core + bin/zaman-web
 #   make smoke   → end-to-end test
 #   make demo    → core + dashboard on high ports
 
@@ -10,39 +10,43 @@ HEP_PORT  ?= 9060
 API_PORT  ?= 9090
 CORE_URL  ?= http://127.0.0.1:$(API_PORT)
 
-.PHONY: all build core run-core run-web run demo smoke clean doctor check
+.PHONY: all build core web run-core run-web run demo smoke clean doctor check
 
 all: build
 
 # ---- toolchain ----
 
 doctor:
-	@command -v makori >/dev/null || (echo "makori not found — https://mako-lang.dev"; exit 1)
-	@command -v weft >/dev/null || (echo "weft not found — https://weft.dev"; exit 1)
-	@makori version
-	@weft version
+	@command -v go >/dev/null || (echo "go not found — https://go.dev"; exit 1)
+	@go version
 
 # ---- build ----
 
-build: bin/zaman-core
+build: bin/zaman-core bin/zaman-web
 
-bin/zaman-core: core/main.mko
+bin/zaman-core: $(wildcard core-go/*.go)
 	mkdir -p bin
-	makori build --release core/main.mko -o bin/zaman-core
+	cd core-go && go build -o ../bin/zaman-core .
+
+bin/zaman-web: $(wildcard web/*.go)
+	mkdir -p bin
+	cd web && go build -o ../bin/zaman-web .
 
 core: bin/zaman-core
 
-check: core/main.mko web/main.weft
-	makori check core/main.mko
-	weft check web/main.weft
+web: bin/zaman-web
+
+check:
+	cd core-go && go vet .
+	cd web && go vet .
 
 # ---- run ----
 
 run-core: bin/zaman-core
 	./bin/zaman-core $(SIP_PORT) $(HEP_PORT) $(API_PORT)
 
-run-web:
-	ZAMAN_CORE=$(CORE_URL) weft run web/main.weft
+run-web: bin/zaman-web
+	ZAMAN_CORE=$(CORE_URL) ./bin/zaman-web
 
 run: bin/zaman-core
 	@echo "Core: SIP=$(or $(DEMO_SIP),15060) HEP=$(or $(DEMO_HEP),19060) API=$(or $(DEMO_API),19090)"

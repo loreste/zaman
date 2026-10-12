@@ -16,4 +16,4 @@ for i in $(seq 1 60); do
 done
 
 # Start dashboard in foreground
-exec weft run /app/web/main.weft
+exec /app/bin/zaman-web

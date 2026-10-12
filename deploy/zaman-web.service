@@ -8,7 +8,7 @@ Type=simple
 User=zaman
 Group=zaman
 WorkingDirectory=/opt/zaman
-ExecStart=/usr/local/bin/weft run /opt/zaman/web/main.weft
+ExecStart=/opt/zaman/bin/zaman-web
 Restart=always
 RestartSec=5
 

@@ -188,50 +188,34 @@ install_mako() {
     log "Makori installed: $(makori version 2>/dev/null | head -1)"
 }
 
-# ── Install Weft ──
-install_weft() {
-    if have weft; then
-        WEFT_VER=$(weft version 2>/dev/null | head -1)
-        log "Weft already installed: ${WEFT_VER}"
+# ── Install Go ──
+install_go() {
+    if have go; then
+        GO_VER=$(go version 2>/dev/null)
+        log "Go already installed: ${GO_VER}"
         return
     fi
 
-    log "Installing Weft framework..."
+    log "Installing Go..."
     ARCH=$(uname -m)
     case "$ARCH" in
-        x86_64|amd64) WEFT_ARCH="amd64" ;;
-        aarch64|arm64) WEFT_ARCH="arm64" ;;
+        x86_64|amd64) GO_ARCH="amd64" ;;
+        aarch64|arm64) GO_ARCH="arm64" ;;
         *) err "Unsupported architecture: $ARCH" ;;
     esac
 
-    mkdir -p /usr/local/bin
+    GO_VERSION="1.23.4"
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go.tar.gz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf /tmp/go.tar.gz
+    rm -f /tmp/go.tar.gz
+    export PATH="/usr/local/go/bin:${PATH}"
 
-    # Try official install script first
-    if curl -fsSL https://weft.dev/install.sh -o /tmp/weft-install.sh 2>/dev/null; then
-        bash /tmp/weft-install.sh 2>/dev/null && {
-            [ -f "$HOME/.local/bin/weft" ] && cp "$HOME/.local/bin/weft" /usr/local/bin/weft
-            rm -f /tmp/weft-install.sh
-        }
+    if ! have go; then
+        err "Failed to install Go. Install manually from https://go.dev and re-run."
     fi
 
-    # Fallback: direct binary download
-    if ! have weft; then
-        for url in \
-            "https://weft.dev/dl/weft-linux-${WEFT_ARCH}" \
-            "https://github.com/loreste32/weft/releases/latest/download/weft-linux-${WEFT_ARCH}"; do
-            if curl -fsSL "$url" -o /usr/local/bin/weft 2>/dev/null; then
-                chmod +x /usr/local/bin/weft
-                break
-            fi
-        done
-    fi
-
-    # Verify
-    if ! have weft; then
-        err "Failed to install Weft. Install manually from https://weft.dev and re-run."
-    fi
-
-    log "Weft installed: $(weft version 2>/dev/null | head -1)"
+    log "Go installed: $(go version 2>/dev/null)"
 }
 
 # ── Install database ──
@@ -334,6 +318,10 @@ install_zaman() {
     [ -n "$MAKO_BIN" ] || err "Makori compiler not found"
     "$MAKO_BIN" build --release core/main.mko -o bin/zaman-core
     log "Built: bin/zaman-core"
+
+    log "Building zaman-web..."
+    cd web && go build -o ../bin/zaman-web . && cd ..
+    log "Built: bin/zaman-web"
 
     # Create directories
     mkdir -p "$DATA_DIR" "$CONF_DIR"
@@ -676,16 +664,16 @@ main() {
     detect_distro
     install_deps
     install_mako
-    install_weft
+    install_go
 
     # Verify toolchain before proceeding — validates binaries are genuine executables
     log "Verifying toolchain..."
     command -v makori >/dev/null 2>&1 || err "Makori not found after install"
-    command -v weft >/dev/null 2>&1 || err "Weft not found after install"
+    command -v go >/dev/null 2>&1 || err "Go not found after install"
     command -v clang >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || err "C compiler not found (need clang or gcc)"
     command -v git >/dev/null 2>&1 || err "git not found"
     command -v openssl >/dev/null 2>&1 || err "openssl not found"
-    log "Toolchain OK: makori=$(makori version 2>/dev/null | head -1), weft=$(weft version 2>/dev/null | head -1)"
+    log "Toolchain OK: makori=$(makori version 2>/dev/null | head -1), go=$(go version 2>/dev/null)"
 
     install_database
     install_zaman
