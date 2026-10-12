@@ -1,0 +1,44 @@
+// Zaman core — background cache worker for expensive API queries.
+// Refreshes cached JSON in CMap every few seconds so the HTTP handler
+// serves instant responses without blocking on DB queries.
+
+fn cache_worker(store: CMap) -> int {
+    print("cache worker started (3s refresh)")
+    sleep_ms(2000)
+    while 1 == 1 {
+        // Realtime stats (window=1 minute)
+        let rt = db_realtime_json(1, "")
+        cmap_set(store, "cache_realtime", rt)
+
+        // Node health
+        let nodes = db_node_health_json()
+        cmap_set(store, "cache_nodes", nodes)
+
+        // Active calls
+        let calls = db_active_calls_json(50, "", "", "", "", "", "")
+        cmap_set(store, "cache_calls", calls)
+
+        // KPIs (expensive — run every cycle)
+        let kpis = db_report_kpi_fast_json()
+        cmap_set(store, "cache_kpi", kpis)
+
+        // SLA by agent
+        let sla = db_sla_by_agent_fast_json()
+        cmap_set(store, "cache_sla_agents", sla)
+
+        // Response codes
+        let codes = db_report_response_codes_json()
+        cmap_set(store, "cache_response_codes", codes)
+
+        // Top talkers
+        let talkers = db_report_top_talkers_fast_json(20)
+        cmap_set(store, "cache_top_talkers", talkers)
+
+        // Agents
+        let agents = db_report_agents_fast_json()
+        cmap_set(store, "cache_agents", agents)
+
+        sleep_ms(3000)
+    }
+    return 0
+}

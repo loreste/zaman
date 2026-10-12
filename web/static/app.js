@@ -14,8 +14,15 @@ async function api(path) {
     return await r.json();
   } catch(e) { return null; }
 }
-function loadingCard(msg){return '<div class="card p-4 text-xs" style="color:var(--z-muted)">'+(msg||'Loading...')+'</div>';}
-function errorCard(msg){return '<div class="card p-4 text-xs v-red">'+(msg||'Failed to load data. Check connection.')+'</div>';}
+function loadingCard(msg){return '<div class="card p-4 t-sm" style="color:var(--z-dim)">'+(msg||'Loading...')+'</div>';}
+function errorCard(msg){return '<div class="card p-4 t-sm c-err">'+(msg||'Failed to load data.')+'</div>';}
+
+// Format numbers: 1234 → "1,234", 1234567 → "1.2M"
+function fmt(v){if(v==null)return'0';if(typeof v!=='number')v=Number(v);if(isNaN(v))return'0';if(v>=1e6)return(v/1e6).toFixed(1)+'M';if(v>=1e4)return(v/1e3).toFixed(1)+'k';return v.toLocaleString();}
+
+// Semantic color: only ok/warn/err/muted — no rainbow
+function asrColor(v){return v>=70?'c-ok':v>=40?'c-warn':'c-err';}
+function errColor(v){return v>0?'c-err':'c-ok';}
 function h(s) { if (s==null) return ''; const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
 function n(o,k) { return o&&o[k]!=null?o[k]:0; }
 
@@ -23,7 +30,7 @@ function n(o,k) { return o&&o[k]!=null?o[k]:0; }
 window._nodeNames={};
 (async()=>{try{const r=await fetch('/web/node-names',{headers:headers()});if(r.ok)window._nodeNames=await r.json();}catch(e){}})();
 function agentName(agent){if(!agent)return'';const name=window._nodeNames[agent];return name?name:''+agent;}
-function agentHtml(agent){if(!agent)return'';const name=window._nodeNames[agent];return name?h(name)+' <span class="text-[10px]" style="color:var(--z-muted)">('+h(agent)+')</span>':h(agent);}
+function agentHtml(agent){if(!agent)return'';const name=window._nodeNames[agent];return name?h(name)+' <span class="t-xs" style="color:var(--z-dim)">('+h(agent)+')</span>':h(agent);}
 function timeAgo(ms) {
   const s=Math.floor(Date.now()/1000-ms/1000);
   if(s<0) return 'just now';
@@ -164,28 +171,30 @@ async function updateStatus(){
   const el=$('core-status');
   if(d&&d.ok){
     const up=Math.floor(n(d,'uptime_ms')/1000);
-    el.innerHTML='<span class="w-2 h-2 rounded-full bg-[#34d399]"></span><span class="text-[#34d399]">core up</span><span class="text-[#3f3f46] ml-auto">uptime '+up+'s</span>';
+    el.innerHTML='<span class="w-2 h-2 rounded-full bg-[#34d399]"></span><span class="c-ok">core up</span><span class="t-xs" style="color:var(--z-dim) ml-auto">uptime '+up+'s</span>';
   } else {
-    el.innerHTML='<span class="w-2 h-2 rounded-full bg-[#ef4444]"></span><span class="text-[#ef4444]">core down</span>';
+    el.innerHTML='<span class="w-2 h-2 rounded-full bg-[#ef4444]"></span><span class="c-err">core down</span>';
   }
 }
 setInterval(updateStatus,5000);
 
+// KPI card — colorClass is semantic: c-ok, c-warn, c-err, c-muted, or empty for neutral
 function kpi(label,value,sub,colorClass){
-  const style=colorClass.startsWith('#')?'style="color:'+colorClass+'"':'class="'+colorClass+'"';
-  return '<div class="card p-4"><div class="text-[10px] uppercase tracking-widest font-medium" style="color:var(--z-dim)">'+h(label)+'</div><div class="text-[1.375rem] font-semibold mono mt-1.5 leading-none" '+style+'>'+value+'</div><div class="text-[10px] mt-2 leading-snug" style="color:var(--z-muted)">'+h(sub)+'</div></div>';
+  const cc=colorClass||'';
+  // Map old v-* classes to semantic
+  const cls=cc.replace('c-ok','c-ok').replace('c-err','c-err').replace('c-warn','c-warn').replace('c-muted','').replace('c-muted','').replace('c-muted','');
+  return '<div class="card p-4"><div class="t-xs" style="color:var(--z-dim)">'+h(label)+'</div><div class="t-hero mono mt-1 '+cls+'">'+value+'</div><div class="t-xs mt-2" style="color:var(--z-sub)">'+h(sub)+'</div></div>';
 }
 
 // ===== OVERVIEW =====
 pages['/']=function(){
   const m=$('main');
-  m.innerHTML='<div class="flex items-center justify-between mb-6"><div><h1 class="text-lg font-semibold tracking-tight">Overview</h1><p class="text-xs mt-0.5" style="color:var(--z-muted)">Live operations across all servers</p></div><div><select id="ov-agent" onchange="window._ovAgent=this.value" class="text-xs"><option value="">All servers</option></select></div></div>'+
+  m.innerHTML='<div class="flex items-center justify-between mb-5"><div><h1 class="t-lg">Overview</h1></div><div><select id="ov-agent" onchange="window._ovAgent=this.value" class="t-sm"><option value="">All servers</option></select></div></div>'+
     '<div id="ov-hero"></div>'+
-    '<div id="ov-kpis" class="mt-4"></div>'+
-    '<div id="ov-charts" class="grid xl:grid-cols-[2fr_1fr] gap-5 mt-6" style="display:none"><div class="card p-4"><div class="text-xs font-medium mb-3">Traffic</div><div style="height:140px"><canvas id="ov-chart-traffic"></canvas></div></div>'+
-    '<div class="card p-4"><div class="text-xs font-medium mb-3">Response Codes</div><div style="height:140px"><canvas id="ov-chart-codes"></canvas></div></div></div>'+
-    '<div class="mt-6" id="ov-nodes"></div>'+
-    '<div class="mt-6" id="ov-feed"></div>';
+    '<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3" id="ov-stats"></div>'+
+    '<div class="grid lg:grid-cols-[2fr_1fr] gap-4 mt-5" id="ov-charts" style="display:none"><div class="card p-4"><div class="sec-label">Traffic over time</div><div style="aspect-ratio:3/1;min-height:120px"><canvas id="ov-chart-traffic"></canvas></div></div>'+
+    '<div class="card p-4"><div class="sec-label">Response distribution</div><div style="aspect-ratio:1/1;max-height:200px;margin:0 auto"><canvas id="ov-chart-codes"></canvas></div></div></div>'+
+    '<div class="grid lg:grid-cols-[1fr_1fr] gap-4 mt-5"><div id="ov-nodes"></div><div id="ov-feed"></div></div>';
   window._ovAgent='';
   window._ovHistory=window._ovHistory||{labels:[],total:[],invites:[],r2xx:[],r4xx:[],r5xx:[]};
   window._ovCharts={};
@@ -199,23 +208,20 @@ pages['/']=function(){
       const fails=n(rt,'resp_4xx')+n(rt,'resp_5xx');
       const asr=n(rt,'asr');
       const cps=perSec(n(rt,'invites'),60);
-      const mps=perSec(n(rt,'total'),60);
 
-      // Hero row — the 3 numbers that matter most, bigger
+      // Hero — 3 primary metrics only, large
       $('ov-hero').innerHTML='<div class="grid grid-cols-3 gap-4">'+
-        '<div class="card p-5"><div class="text-[10px] font-medium tracking-wide" style="color:var(--z-dim)">Concurrent calls</div><div class="text-3xl font-bold mono mt-2 v-pink">'+n(rt,'active_calls').toLocaleString()+'</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">active dialogs</div></div>'+
-        '<div class="card p-5"><div class="text-[10px] font-medium tracking-wide" style="color:var(--z-dim)">CPS</div><div class="text-3xl font-bold mono mt-2 v-green">'+cps+'</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">calls per second</div></div>'+
-        '<div class="card p-5"><div class="text-[10px] font-medium tracking-wide" style="color:var(--z-dim)">ASR</div><div class="text-3xl font-bold mono mt-2 '+(asr>=70?'v-green':asr>=40?'v-yellow':'v-red')+'">'+asr+'%</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">answer seizure ratio</div></div>'+
+        '<div class="card p-4"><div class="t-xs" style="color:var(--z-dim)">Concurrent calls</div><div class="t-hero mono mt-2">'+fmt(n(rt,'active_calls'))+'</div></div>'+
+        '<div class="card p-4"><div class="t-xs" style="color:var(--z-dim)">Calls per second</div><div class="t-hero mono mt-2">'+cps+'</div></div>'+
+        '<div class="card p-4"><div class="t-xs" style="color:var(--z-dim)">Answer rate</div><div class="t-hero mono mt-2 '+asrColor(asr)+'">'+asr+'%</div></div>'+
         '</div>';
 
-      // Secondary metrics — compact row
-      $('ov-kpis').innerHTML='<div class="grid grid-cols-5 gap-3">'+
-        kpi('Msg rate',mps+'/s','captures/sec','v-blue')+
-        kpi('Attempts',n(rt,'invites'),'INVITEs 1m','v-yellow')+
-        kpi('Answered',n(rt,'answered_calls'),'completed','v-green')+
-        kpi('Failures',fails,'4xx/5xx',fails>0?'v-red':'v-green')+
-        kpi('ACD',n(rt,'acd_seconds')+'s','avg duration','v-purple')+
-        '</div>';
+      // Secondary — 4 compact, semantic colors only
+      $('ov-stats').innerHTML=
+        kpi('Attempts',fmt(n(rt,'invites')),'last 1 min','')+
+        kpi('Answered',fmt(n(rt,'answered_calls')),'completed','c-ok')+
+        kpi('Failed',fmt(fails),'4xx/5xx',errColor(fails))+
+        kpi('ACD',n(rt,'acd_seconds')+'s','avg call duration','');
 
       // Update charts
       const hist=window._ovHistory;
@@ -229,24 +235,29 @@ pages['/']=function(){
       // Keep last 60 points
       if(hist.labels.length>60){Object.keys(hist).forEach(k=>{hist[k]=hist[k].slice(-60);});}
 
-      // Show charts after 2+ data points
+      // Charts — appear after 2+ data points
       if(hist.labels.length>=2){
         const chartsEl=$('ov-charts');
         if(chartsEl) chartsEl.style.display='';
 
-        const chartOpts={responsive:true,maintainAspectRatio:false,animation:{duration:300},plugins:{legend:{display:true,position:'bottom',labels:{boxWidth:8,padding:12,font:{size:10,family:'Inter'},color:'#71717a'}}},scales:{x:{display:true,ticks:{maxTicksToLimit:8,font:{size:9,family:'JetBrains Mono'},color:'#52525b'},grid:{display:false}},y:{display:true,beginAtZero:true,ticks:{font:{size:9,family:'JetBrains Mono'},color:'#52525b'},grid:{color:'rgba(128,128,128,0.08)'}}}};
+        const cOpts={responsive:true,maintainAspectRatio:false,animation:{duration:200},plugins:{legend:{position:'top',align:'end',labels:{boxWidth:6,padding:10,font:{size:11,family:'Inter'},color:getComputedStyle(document.documentElement).getPropertyValue('--z-dim')}}},scales:{x:{ticks:{maxTicksToLimit:8,font:{size:10},color:getComputedStyle(document.documentElement).getPropertyValue('--z-dim')},grid:{display:false}},y:{beginAtZero:true,ticks:{font:{size:10},color:getComputedStyle(document.documentElement).getPropertyValue('--z-dim')},grid:{color:getComputedStyle(document.documentElement).getPropertyValue('--z-line')}}}};
 
         const tc=$('ov-chart-traffic');
         if(tc){
+          const okC=getComputedStyle(document.documentElement).getPropertyValue('--z-ok').trim();
+          const dimC=getComputedStyle(document.documentElement).getPropertyValue('--z-dim').trim();
           if(window._ovCharts.traffic){window._ovCharts.traffic.data.labels=hist.labels;window._ovCharts.traffic.data.datasets[0].data=hist.total;window._ovCharts.traffic.data.datasets[1].data=hist.invites;window._ovCharts.traffic.update();}
-          else{window._ovCharts.traffic=new Chart(tc,{type:'line',data:{labels:hist.labels,datasets:[{label:'Total',data:hist.total,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,0.05)',borderWidth:1.5,pointRadius:0,fill:true,tension:0.3},{label:'INVITEs',data:hist.invites,borderColor:'#e879f9',borderWidth:1.5,pointRadius:0,fill:false,tension:0.3}]},options:chartOpts});}
+          else{window._ovCharts.traffic=new Chart(tc,{type:'line',data:{labels:hist.labels,datasets:[{label:'Messages',data:hist.total,borderColor:dimC,backgroundColor:'transparent',borderWidth:1.5,pointRadius:0,fill:false,tension:0.3},{label:'Calls',data:hist.invites,borderColor:okC,backgroundColor:okC+'15',borderWidth:1.5,pointRadius:0,fill:true,tension:0.3}]},options:cOpts});}
         }
 
         const cc=$('ov-chart-codes');
         if(cc){
           const codeData=[n(rt,'resp_2xx'),n(rt,'resp_4xx'),n(rt,'resp_5xx')];
+          const okC=getComputedStyle(document.documentElement).getPropertyValue('--z-ok').trim();
+          const warnC=getComputedStyle(document.documentElement).getPropertyValue('--z-warn').trim();
+          const errC=getComputedStyle(document.documentElement).getPropertyValue('--z-err').trim();
           if(window._ovCharts.codes){window._ovCharts.codes.data.datasets[0].data=codeData;window._ovCharts.codes.update();}
-          else{window._ovCharts.codes=new Chart(cc,{type:'doughnut',data:{labels:['2xx','4xx','5xx'],datasets:[{data:codeData,backgroundColor:['#34d399','#fbbf24','#f87171'],borderWidth:0,hoverOffset:4}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:300},cutout:'65%',plugins:{legend:{position:'bottom',labels:{boxWidth:8,padding:12,font:{size:10,family:'Inter'},color:'#71717a'}}}}});}
+          else{window._ovCharts.codes=new Chart(cc,{type:'doughnut',data:{labels:['Success','Client err','Server err'],datasets:[{data:codeData,backgroundColor:[okC,warnC,errC],borderWidth:0,hoverOffset:4}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:200},cutout:'60%',plugins:{legend:{position:'bottom',labels:{boxWidth:6,padding:10,font:{size:11,family:'Inter'},color:getComputedStyle(document.documentElement).getPropertyValue('--z-dim')}}}}});}
         }
       }
     }
@@ -265,12 +276,12 @@ pages['/']=function(){
         rows+='<tr>'+
           '<td><span class="flex items-center gap-2"><span class="w-2 h-2 rounded-full '+dot+'"></span>'+agentHtml(nd.agent)+'</span></td>'+
           '<td class="mono">'+total.toLocaleString()+'</td>'+
-          '<td class="mono v-pink">'+n(nd,'active_calls').toLocaleString()+'</td>'+
+          '<td class="mono c-muted">'+n(nd,'active_calls').toLocaleString()+'</td>'+
           '<td class="mono">'+n(nd,'calls').toLocaleString()+'</td>'+
-          '<td class="mono'+(n(nd,'errors')>0?' v-red':'')+'">'+(n(nd,'errors')>0?n(nd,'errors'):'\u2014')+'</td>'+
+          '<td class="mono'+(n(nd,'errors')>0?' c-err':'')+'">'+(n(nd,'errors')>0?n(nd,'errors'):'\u2014')+'</td>'+
           '<td style="color:var(--z-muted)">'+n(nd,'age_sec')+'s</td></tr>';
       });
-      $('ov-nodes').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Servers</div></div><table><thead><tr><th>Node</th><th>Msgs 5m</th><th>Active</th><th>Call IDs</th><th>Errors</th><th>Seen</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('ov-nodes').innerHTML='<div class="card"><div class="p-3 px-4" style="border-bottom:1px solid var(--z-line)"><span class="sec-label" style="margin:0">Servers</span></div><table><thead><tr><th>Node</th><th>5 min</th><th>Active</th><th>Calls</th><th>Errors</th><th>Seen</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
 
     // Live feed
@@ -284,7 +295,7 @@ pages['/']=function(){
           '<td>'+agentHtml(m.agent)+'</td>'+
           '<td style="color:var(--z-muted)">'+(m.ts_ms?timeAgo(m.ts_ms):'')+'</td></tr>';
       });
-      $('ov-feed').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Recent INVITEs</div></div><table><thead><tr><th>Call-ID</th><th>Source</th><th>Destination</th><th>Server</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('ov-feed').innerHTML='<div class="card"><div class="p-3 px-4" style="border-bottom:1px solid var(--z-line)"><span class="sec-label" style="margin:0">Recent calls</span></div><table><thead><tr><th>Call-ID</th><th>Source</th><th>Destination</th><th>Server</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
   }
   poll(refreshOverview,5000);
@@ -292,7 +303,7 @@ pages['/']=function(){
 
 // ===== CALLS =====
 pages['/calls']=function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Calls</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Active call state tracking. Filter by IP, caller, or callee.</p>'+
+  $('main').innerHTML='<h1 class="t-lg">Calls</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Active call state tracking. Filter by IP, caller, or callee.</p>'+
     '<div class="flex gap-2 mb-4 flex-wrap">'+
     '<input id="cl-src" placeholder="Source IP" class="w-36">'+
     '<input id="cl-dst" placeholder="Dest IP" class="w-36">'+
@@ -300,16 +311,16 @@ pages['/calls']=function(){
     '<input id="cl-to" placeholder="To / Callee" class="w-36">'+
     '<input id="cl-code" placeholder="Status code" class="w-28">'+
     '<select id="cl-state" class="w-28"><option value="">All states</option><option value="open">Ringing</option><option value="answered">Answered</option><option value="ended">Ended</option></select>'+
-    '<button onclick="searchCalls()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button>'+
-    '<button onclick="document.querySelectorAll(\'#cl-src,#cl-dst,#cl-from,#cl-to,#cl-code\').forEach(e=>e.value=\'\');$(\'cl-state\').value=\'\';searchCalls()" class="rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer" style="border:1px solid var(--z-line);color:var(--z-muted)">Clear</button>'+
-    '<a href="/api/export/csv?limit=500" target="_blank" class="rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer" style="border:1px solid var(--z-line);color:var(--z-muted);text-decoration:none">CSV</a></div>'+
+    '<button onclick="searchCalls()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button>'+
+    '<button onclick="document.querySelectorAll(\'#cl-src,#cl-dst,#cl-from,#cl-to,#cl-code\').forEach(e=>e.value=\'\');$(\'cl-state\').value=\'\';searchCalls()" class="rounded-lg px-3 py-1.5 sec-label" style="margin:0 cursor-pointer" style="border:1px solid var(--z-line);color:var(--z-muted)">Clear</button>'+
+    '<a href="/api/export/csv?limit=500" target="_blank" class="rounded-lg px-3 py-1.5 sec-label" style="margin:0 cursor-pointer" style="border:1px solid var(--z-line);color:var(--z-muted);text-decoration:none">CSV</a></div>'+
     '<div class="flex gap-2 mb-5" style="border-bottom:1px solid var(--z-line);padding-bottom:1px">'+
-    '<button onclick="$(\'cl-view-calls\').style.display=\'\';$(\'cl-view-carrier\').style.display=\'none\';this.style.borderBottom=\'2px solid var(--z-ink)\';this.nextElementSibling.style.borderBottom=\'none\'" class="px-3 py-2 text-xs font-medium cursor-pointer" style="border-bottom:2px solid var(--z-ink)">Calls</button>'+
-    '<button onclick="$(\'cl-view-calls\').style.display=\'none\';$(\'cl-view-carrier\').style.display=\'\';this.style.borderBottom=\'2px solid var(--z-ink)\';this.previousElementSibling.style.borderBottom=\'none\';if(!window._carrierLoaded){window._carrierLoaded=true;loadCarriers();}" class="px-3 py-2 text-xs font-medium cursor-pointer" style="color:var(--z-muted)">Carrier Analysis</button></div>'+
+    '<button onclick="$(\'cl-view-calls\').style.display=\'\';$(\'cl-view-carrier\').style.display=\'none\';this.style.borderBottom=\'2px solid var(--z-ink)\';this.nextElementSibling.style.borderBottom=\'none\'" class="px-3 py-2 sec-label" style="margin:0 cursor-pointer" style="border-bottom:2px solid var(--z-ink)">Calls</button>'+
+    '<button onclick="$(\'cl-view-calls\').style.display=\'none\';$(\'cl-view-carrier\').style.display=\'\';this.style.borderBottom=\'2px solid var(--z-ink)\';this.previousElementSibling.style.borderBottom=\'none\';if(!window._carrierLoaded){window._carrierLoaded=true;loadCarriers();}" class="px-3 py-2 sec-label" style="margin:0 cursor-pointer" style="color:var(--z-muted)">Carrier Analysis</button></div>'+
     '<div id="cl-view-calls"><div id="cl-table"></div></div>'+
     '<div id="cl-view-carrier" style="display:none"><div class="flex items-center gap-3 mb-4">'+
     '<select id="ca-agent" class="text-xs"><option value="">All servers</option></select>'+
-    '<button onclick="loadCarriers()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Analyze</button></div>'+
+    '<button onclick="loadCarriers()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Analyze</button></div>'+
     '<div id="ca-results"></div></div>';
   window.searchCalls=async function(){
     let q='?limit=50';
@@ -326,10 +337,10 @@ pages['/calls']=function(){
     if(!calls||!calls.length){$('cl-table').innerHTML='<div class="card p-4 text-sm text-[var(--z-muted)]">No calls found.</div>';return;}
     let rows='';
     calls.forEach(c=>{
-      const st=n(c,'answered')?'<span class="text-[#34d399]">answered</span>':n(c,'open')?'<span class="text-[#fbbf24]">ringing</span>':'<span class="text-[#ef4444]">ended</span>';
+      const st=n(c,'answered')?'<span class="c-ok">answered</span>':n(c,'open')?'<span class="c-warn">ringing</span>':'<span class="c-err">ended</span>';
       const sc=c.status||c.last_status||0;
-      const scc=sc>=500?'text-[#ef4444]':sc>=400?'text-[#fbbf24]':sc>=200?'text-[#34d399]':'';
-      rows+='<tr class="cursor-pointer hover:bg-[#131316]" onclick="location.hash=\'#/ladder?call_id='+encodeURIComponent(c.call_id||'')+'\'"><td class="mono text-[#a78bfa] truncate max-w-[180px]">'+h(c.call_id||'')+'</td><td>'+agentHtml(c.agent)+'</td><td class="mono">'+h(c.src||'')+'</td><td class="mono">'+h(c.dst||'')+'</td><td>'+h(c.from_h||'')+'</td><td>'+h(c.to_h||'')+'</td><td class="mono '+scc+'">'+(sc||'')+'</td><td>'+st+'</td><td class="text-[var(--z-muted)]">'+(c.first_ts_ms?timeAgo(c.first_ts_ms):'')+'</td></tr>';
+      const scc=sc>=500?'c-err':sc>=400?'c-warn':sc>=200?'c-ok':'';
+      rows+='<tr class="cursor-pointer hover:opacity-80" onclick="location.hash=\'#/ladder?call_id='+encodeURIComponent(c.call_id||'')+'\'"><td class="mono c-id truncate max-w-[180px]">'+h(c.call_id||'')+'</td><td>'+agentHtml(c.agent)+'</td><td class="mono">'+h(c.src||'')+'</td><td class="mono">'+h(c.dst||'')+'</td><td>'+h(c.from_h||'')+'</td><td>'+h(c.to_h||'')+'</td><td class="mono '+scc+'">'+(sc||'')+'</td><td>'+st+'</td><td class="text-[var(--z-muted)]">'+(c.first_ts_ms?timeAgo(c.first_ts_ms):'')+'</td></tr>';
     });
     $('cl-table').innerHTML='<div class="card"><table><thead><tr><th>Call-ID</th><th>Agent</th><th>Source</th><th>Destination</th><th>From</th><th>To</th><th>Code</th><th>State</th><th>Started</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   };
@@ -398,33 +409,33 @@ pages['/calls']=function(){
     Object.entries(dsts).sort((a,b)=>b[1].attempts-a[1].attempts).forEach(([dst,d])=>{
       const asr=d.attempts>0?Math.round(d.answered*100/d.attempts):0;
       const acd=d.durations.length>0?Math.round(d.durations.reduce((a,b)=>a+b,0)/d.durations.length):0;
-      const asrColor=asr>=70?'v-green':asr>=40?'v-yellow':'v-red';
+      const asrColor=asr>=70?'c-ok':asr>=40?'c-warn':'c-err';
       const codes=Object.entries(d.codes).sort((a,b)=>b[1]-a[1]).map(([c,n])=>c+':'+n).join(' ');
       rows+='<tr class="cursor-pointer" onclick="location.hash=\'#/ip?addr='+encodeURIComponent(dst)+'\'">'+
         '<td class="mono c-accent">'+h(dst)+'</td>'+
         '<td class="mono">'+d.attempts+'</td>'+
-        '<td class="mono v-green">'+d.answered+'</td>'+
-        '<td class="mono '+(d.failed>0?'v-red':'')+'">'+d.failed+'</td>'+
+        '<td class="mono c-ok">'+d.answered+'</td>'+
+        '<td class="mono '+(d.failed>0?'c-err':'')+'">'+d.failed+'</td>'+
         '<td class="mono '+asrColor+'">'+asr+'%</td>'+
         '<td class="mono">'+acd+'s</td>'+
-        '<td class="mono text-[10px]" style="color:var(--z-muted)">'+codes+'</td></tr>';
+        '<td class="mono t-xs" style="color:var(--z-muted)">'+codes+'</td></tr>';
     });
 
     $('ca-results').innerHTML=
       '<div class="grid grid-cols-4 gap-3 mb-4">'+
-      kpi('Overall ASR',overallAsr+'%',totalAnswered+' / '+totalAttempts+' via '+serverLabel,overallAsr>=70?'v-green':overallAsr>=40?'v-yellow':'v-red')+
-      kpi('Overall ACD',overallAcd+'s',allDurations.length+' completed calls','v-purple')+
-      kpi('Attempts',totalAttempts,'INVITEs sampled','v-blue')+
-      kpi('Destinations',Object.keys(dsts).length,'unique carrier IPs','v-pink')+
+      kpi('Overall ASR',overallAsr+'%',totalAnswered+' / '+totalAttempts+' via '+serverLabel,overallAsr>=70?'c-ok':overallAsr>=40?'c-warn':'c-err')+
+      kpi('Overall ACD',overallAcd+'s',allDurations.length+' completed calls','c-muted')+
+      kpi('Attempts',totalAttempts,'INVITEs sampled','c-muted')+
+      kpi('Destinations',Object.keys(dsts).length,'unique carrier IPs','c-muted')+
       '</div>'+
-      '<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Per-Destination Breakdown</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">ASR and ACD per carrier/destination IP. Click a row for full IP history.</div></div>'+
+      '<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Per-Destination Breakdown</div><div class="t-xs mt-1" style="color:var(--z-muted)">ASR and ACD per carrier/destination IP. Click a row for full IP history.</div></div>'+
       '<table><thead><tr><th>Destination</th><th>Attempts</th><th>Answered</th><th>Failed</th><th>ASR</th><th>ACD</th><th>Fail codes</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   };
 };
 
 // ===== MESSAGES =====
 pages['/messages']=function(params){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Messages</h1><p class="text-xs mt-0.5 mb-4" style="color:var(--z-muted)">SIP message search with filters and time ranges</p>'+
+  $('main').innerHTML='<h1 class="t-lg">Messages</h1><p class="text-xs mt-0.5 mb-4" style="color:var(--z-muted)">SIP message search with filters and time ranges</p>'+
     '<div class="flex gap-2 mb-2 flex-wrap">'+
     '<input id="m-cid" placeholder="Call-ID (prefix with / for regex)" class="flex-1 min-w-[160px]">'+
     '<input id="m-method" placeholder="Method" class="w-24">'+
@@ -432,11 +443,11 @@ pages['/messages']=function(params){
     '<input id="m-ip" placeholder="IP address" class="w-32">'+
     '<select id="m-preset" onchange="applyPreset()" class="w-32"><option value="">Quick filters...</option><option value="errors">All Errors</option><option value="403">403 Forbidden</option><option value="404">404 Not Found</option><option value="486">486 Busy</option><option value="487">487 Cancelled</option><option value="500">500 Server Error</option><option value="503">503 Unavailable</option><option value="invite">INVITEs only</option><option value="register">REGISTERs only</option></select></div>'+
     '<div class="flex gap-2 mb-4 flex-wrap items-center">'+
-    '<span class="text-[10px]" style="color:var(--z-dim)">Range:</span>'+
+    '<span class="t-xs" style="color:var(--z-dim)">Range:</span>'+
     '<select id="m-range" onchange="doSearch()" class="text-xs w-28"><option value="600000">Last 10 min</option><option value="1800000">Last 30 min</option><option value="3600000">Last 1 hour</option><option value="14400000">Last 4 hours</option><option value="86400000">Last 24 hours</option><option value="0">All time</option></select>'+
-    '<button onclick="doSearch()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button>'+
-    '<button onclick="saveCurrentSearch()" class="rounded-md px-3 py-1.5 text-[10px] font-medium cursor-pointer" style="border:1px solid var(--z-line);color:var(--z-muted)">Save</button>'+
-    '<span id="m-count" class="text-[10px] mono" style="color:var(--z-dim)"></span></div>'+
+    '<button onclick="doSearch()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button>'+
+    '<button onclick="saveCurrentSearch()" class="rounded-md px-3 py-1.5 t-xs font-medium cursor-pointer" style="border:1px solid var(--z-line);color:var(--z-muted)">Save</button>'+
+    '<span id="m-count" class="t-xs mono" style="color:var(--z-dim)"></span></div>'+
     '<div id="m-saved"></div>'+
     '<div id="m-table"><div class="card p-4 text-xs" style="color:var(--z-muted)">Loading recent messages...</div></div>';
   window.applyPreset=function(){
@@ -467,9 +478,9 @@ pages['/messages']=function(params){
     let rows='';
     msgs.forEach(m=>{
       const st=m.status||0;
-      const sc=st>=500?'text-[#ef4444]':st>=400?'text-[#fbbf24]':st>=300?'text-[#38bdf8]':st>=200?'text-[#34d399]':'';
-      const mc=m.method&&m.method.includes('INVITE')?'text-[#f472b6]':'';
-      rows+='<tr class="cursor-pointer hover:bg-[#131316]" onclick="location.hash=\'#/ladder?call_id='+encodeURIComponent(m.call_id||'')+'\'"><td class="mono '+mc+'">'+h(m.method||'')+'</td><td class="mono '+sc+'">'+(st||'')+'</td><td class="mono text-[#a78bfa] truncate max-w-[180px]">'+h(m.call_id||'')+'</td><td class="mono">'+h(m.src||'')+'</td><td class="mono">'+h(m.dst||'')+'</td><td class="text-[var(--z-muted)]">'+agentHtml(m.agent)+'</td><td class="text-[var(--z-muted)]">'+(m.ts_ms?timeAgo(m.ts_ms):'')+'</td></tr>';
+      const sc=st>=500?'c-err':st>=400?'c-warn':st>=300?'c-muted':st>=200?'c-ok':'';
+      const mc=m.method&&m.method.includes('INVITE')?'c-err':'';
+      rows+='<tr class="cursor-pointer hover:opacity-80" onclick="location.hash=\'#/ladder?call_id='+encodeURIComponent(m.call_id||'')+'\'"><td class="mono '+mc+'">'+h(m.method||'')+'</td><td class="mono '+sc+'">'+(st||'')+'</td><td class="mono c-id truncate max-w-[180px]">'+h(m.call_id||'')+'</td><td class="mono">'+h(m.src||'')+'</td><td class="mono">'+h(m.dst||'')+'</td><td class="text-[var(--z-muted)]">'+agentHtml(m.agent)+'</td><td class="text-[var(--z-muted)]">'+(m.ts_ms?timeAgo(m.ts_ms):'')+'</td></tr>';
     });
     $('m-table').innerHTML='<div class="card"><table><thead><tr><th>Method</th><th>Status</th><th>Call-ID</th><th>Source</th><th>Destination</th><th>Agent</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   };
@@ -482,9 +493,9 @@ pages['/messages']=function(params){
     searches.forEach(s=>{
       const p=s.params||{};
       links+='<div class="flex items-center gap-1"><button onclick="applySaved('+JSON.stringify(JSON.stringify(p)).replace(/"/g,'&quot;')+')" class="text-xs c-accent hover:underline cursor-pointer">'+h(s.name)+'</button>'+
-        '<button onclick="deleteSaved('+s.id+')" class="text-[10px] cursor-pointer" style="color:var(--z-dim)">&times;</button></div>';
+        '<button onclick="deleteSaved('+s.id+')" class="t-xs cursor-pointer" style="color:var(--z-dim)">&times;</button></div>';
     });
-    $('m-saved').innerHTML='<div class="flex flex-wrap gap-2 items-center mb-3"><span class="text-[10px]" style="color:var(--z-dim)">Saved:</span>'+links+'</div>';
+    $('m-saved').innerHTML='<div class="flex flex-wrap gap-2 items-center mb-3"><span class="t-xs" style="color:var(--z-dim)">Saved:</span>'+links+'</div>';
   }
   window.applySaved=function(paramsJSON){
     const p=JSON.parse(paramsJSON);
@@ -510,7 +521,7 @@ pages['/messages']=function(params){
 pages['/ladder']=async function(params){
   const cid=decodeURIComponent(params.get('call_id')||'');
   const m=$('main');
-  m.innerHTML='<div class="flex items-center gap-3 mb-5"><a href="#/calls" style="color:var(--z-muted)" class="text-sm hover:underline">&larr; Back</a><div><h1 class="text-lg font-semibold tracking-tight">Call Detail</h1><p class="text-xs mono mt-0.5 break-all" style="color:var(--z-muted)">'+h(cid)+'</p></div></div><div id="ld-content"><div class="card p-4 text-xs" style="color:var(--z-muted)">Loading call data...</div></div>';
+  m.innerHTML='<div class="flex items-center gap-3 mb-5"><a href="#/calls" style="color:var(--z-muted)" class="text-sm hover:underline">&larr; Back</a><div><h1 class="t-lg">Call Detail</h1><p class="text-xs mono mt-0.5 break-all" style="color:var(--z-muted)">'+h(cid)+'</p></div></div><div id="ld-content"><div class="card p-4 text-xs" style="color:var(--z-muted)">Loading call data...</div></div>';
 
   const msgs=await api('/api/messages?limit=500&call_id='+encodeURIComponent(cid));
   if(!msgs||!msgs.length){$('ld-content').innerHTML='<div class="card p-4 text-xs" style="color:var(--z-muted)">No messages found for this call.</div>';return;}
@@ -529,7 +540,7 @@ pages['/ladder']=async function(params){
   const hasBye=msgs.some(m=>m.method&&(m.method.includes('BYE')));
   const has4xx=msgs.find(m=>m.status>=400);
   const finalStatus=hasAnswer?(hasBye?'Completed':'In Progress'):(has4xx?'Failed ('+has4xx.status+')':'Ringing');
-  const statusColor=finalStatus.startsWith('Completed')?'v-green':finalStatus.startsWith('Failed')?'v-red':'v-yellow';
+  const statusColor=finalStatus.startsWith('Completed')?'c-ok':finalStatus.startsWith('Failed')?'c-err':'c-warn';
   const startTime=firstMsg.ts_ms?new Date(firstMsg.ts_ms):'';
   const startStr=startTime?startTime.toLocaleString():'';
 
@@ -537,15 +548,15 @@ pages['/ladder']=async function(params){
   const reqCount=msgs.filter(m=>m.kind==='request').length;
   const respCount=msgs.filter(m=>m.kind==='response').length;
 
-  let infoHtml='<div class="card p-5 mb-5"><div class="flex items-center justify-between mb-4"><div class="text-xs font-medium">Call Summary</div><div class="flex gap-2">'+
-    '<button onclick="downloadBlob(buildPcap(window._ladderMsgs),\''+h(cid).substring(0,20)+'.pcap\')" class="rounded-md px-3 py-1.5 text-[10px] font-medium cursor-pointer flex items-center gap-1.5" style="border:1px solid var(--z-line);color:var(--z-muted)"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>PCAP</button>'+
-    '<button onclick="exportJSON()" class="rounded-md px-3 py-1.5 text-[10px] font-medium cursor-pointer flex items-center gap-1.5" style="border:1px solid var(--z-line);color:var(--z-muted)"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>JSON</button>'+
-    '<button onclick="navigator.clipboard.writeText(window.location.href)" class="rounded-md px-3 py-1.5 text-[10px] font-medium cursor-pointer flex items-center gap-1.5" style="border:1px solid var(--z-line);color:var(--z-muted)"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>Copy link</button></div></div>'+
+  let infoHtml='<div class="card p-4 mb-5"><div class="flex items-center justify-between mb-4"><div class="sec-label" style="margin:0">Call Summary</div><div class="flex gap-2">'+
+    '<button onclick="downloadBlob(buildPcap(window._ladderMsgs),\''+h(cid).substring(0,20)+'.pcap\')" class="rounded-md px-3 py-1.5 t-xs font-medium cursor-pointer flex items-center gap-1.5" style="border:1px solid var(--z-line);color:var(--z-muted)"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>PCAP</button>'+
+    '<button onclick="exportJSON()" class="rounded-md px-3 py-1.5 t-xs font-medium cursor-pointer flex items-center gap-1.5" style="border:1px solid var(--z-line);color:var(--z-muted)"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>JSON</button>'+
+    '<button onclick="navigator.clipboard.writeText(window.location.href)" class="rounded-md px-3 py-1.5 t-xs font-medium cursor-pointer flex items-center gap-1.5" style="border:1px solid var(--z-line);color:var(--z-muted)"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>Copy link</button></div></div>'+
     '<div class="grid grid-cols-2 xl:grid-cols-4 gap-4 text-xs mb-3">'+
-    '<div><div class="text-[10px]" style="color:var(--z-dim)">Status</div><div class="font-semibold mt-0.5 '+statusColor+'">'+finalStatus+'</div></div>'+
-    '<div><div class="text-[10px]" style="color:var(--z-dim)">Duration</div><div class="mono font-semibold mt-0.5">'+durationSec+'s</div></div>'+
-    '<div><div class="text-[10px]" style="color:var(--z-dim)">Messages</div><div class="mono mt-0.5">'+msgs.length+' <span style="color:var(--z-dim)">('+reqCount+' req, '+respCount+' resp)</span></div></div>'+
-    '<div><div class="text-[10px]" style="color:var(--z-dim)">Server</div><div class="mt-0.5">'+agentHtml(firstMsg.agent)+'</div></div>'+
+    '<div><div class="t-xs" style="color:var(--z-dim)">Status</div><div class="font-semibold mt-0.5 '+statusColor+'">'+finalStatus+'</div></div>'+
+    '<div><div class="t-xs" style="color:var(--z-dim)">Duration</div><div class="mono font-semibold mt-0.5">'+durationSec+'s</div></div>'+
+    '<div><div class="t-xs" style="color:var(--z-dim)">Messages</div><div class="mono mt-0.5">'+msgs.length+' <span style="color:var(--z-dim)">('+reqCount+' req, '+respCount+' resp)</span></div></div>'+
+    '<div><div class="t-xs" style="color:var(--z-dim)">Server</div><div class="mt-0.5">'+agentHtml(firstMsg.agent)+'</div></div>'+
     '</div>'+
     '<div class="grid grid-cols-1 xl:grid-cols-2 gap-3 text-xs pt-3" style="border-top:1px solid var(--z-line)">'+
     '<div class="grid grid-cols-[60px_1fr] gap-1">'+
@@ -635,12 +646,12 @@ pages['/ladder']=async function(params){
   // CSS for hover interaction
   const ladderCSS='<style>.ladder-row:hover .ladder-hit{fill:var(--z-hover)}.ladder-row:hover line{stroke-width:2.5!important}.ladder-row:hover text{font-weight:600!important}</style>';
 
-  let ladderHtml='<div class="card mb-5"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="flex items-center justify-between"><div><div class="text-xs font-medium">SIP Ladder</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">'+msgs.length+' messages between '+epCount+' endpoints</div></div>'+
-    '<div class="flex gap-3 text-[10px]" style="color:var(--z-dim)"><span><span style="color:#e879f9">━</span> INVITE</span><span><span style="color:#34d399">━</span> 2xx</span><span><span style="color:#facc15">━</span> BYE</span><span><span style="color:#f87171">━</span> Error</span><span><span style="color:var(--z-dim)">╌</span> 1xx</span></div></div></div>'+
+  let ladderHtml='<div class="card mb-5"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="flex items-center justify-between"><div><div class="sec-label" style="margin:0">SIP Ladder</div><div class="t-xs mt-1" style="color:var(--z-muted)">'+msgs.length+' messages between '+epCount+' endpoints</div></div>'+
+    '<div class="flex gap-3 t-xs" style="color:var(--z-dim)"><span><span style="color:#e879f9">━</span> INVITE</span><span><span style="color:#34d399">━</span> 2xx</span><span><span style="color:#facc15">━</span> BYE</span><span><span style="color:#f87171">━</span> Error</span><span><span style="color:var(--z-dim)">╌</span> 1xx</span></div></div></div>'+
     ladderCSS+'<div class="overflow-x-auto" style="background:var(--z-bg)">'+svg+'</div></div>';
 
   // ---- Message detail panel (shown on click) ----
-  let detailHtml='<div id="msg-detail" class="card mb-5" style="display:none"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="flex items-center justify-between"><div class="text-xs font-medium">Message Detail</div><button onclick="$(\'msg-detail\').style.display=\'none\'" class="text-[10px] cursor-pointer" style="color:var(--z-dim)">&times; close</button></div></div><div id="msg-detail-content" class="p-4"></div></div>';
+  let detailHtml='<div id="msg-detail" class="card mb-5" style="display:none"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="flex items-center justify-between"><div class="sec-label" style="margin:0">Message Detail</div><button onclick="$(\'msg-detail\').style.display=\'none\'" class="t-xs cursor-pointer" style="color:var(--z-dim)">&times; close</button></div></div><div id="msg-detail-content" class="p-4"></div></div>';
 
   // ---- Message list ----
   let msgRows='';
@@ -649,10 +660,10 @@ pages['/ladder']=async function(params){
     const status=msg.status||0;
     const label=status>0?status+' '+method.replace(/^\d+ /,''):method;
     const isInv=method==='INVITE';
-    const mc=isInv?'c-invite':status>=400?'v-red':status>=200&&status<300?'v-green':'';
+    const mc=isInv?'c-invite':status>=400?'c-err':status>=200&&status<300?'c-ok':'';
     const delta=msg.ts_ms-t0;
     const ts=delta<1000?'+'+delta+'ms':'+'+(delta/1000).toFixed(1)+'s';
-    msgRows+='<tr class="cursor-pointer" onclick="showMsgDetail('+i+')"><td class="text-[10px]" style="color:var(--z-dim)">'+(i+1)+'</td><td class="mono '+mc+'">'+h(label)+'</td><td class="mono text-[10px]">'+h(msg.src||'')+'</td><td style="color:var(--z-dim)">→</td><td class="mono text-[10px]">'+h(msg.dst||'')+'</td><td class="mono text-[10px]" style="color:var(--z-dim)">'+ts+'</td><td style="color:var(--z-muted)">'+(msg.ts_ms?new Date(msg.ts_ms).toLocaleTimeString():'')+'</td></tr>';
+    msgRows+='<tr class="cursor-pointer" onclick="showMsgDetail('+i+')"><td class="t-xs" style="color:var(--z-dim)">'+(i+1)+'</td><td class="mono '+mc+'">'+h(label)+'</td><td class="mono t-xs">'+h(msg.src||'')+'</td><td style="color:var(--z-dim)">→</td><td class="mono t-xs">'+h(msg.dst||'')+'</td><td class="mono t-xs" style="color:var(--z-dim)">'+ts+'</td><td style="color:var(--z-muted)">'+(msg.ts_ms?new Date(msg.ts_ms).toLocaleTimeString():'')+'</td></tr>';
   });
 
   window.showMsgDetail=function(i){
@@ -672,11 +683,11 @@ pages['/ladder']=async function(params){
       detail+='<div style="color:var(--z-dim)">'+k+'</div><div class="mono break-all">'+h(v||'')+'</div>';
     });
     detail+='</div>';
-    if(body){detail+='<div class="mt-3"><div class="text-[10px] font-medium mb-1" style="color:var(--z-dim)">Body</div><pre class="mono text-[10px] p-2 rounded whitespace-pre-wrap" style="background:var(--z-bg);color:var(--z-muted)">'+h(body)+'</pre></div>';}
+    if(body){detail+='<div class="mt-3"><div class="t-xs font-medium mb-1" style="color:var(--z-dim)">Body</div><pre class="mono t-xs p-2 rounded whitespace-pre-wrap" style="background:var(--z-bg);color:var(--z-muted)">'+h(body)+'</pre></div>';}
     detail+='</div>';
     // Right: raw SIP
-    detail+='<div><div class="text-[10px] font-medium mb-1" style="color:var(--z-dim)">Raw SIP</div>'+
-      '<pre class="mono text-[10px] p-3 rounded whitespace-pre-wrap break-all" style="background:var(--z-bg);color:var(--z-muted);max-height:400px;overflow-y:auto;line-height:1.5">'+h(raw)+'</pre></div>';
+    detail+='<div><div class="t-xs font-medium mb-1" style="color:var(--z-dim)">Raw SIP</div>'+
+      '<pre class="mono t-xs p-3 rounded whitespace-pre-wrap break-all" style="background:var(--z-bg);color:var(--z-muted);max-height:400px;overflow-y:auto;line-height:1.5">'+h(raw)+'</pre></div>';
     detail+='</div>';
 
     $('msg-detail-content').innerHTML=detail;
@@ -686,7 +697,7 @@ pages['/ladder']=async function(params){
 
   window.toggleRaw=window.showMsgDetail;
 
-  let msgsHtml='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Messages</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">Click any row to view full SIP headers and payload</div></div><table><thead><tr><th>#</th><th>Message</th><th>From</th><th></th><th>To</th><th>Delta</th><th>Time</th></tr></thead><tbody>'+msgRows+'</tbody></table></div>';
+  let msgsHtml='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Messages</div><div class="t-xs mt-1" style="color:var(--z-muted)">Click any row to view full SIP headers and payload</div></div><table><thead><tr><th>#</th><th>Message</th><th>From</th><th></th><th>To</th><th>Delta</th><th>Time</th></tr></thead><tbody>'+msgRows+'</tbody></table></div>';
 
   // ---- QoS / Media panel ----
   const qos=await api('/api/qos?call_id='+encodeURIComponent(cid));
@@ -694,14 +705,14 @@ pages['/ladder']=async function(params){
   if(qos&&qos.length>0){
     const q=qos[0];
     const mos=(n(q,'mos_x10')/10).toFixed(1);
-    const mosColor=n(q,'mos_x10')>=40?'v-green':n(q,'mos_x10')>=30?'v-yellow':'v-red';
-    qosHtml='<div class="card p-5 mb-5"><div class="text-xs font-medium mb-3">Call Quality (RTCP)</div>'+
+    const mosColor=n(q,'mos_x10')>=40?'c-ok':n(q,'mos_x10')>=30?'c-warn':'c-err';
+    qosHtml='<div class="card p-4 mb-5"><div class="sec-label" style="margin:0 mb-3">Call Quality (RTCP)</div>'+
       '<div class="grid grid-cols-2 xl:grid-cols-5 gap-3">'+
       kpi('MOS',mos,'voice quality',mosColor)+
-      kpi('Jitter',n(q,'jitter_ms')+'ms','max jitter','v-blue')+
-      kpi('Loss',n(q,'loss_pct')+'%','max packet loss',n(q,'loss_pct')>2?'v-red':'v-green')+
-      kpi('R-Factor',n(q,'r_factor'),'ITU-T G.107','v-purple')+
-      kpi('Codec',q.codec||'—','media codec','v-blue')+
+      kpi('Jitter',n(q,'jitter_ms')+'ms','max jitter','c-muted')+
+      kpi('Loss',n(q,'loss_pct')+'%','max packet loss',n(q,'loss_pct')>2?'c-err':'c-ok')+
+      kpi('R-Factor',n(q,'r_factor'),'ITU-T G.107','c-muted')+
+      kpi('Codec',q.codec||'—','media codec','c-muted')+
       '</div></div>';
   }
 
@@ -722,11 +733,11 @@ pages['/ladder']=async function(params){
         if(line.startsWith('a=crypto:'))srtp=true;
       });
       if(codecs.length||mediaPort){
-        mediaHtml='<div class="card p-5 mb-5"><div class="text-xs font-medium mb-3">Media</div>'+
+        mediaHtml='<div class="card p-4 mb-5"><div class="sec-label" style="margin:0 mb-3">Media</div>'+
           '<div class="grid grid-cols-3 gap-4 text-xs">'+
           '<div><span style="color:var(--z-dim)">Codecs:</span> <span class="mono">'+h(codecs.join(', ')||'—')+'</span></div>'+
           '<div><span style="color:var(--z-dim)">Media port:</span> <span class="mono">'+(mediaPort||'—')+'</span></div>'+
-          '<div><span style="color:var(--z-dim)">Security:</span> '+(srtp?'<span class="v-green font-medium">SRTP (encrypted)</span>':'<span style="color:var(--z-muted)">RTP (unencrypted)</span>')+'</div>'+
+          '<div><span style="color:var(--z-dim)">Security:</span> '+(srtp?'<span class="c-ok font-medium">SRTP (encrypted)</span>':'<span style="color:var(--z-muted)">RTP (unencrypted)</span>')+'</div>'+
           '</div></div>';
       }
     }catch(e){}
@@ -738,9 +749,9 @@ pages['/ladder']=async function(params){
   if(related&&related.length){
     let rRows='';
     related.forEach(r=>{
-      rRows+='<a href="#/ladder?call_id='+encodeURIComponent(r.call_id||'')+'" class="flex items-center gap-2 px-4 py-2 text-xs hover:underline c-accent mono" style="border-bottom:1px solid var(--z-line)">'+h(r.call_id)+' <span class="text-[10px]" style="color:var(--z-dim)">('+h(r.reason||'correlated')+')</span></a>';
+      rRows+='<a href="#/ladder?call_id='+encodeURIComponent(r.call_id||'')+'" class="flex items-center gap-2 px-4 py-2 text-xs hover:underline c-accent mono" style="border-bottom:1px solid var(--z-line)">'+h(r.call_id)+' <span class="t-xs" style="color:var(--z-dim)">('+h(r.reason||'correlated')+')</span></a>';
     });
-    relatedHtml='<div class="card mb-5"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Related Call Legs</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">B2BUA correlated calls — click to view</div></div>'+rRows+'</div>';
+    relatedHtml='<div class="card mb-5"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Related Call Legs</div><div class="t-xs mt-1" style="color:var(--z-muted)">B2BUA correlated calls — click to view</div></div>'+rRows+'</div>';
   }
 
   $('ld-content').innerHTML=infoHtml+qosHtml+mediaHtml+ladderHtml+relatedHtml+detailHtml+msgsHtml;
@@ -755,12 +766,12 @@ pages['/ladder']=async function(params){
       const newCount=fresh.length-window._ladderKnown;
       window._ladderKnown=fresh.length;
       const badge=$('ld-live-badge');
-      if(badge) badge.innerHTML='<span class="text-[10px] v-green mono">● live · '+fresh.length+' messages</span>';
+      if(badge) badge.innerHTML='<span class="t-xs c-ok mono">● live · '+fresh.length+' messages</span>';
     };
     // Add live badge to the ladder header
     const ladderHeader=document.querySelector('#ld-content .card .text-xs.font-medium');
     if(ladderHeader){
-      ladderHeader.insertAdjacentHTML('afterend',' <span id="ld-live-badge" class="ml-2"><span class="text-[10px] v-green mono">● live</span></span>');
+      ladderHeader.insertAdjacentHTML('afterend',' <span id="ld-live-badge" class="ml-2"><span class="t-xs c-ok mono">● live</span></span>');
     }
     intervals.push(setInterval(refreshLadder,5000));
   }
@@ -768,7 +779,7 @@ pages['/ladder']=async function(params){
 
 // ===== NOC =====
 pages['/noc']=function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">NOC</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Node health and server status. Click a name to rename.</p><div id="noc-t"></div>';
+  $('main').innerHTML='<h1 class="t-lg">NOC</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Node health and server status. Click a name to rename.</p><div id="noc-t"></div>';
   window.renameNode=async function(agent){
     const cur=window._nodeNames[agent]||'';
     const name=prompt('Display name for '+agent+':',cur);
@@ -798,12 +809,12 @@ pages['/noc']=function(){
       const sc=s==='green'?'#34d399':s==='yellow'?'#fbbf24':'#ef4444';
       const displayName=window._nodeNames[agent]||'';
       const nameHtml=displayName
-        ?'<span class="font-medium">'+h(displayName)+'</span> <span class="text-[10px]" style="color:var(--z-muted)">('+h(agent)+')</span>'
+        ?'<span class="font-medium">'+h(displayName)+'</span> <span class="t-xs" style="color:var(--z-muted)">('+h(agent)+')</span>'
         :'<span class="font-medium">'+h(agent)+'</span>';
       const ips=ipMap[agent]?Array.from(ipMap[agent]).sort().join(', '):'';
       rows+='<tr>'+
         '<td><div class="flex items-center gap-2 cursor-pointer" onclick="renameNode(\''+agent+'\')"><span class="w-2 h-2 rounded-full '+dot+' shrink-0"></span><div>'+nameHtml+'</div></div></td>'+
-        '<td class="mono text-[11px]" style="color:var(--z-muted)">'+h(ips)+'</td>'+
+        '<td class="mono t-xs" style="color:var(--z-muted)">'+h(ips)+'</td>'+
         '<td style="color:'+sc+'">'+sl+'</td>'+
         '<td class="mono">'+n(nd,'total')+'</td>'+
         '<td class="mono">'+n(nd,'active_calls')+'</td>'+
@@ -817,68 +828,69 @@ pages['/noc']=function(){
 
 // ===== METRICS =====
 pages['/metrics']=function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Metrics</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Protocol counters, ingest health, and traffic trends</p>'+
-    '<div id="met-kpi"></div>'+
-    '<div class="grid xl:grid-cols-2 gap-5 mt-5"><div class="card p-4"><div class="text-xs font-medium mb-3">CPS Over Time</div><div style="height:200px"><canvas id="met-cps-chart"></canvas></div></div>'+
-    '<div id="met-codes"></div></div>'+
-    '<div class="mt-5" id="met-hep"></div>';
+  $('main').innerHTML='<h1 class="t-lg">Metrics</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">System health and ingest performance</p>'+
+    '<div class="grid lg:grid-cols-[2fr_1fr] gap-4">'+
+    '<div><div id="met-health"></div><div class="card p-4 mt-4"><div class="sec-label">Calls per minute</div><div style="aspect-ratio:3/1;min-height:140px"><canvas id="met-cps-chart"></canvas></div></div></div>'+
+    '<div><div id="met-codes"></div><div id="met-hep" class="mt-4"></div></div></div>';
 
   Promise.all([api('/api/metrics'),api('/api/report/cps?minutes=60'),api('/api/report/response-codes')]).then(([s,cps,codes])=>{
     if(s){
-      let html='<div class="grid grid-cols-2 xl:grid-cols-4 gap-3">';
-      [['Messages',s.msgs_total||0,'total captured','v-blue'],
-       ['Requests',s.requests||0,'SIP requests','v-green'],
-       ['Responses',s.responses||0,'SIP responses','v-purple'],
-       ['DB Writes',s.db_ok||0,'successful','v-green'],
-       ['DB Errors',s.db_err||0,'failed',s.db_err>0?'v-red':'v-green'],
-       ['DB Drops',s.db_drop||0,'channel full',s.db_drop>0?'v-red':'v-green'],
-       ['Echoes',s.echoes||0,'SIP replies sent','v-blue'],
-       ['Uptime',(Math.floor((s.uptime_ms||0)/3600000))+'h','service uptime','v-purple']
-      ].forEach(([l,v,sub,c])=>{html+=kpi(l,typeof v==='number'?v.toLocaleString():v,sub,c);});
-      html+='</div>';
-      $('met-kpi').innerHTML=html;
+      const upH=Math.floor((s.uptime_ms||0)/3600000);
+      const upM=Math.floor(((s.uptime_ms||0)%3600000)/60000);
+      $('met-health').innerHTML='<div class="card p-4"><div class="sec-label">Ingest health</div>'+
+        '<div class="grid grid-cols-2 lg:grid-cols-4 gap-3">'+
+        kpi('Messages',fmt(s.msgs_total||0),'total captured','')+
+        kpi('DB writes',fmt(s.db_ok||0),'successful','c-ok')+
+        kpi('DB errors',fmt(s.db_err||0),'failed',errColor(s.db_err))+
+        kpi('Uptime',upH+'h '+upM+'m','service uptime','')+
+        '</div></div>';
 
-      // HEP breakdown
-      let hepHtml='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">HEP Protocol Breakdown</div></div><div class="grid grid-cols-2 xl:grid-cols-4 gap-3 p-4">';
-      [['HEP Total',s.hep_total,'v-purple'],['SIP',s.hep_sip,'v-pink'],['RTCP',s.hep_rtcp,'v-green'],['RTP',s.hep_rtp,'v-blue'],
-       ['RTCP-XR',s.hep_rtcpxr,'v-yellow'],['UDP',s.hep_udp,'v-blue'],['TCP',s.hep_tcp,'v-purple'],['TLS',s.hep_tls,'v-green']
-      ].forEach(([l,v,c])=>{hepHtml+=kpi(l,(v||0).toLocaleString(),'',c);});
-      hepHtml+='</div></div>';
-      $('met-hep').innerHTML=hepHtml;
+      // HEP breakdown — single compact table, not 8 KPI cards
+      const hep=[['SIP',s.hep_sip],['RTCP',s.hep_rtcp],['RTP',s.hep_rtp],['RTCP-XR',s.hep_rtcpxr]].filter(([,v])=>v>0);
+      const transport=[['UDP',s.hep_udp],['TCP',s.hep_tcp],['TLS',s.hep_tls]].filter(([,v])=>v>0);
+      let hepRows='';
+      hep.forEach(([l,v])=>{hepRows+='<tr><td>'+l+'</td><td class="mono">'+fmt(v)+'</td></tr>';});
+      transport.forEach(([l,v])=>{hepRows+='<tr><td>'+l+'</td><td class="mono">'+fmt(v)+'</td></tr>';});
+      $('met-hep').innerHTML='<div class="card"><div class="p-3 px-4" style="border-bottom:1px solid var(--z-line)"><span class="sec-label" style="margin:0">Protocol breakdown</span></div>'+
+        '<table><thead><tr><th>Type</th><th>Count</th></tr></thead><tbody>'+hepRows+'</tbody></table>'+
+        '<div class="p-3 px-4 t-xs" style="color:var(--z-dim);border-top:1px solid var(--z-line)">Total HEP: '+fmt(s.hep_total||0)+' · Requests: '+fmt(s.requests||0)+' · Responses: '+fmt(s.responses||0)+' · Echoes: '+fmt(s.echoes||0)+'</div></div>';
     }
 
-    // CPS chart
+    // CPS chart — theme-aware
     if(cps&&cps.length>1){
+      const dimC=getComputedStyle(document.documentElement).getPropertyValue('--z-dim').trim();
+      const okC=getComputedStyle(document.documentElement).getPropertyValue('--z-ok').trim();
+      const lineC=getComputedStyle(document.documentElement).getPropertyValue('--z-line').trim();
       const labels=cps.map(c=>{const d=new Date(c.minute*60000);return d.toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit'});});
-      const totals=cps.map(c=>c.total);
-      const invites=cps.map(c=>c.invites);
-      const ctx=$('met-cps-chart');
-      if(ctx) new Chart(ctx,{type:'line',data:{labels,datasets:[{label:'Total msgs/min',data:totals,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,0.06)',borderWidth:1.5,pointRadius:0,fill:true,tension:0.3},{label:'INVITEs/min',data:invites,borderColor:'#e879f9',borderWidth:1.5,pointRadius:0,fill:false,tension:0.3}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:0},plugins:{legend:{position:'bottom',labels:{boxWidth:8,font:{size:10},color:'#71717a'}}},scales:{x:{ticks:{maxTicksToLimit:10,font:{size:9},color:'#52525b'},grid:{display:false}},y:{beginAtZero:true,ticks:{font:{size:9},color:'#52525b'},grid:{color:'rgba(128,128,128,0.08)'}}}}});
+      new Chart($('met-cps-chart'),{type:'line',data:{labels,datasets:[
+        {label:'Messages',data:cps.map(c=>c.total),borderColor:dimC,borderWidth:1.5,pointRadius:0,fill:false,tension:0.3},
+        {label:'Calls',data:cps.map(c=>c.invites),borderColor:okC,backgroundColor:okC+'15',borderWidth:1.5,pointRadius:0,fill:true,tension:0.3}
+      ]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:0},plugins:{legend:{position:'top',align:'end',labels:{boxWidth:6,padding:10,font:{size:11},color:dimC}}},scales:{x:{ticks:{maxTicksToLimit:10,font:{size:10},color:dimC},grid:{display:false}},y:{beginAtZero:true,ticks:{font:{size:10},color:dimC},grid:{color:lineC}}}}});
     }
 
-    // Response codes
+    // Response codes — semantic colors
     if(codes&&codes.length){
-      let rows='';
       const maxC=Math.max(...codes.map(c=>c.count||0))||1;
+      let rows='';
       codes.forEach(c=>{
         const st=c.status||0;
-        const sc=st>=500?'v-red':st>=400?'v-yellow':st>=300?'v-blue':st>=200?'v-green':'';
-        rows+='<tr><td class="mono '+sc+'">'+st+'</td><td>'+h(c.reason||'')+'</td><td class="mono">'+n(c,'count').toLocaleString()+'</td>'+
-          '<td><div class="w-full rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full" style="width:'+((c.count||0)/maxC*100).toFixed(0)+'%;background:var(--z-muted)"></div></div></td></tr>';
+        const sc=st>=500?'c-err':st>=400?'c-warn':st>=200?'c-ok':'c-muted';
+        rows+='<tr><td class="mono '+sc+'">'+st+'</td><td>'+h(c.reason||'')+'</td><td class="mono">'+fmt(c.count)+'</td>'+
+          '<td><div style="width:100%;height:4px;border-radius:2px;background:var(--z-line)"><div style="height:4px;border-radius:2px;width:'+((c.count||0)/maxC*100).toFixed(0)+'%;background:var(--z-dim)"></div></div></td></tr>';
       });
-      $('met-codes').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Response Codes</div></div><table><thead><tr><th>Code</th><th>Reason</th><th>Count</th><th>Volume</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('met-codes').innerHTML='<div class="card"><div class="p-3 px-4" style="border-bottom:1px solid var(--z-line)"><span class="sec-label" style="margin:0">Response codes</span></div><table><thead><tr><th>Code</th><th>Reason</th><th>Count</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
   });
 };
 
 // ===== REPORTS =====
 pages['/reports']=function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Reports</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Telecom KPIs, traffic analysis, top endpoints, and per-server breakdown.</p>'+
-    '<div id="rep-kpi">Loading KPIs...</div>'+
-    '<div class="grid xl:grid-cols-2 gap-5 mt-5"><div class="card p-4"><div class="text-xs font-medium mb-3">ASR / ACD Trend (24h)</div><div style="height:180px"><canvas id="rep-trend-chart"></canvas></div></div>'+
-    '<div class="card p-4"><div class="text-xs font-medium mb-3">Call Volume (24h)</div><div style="height:180px"><canvas id="rep-vol-chart"></canvas></div></div></div>'+
-    '<div class="grid xl:grid-cols-2 gap-5 mt-5"><div id="rep-agents"></div><div id="rep-talkers"></div></div>'+
-    '<div class="grid xl:grid-cols-2 gap-5 mt-5"><div id="rep-methods"></div><div id="rep-topcalls"></div></div>'+
+  $('main').innerHTML='<h1 class="t-lg">Reports</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Traffic analysis and telecom KPIs</p>'+
+    '<div class="grid grid-cols-2 lg:grid-cols-4 gap-3" id="rep-kpi"></div>'+
+    '<div class="grid lg:grid-cols-2 gap-4 mt-5"><div class="card p-4"><div class="sec-label">ASR and ACD trend</div><div style="aspect-ratio:2.5/1;min-height:140px"><canvas id="rep-trend-chart"></canvas></div></div>'+
+    '<div class="card p-4"><div class="sec-label">Call volume</div><div style="aspect-ratio:2.5/1;min-height:140px"><canvas id="rep-vol-chart"></canvas></div></div></div>'+
+    '<div class="grid lg:grid-cols-2 gap-4 mt-5"><div id="rep-agents"></div><div id="rep-talkers"></div></div>'+
+    '<div class="grid lg:grid-cols-2 gap-4 mt-5"><div id="rep-methods"></div><div id="rep-topcalls"></div></div>'+
     '<div class="mt-5" id="rep-daily"></div>';
 
   // Fetch all endpoints in parallel
@@ -894,22 +906,13 @@ pages['/reports']=function(){
 
     // KPI cards from realtime (1 min window)
     if(rt){
-      const asr=n(rt,'asr'),ner=n(rt,'ner'),errRate=n(rt,'err_rate');
+      const asr=n(rt,'asr');
       const fails=n(rt,'resp_4xx')+n(rt,'resp_5xx');
-      $('rep-kpi').innerHTML='<div class="grid grid-cols-2 xl:grid-cols-4 gap-3">'+
-        kpi('Concurrent Calls',n(rt,'active_calls'),'open dialogs','v-pink')+
-        kpi('CPS',perSec(n(rt,'invites'),60),'calls/sec this minute','v-green')+
-        kpi('Message Rate',perSec(n(rt,'total'),60)+'/s','all captures/sec','v-blue')+
-        kpi('Call Attempts',n(rt,'invites'),'INVITEs in 1m','v-yellow')+
-        kpi('Answered',n(rt,'answered_calls'),'completed calls','v-green')+
-        kpi('Failed',n(rt,'failed_calls'),'4xx/5xx responses','v-red')+
-        kpi('ASR',asr+'%','answer seizure ratio',asr>=70?'v-green':asr>=40?'v-yellow':'v-red')+
-        kpi('NER',ner+'%','network effectiveness',ner>=90?'v-green':'v-yellow')+
-        kpi('ACD',n(rt,'acd_seconds')+'s','avg call duration','v-purple')+
-        kpi('Error Rate',errRate+'%','error/total ratio',errRate<=5?'v-green':'v-red')+
-        kpi('Registers',n(rt,'registers'),'REG in 1m','v-blue')+
-        kpi('Sources',n(rt,'sources'),'unique IPs','v-purple')+
-        '</div>';
+      $('rep-kpi').innerHTML=
+        kpi('Concurrent',fmt(n(rt,'active_calls')),'active calls','')+
+        kpi('ASR',asr+'%','answer rate',asrColor(asr))+
+        kpi('ACD',n(rt,'acd_seconds')+'s','avg duration','')+
+        kpi('Failed',fmt(fails),'4xx + 5xx',errColor(fails));
     }
 
     // Per-agent breakdown
@@ -924,10 +927,10 @@ pages['/reports']=function(){
           '<td>'+agentHtml(a.agent)+'</td>'+
           '<td class="mono">'+msgs.toLocaleString()+'</td>'+
           '<td class="mono">'+n(a,'calls').toLocaleString()+'</td>'+
-          '<td><div class="flex items-center gap-2"><div class="flex-1 rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full bg-[#a78bfa]" style="width:'+pct+'%"></div></div><span class="mono text-[10px]" style="color:var(--z-muted)">'+pct+'%</span></div></td>'+
+          '<td><div class="flex items-center gap-2"><div class="flex-1 rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full bg-[#a78bfa]" style="width:'+pct+'%"></div></div><span class="mono t-xs" style="color:var(--z-muted)">'+pct+'%</span></div></td>'+
           '<td class="text-[var(--z-muted)]">'+(a.last_seen?timeAgo(a.last_seen):'')+'</td></tr>';
       });
-      $('rep-agents').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium" style="color:var(--z-ink)">Traffic by Server</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">Message and call distribution across HEP agents.</div></div><table><thead><tr><th>Server</th><th>Messages</th><th>Call IDs</th><th>Share</th><th>Last Seen</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('rep-agents').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0" style="color:var(--z-ink)">Traffic by Server</div><div class="t-xs mt-1" style="color:var(--z-muted)">Message and call distribution across HEP agents.</div></div><table><thead><tr><th>Server</th><th>Messages</th><th>Call IDs</th><th>Share</th><th>Last Seen</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
 
     // Top talkers
@@ -939,13 +942,13 @@ pages['/reports']=function(){
         const msgs=n(t,'messages');
         const pct=(msgs/maxMsgs*100).toFixed(0);
         rows+='<tr class="cursor-pointer" onclick="location.hash=\'#/ip?addr='+encodeURIComponent(ip)+'\'">'+
-          '<td class="mono text-[10px]" style="color:var(--z-muted)">'+(i+1)+'</td>'+
-          '<td class="mono text-[#a78bfa]">'+h(t.src||'')+'</td>'+
+          '<td class="mono t-xs" style="color:var(--z-muted)">'+(i+1)+'</td>'+
+          '<td class="mono c-id">'+h(t.src||'')+'</td>'+
           '<td class="mono">'+msgs.toLocaleString()+'</td>'+
           '<td class="mono">'+n(t,'calls').toLocaleString()+'</td>'+
           '<td><div class="w-full rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full bg-[#38bdf8]" style="width:'+pct+'%"></div></div></td></tr>';
       });
-      $('rep-talkers').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium" style="color:var(--z-ink)">Top Endpoints</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">Busiest source IPs. Click to view IP history.</div></div><table><thead><tr><th>#</th><th>Endpoint</th><th>Msgs</th><th>Calls</th><th>Volume</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('rep-talkers').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0" style="color:var(--z-ink)">Top Endpoints</div><div class="t-xs mt-1" style="color:var(--z-muted)">Busiest source IPs. Click to view IP history.</div></div><table><thead><tr><th>#</th><th>Endpoint</th><th>Msgs</th><th>Calls</th><th>Volume</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
 
     // Method breakdown from summary
@@ -980,7 +983,7 @@ pages['/reports']=function(){
       Object.entries(buckets).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]).forEach(([m,c])=>{
         const pct=(c/total*100).toFixed(1);
         const color=m==='INVITE'?'#f472b6':m==='BYE'?'#fbbf24':m==='REGISTER'?'#38bdf8':m==='OPTIONS'?'#71717a':'#a78bfa';
-        mRows+='<tr><td class="font-medium" style="color:'+color+'">'+h(m)+'</td><td class="mono">'+c.toLocaleString()+'</td><td class="mono text-[10px]" style="color:var(--z-muted)">'+pct+'%</td>'+
+        mRows+='<tr><td class="font-medium" style="color:'+color+'">'+h(m)+'</td><td class="mono">'+c.toLocaleString()+'</td><td class="mono t-xs" style="color:var(--z-muted)">'+pct+'%</td>'+
           '<td><div class="w-full rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full" style="background:'+color+';width:'+pct+'%"></div></div></td></tr>';
       });
       // Response code summary
@@ -989,11 +992,11 @@ pages['/reports']=function(){
       [['2xx','#34d399'],['3xx','#38bdf8'],['4xx','#fbbf24'],['5xx','#ef4444']].forEach(([code,color])=>{
         const c=responses[code];
         if(c>0){
-          rRows+='<tr><td class="mono font-medium" style="color:'+color+'">'+code+'</td><td class="mono">'+c.toLocaleString()+'</td><td class="mono text-[10px]" style="color:var(--z-muted)">'+(c/rTotal*100).toFixed(1)+'%</td>'+
+          rRows+='<tr><td class="mono font-medium" style="color:'+color+'">'+code+'</td><td class="mono">'+c.toLocaleString()+'</td><td class="mono t-xs" style="color:var(--z-muted)">'+(c/rTotal*100).toFixed(1)+'%</td>'+
             '<td><div class="w-full rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full" style="background:'+color+';width:'+(c/rTotal*100).toFixed(0)+'%"></div></div></td></tr>';
         }
       });
-      $('rep-methods').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium" style="color:var(--z-ink)">Request Methods</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">'+n(summary,'total').toLocaleString()+' total messages · '+n(summary,'unique_call_ids').toLocaleString()+' unique Call-IDs</div></div><table><thead><tr><th>Method</th><th>Count</th><th>%</th><th>Volume</th></tr></thead><tbody>'+mRows+'</tbody></table>'+
+      $('rep-methods').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0" style="color:var(--z-ink)">Request Methods</div><div class="t-xs mt-1" style="color:var(--z-muted)">'+n(summary,'total').toLocaleString()+' total messages · '+n(summary,'unique_call_ids').toLocaleString()+' unique Call-IDs</div></div><table><thead><tr><th>Method</th><th>Count</th><th>%</th><th>Volume</th></tr></thead><tbody>'+mRows+'</tbody></table>'+
         (rRows?'<div class="p-4 pt-3" style="border-top:1px solid var(--z-line)"><div class="section-title mb-2">Response Codes</div><table><thead><tr><th>Class</th><th>Count</th><th>%</th><th>Volume</th></tr></thead><tbody>'+rRows+'</tbody></table></div>':'')+
         '</div>';
     }
@@ -1002,25 +1005,25 @@ pages['/reports']=function(){
     if(topCalls&&topCalls.length){
       let rows='';
       topCalls.forEach(c=>{
-        const st=c.state==='active'?'<span class="text-[#34d399]">active</span>':'<span style="color:var(--z-muted)">'+h(c.state||'')+'</span>';
+        const st=c.state==='active'?'<span class="c-ok">active</span>':'<span style="color:var(--z-muted)">'+h(c.state||'')+'</span>';
         const from=(c.from||'').replace(/<[^>]*>/g,'').replace(/;.*/,'').trim()||'-';
         const to=(c.to||'').replace(/<[^>]*>/g,'').replace(/;.*/,'').trim()||'-';
         rows+='<tr class="cursor-pointer" onclick="location.hash=\'#/ladder?call_id='+encodeURIComponent(c.call_id||'')+'\'">'+
-          '<td class="mono text-[#a78bfa] truncate max-w-[200px]">'+h(c.call_id||'')+'</td>'+
+          '<td class="mono c-id truncate max-w-[200px]">'+h(c.call_id||'')+'</td>'+
           '<td class="mono">'+n(c,'messages')+'</td>'+
           '<td>'+st+'</td>'+
           '<td class="truncate max-w-[150px]">'+h(from)+'</td>'+
           '<td class="truncate max-w-[150px]">'+h(to)+'</td>'+
           '<td class="text-[var(--z-muted)]">'+(c.ts_first?timeAgo(c.ts_first):'')+'</td></tr>';
       });
-      $('rep-topcalls').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium" style="color:var(--z-ink)">Top Calls by Messages</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">Calls with the most SIP messages. Click for ladder.</div></div><table><thead><tr><th>Call-ID</th><th>Msgs</th><th>State</th><th>From</th><th>To</th><th>Started</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('rep-topcalls').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0" style="color:var(--z-ink)">Top Calls by Messages</div><div class="t-xs mt-1" style="color:var(--z-muted)">Calls with the most SIP messages. Click for ladder.</div></div><table><thead><tr><th>Call-ID</th><th>Msgs</th><th>State</th><th>From</th><th>To</th><th>Started</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
 
     // Overall summary stats
     if(summary){
       const span=n(summary,'ts_max')-n(summary,'ts_min');
       const hours=(span/3600000).toFixed(1);
-      $('rep-daily').innerHTML='<div class="card p-5"><div class="flex flex-wrap gap-6 text-xs">'+
+      $('rep-daily').innerHTML='<div class="card p-4"><div class="flex flex-wrap gap-4 text-xs">'+
         '<div><span style="color:var(--z-muted)">Total messages:</span> <span class="mono font-medium">'+n(summary,'total').toLocaleString()+'</span></div>'+
         '<div><span style="color:var(--z-muted)">Unique Call-IDs:</span> <span class="mono font-medium">'+n(summary,'unique_call_ids').toLocaleString()+'</span></div>'+
         '<div><span style="color:var(--z-muted)">HEP captured:</span> <span class="mono font-medium">'+n(summary,'hep').toLocaleString()+'</span></div>'+
@@ -1059,10 +1062,10 @@ pages['/reports']=function(){
 
 // ===== SLA =====
 pages['/sla']=function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">SLA</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Service level monitoring. Targets are configurable — click a gauge to learn more.</p>'+
+  $('main').innerHTML='<h1 class="t-lg">SLA</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Service level targets — click a gauge to adjust</p>'+
     '<div id="sla-summary"></div>'+
-    '<div class="grid xl:grid-cols-2 gap-5 mt-5"><div id="sla-agents"></div><div id="sla-errors"></div></div>'+
-    '<div class="grid xl:grid-cols-2 gap-5 mt-5"><div id="sla-dests"></div><div id="sla-srcs"></div></div>';
+    '<div class="grid lg:grid-cols-2 gap-4 mt-5"><div id="sla-agents"></div><div id="sla-errors"></div></div>'+
+    '<div class="grid lg:grid-cols-2 gap-4 mt-5"><div id="sla-dests"></div><div id="sla-srcs"></div></div>';
 
   // SLA targets — stored in localStorage
   const defaults={asr:70,ner:90,err_rate:5,acd_min:30};
@@ -1070,17 +1073,16 @@ pages['/sla']=function(){
   function saveTargets(t){localStorage.setItem('zaman_sla_targets',JSON.stringify(t));}
 
   function gauge(label,value,unit,target,invert){
-    // invert: true means lower is better (err_rate)
     const met=invert?(value<=target):(value>=target);
     const warn=invert?(value<=target*1.5):(value>=target*0.7);
-    const color=met?'#34d399':warn?'#fbbf24':'#ef4444';
-    const status=met?'MET':warn?'AT RISK':'BREACHED';
-    const statusColor=met?'text-[#34d399]':warn?'text-[#fbbf24]':'text-[#ef4444]';
-    return '<div class="card p-5 cursor-pointer" onclick="editTarget(\''+label+'\')">'+
-      '<div class="flex items-center justify-between mb-3"><div class="text-[10px] uppercase tracking-wider font-semibold" style="color:var(--z-dim)">'+h(label)+'</div><span class="text-[10px] font-semibold '+statusColor+'">'+status+'</span></div>'+
-      '<div class="text-3xl font-bold mono" style="color:'+color+'">'+value+unit+'</div>'+
-      '<div class="mt-2 w-full rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full" style="background:'+color+';width:'+Math.min(100,invert?Math.max(0,(1-value/Math.max(target*2,1))*100):Math.min(100,value/Math.max(target,1)*100))+'%"></div></div>'+
-      '<div class="flex justify-between mt-1.5 text-[10px]" style="color:var(--z-muted)"><span>target: '+(invert?'≤':'≥')+target+unit+'</span><span>current</span></div></div>';
+    const cls=met?'c-ok':warn?'c-warn':'c-err';
+    const status=met?'Met':warn?'At risk':'Breach';
+    const pct=Math.min(100,invert?Math.max(0,(1-value/Math.max(target*2,1))*100):Math.min(100,value/Math.max(target,1)*100));
+    return '<div class="card p-4 cursor-pointer" onclick="editTarget(\''+label+'\')">'+
+      '<div class="flex items-center justify-between mb-2"><div class="t-xs" style="color:var(--z-dim)">'+h(label)+'</div><span class="t-xs '+cls+'" style="font-weight:500">'+status+'</span></div>'+
+      '<div class="t-hero mono '+cls+'">'+value+unit+'</div>'+
+      '<div class="mt-2 w-full" style="height:3px;border-radius:2px;background:var(--z-line)"><div style="height:3px;border-radius:2px;width:'+pct+'%;background:var(--z-'+( met?'ok':warn?'warn':'err')+')"></div></div>'+
+      '<div class="flex justify-between mt-1 t-xs" style="color:var(--z-dim)"><span>target '+(invert?'≤':'≥')+target+unit+'</span></div></div>';
   }
 
   window.editTarget=function(label){
@@ -1123,11 +1125,11 @@ pages['/sla']=function(){
         gauge('ACD',acd,'s',t.acd_min,false)+
         '</div>'+
         '<div class="grid grid-cols-2 xl:grid-cols-5 gap-3 mt-4">'+
-        kpi('Concurrent Calls',active,'open dialogs','v-pink')+
-        kpi('Invites 5m',invites,'call attempts','v-blue')+
-        kpi('Answered',answered,'completed calls','v-green')+
-        kpi('Failed',failed,'4xx/5xx','v-red')+
-        kpi('Sources',n(rt1,'sources'),'unique IPs','v-purple')+
+        kpi('Concurrent Calls',active,'open dialogs','c-muted')+
+        kpi('Invites 5m',invites,'call attempts','c-muted')+
+        kpi('Answered',answered,'completed calls','c-ok')+
+        kpi('Failed',failed,'4xx/5xx','c-err')+
+        kpi('Sources',n(rt1,'sources'),'unique IPs','c-muted')+
         '</div>';
     }
 
@@ -1158,7 +1160,7 @@ pages['/sla']=function(){
           '<td class="mono">'+n(nd,'active_calls')+'</td>'+
           '</tr>';
       });
-      $('sla-agents').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium" style="color:var(--z-ink)">Per-Server SLA (5 min)</div></div><table><thead><tr><th>Server</th><th>Total</th><th>Invites</th><th>Answered</th><th>Failed</th><th>ASR</th><th>ACD</th><th>Active</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('sla-agents').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0" style="color:var(--z-ink)">Per-Server SLA (5 min)</div></div><table><thead><tr><th>Server</th><th>Total</th><th>Invites</th><th>Answered</th><th>Failed</th><th>ASR</th><th>ACD</th><th>Active</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
 
     // Error breakdown
@@ -1176,10 +1178,10 @@ pages['/sla']=function(){
       let bars='';
       codes.forEach(c=>{
         const pct=(c.val/total*100).toFixed(1);
-        bars+='<div class="flex items-center gap-3 py-2" style="border-bottom:1px solid var(--z-line)"><div class="w-28 text-xs">'+c.label+'</div><div class="flex-1"><div class="w-full rounded-full h-2" style="background:var(--z-line)"><div class="h-2 rounded-full" style="background:'+c.color+';width:'+pct+'%"></div></div></div><div class="mono text-xs w-16 text-right">'+c.val+'</div><div class="text-[10px] w-12 text-right" style="color:var(--z-muted)">'+pct+'%</div></div>';
+        bars+='<div class="flex items-center gap-3 py-2" style="border-bottom:1px solid var(--z-line)"><div class="w-28 text-xs">'+c.label+'</div><div class="flex-1"><div class="w-full rounded-full h-2" style="background:var(--z-line)"><div class="h-2 rounded-full" style="background:'+c.color+';width:'+pct+'%"></div></div></div><div class="mono text-xs w-16 text-right">'+c.val+'</div><div class="t-xs w-12 text-right" style="color:var(--z-muted)">'+pct+'%</div></div>';
       });
       if(!bars) bars='<div class="py-4 text-sm" style="color:var(--z-muted)">No errors in the last 5 minutes.</div>';
-      $('sla-errors').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium" style="color:var(--z-ink)">Error Breakdown (5 min)</div></div><div class="p-4">'+bars+'</div></div>';
+      $('sla-errors').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0" style="color:var(--z-ink)">Error Breakdown (5 min)</div></div><div class="p-4">'+bars+'</div></div>';
     }
 
     // Per-destination IP ASR/ACD
@@ -1192,16 +1194,16 @@ pages['/sla']=function(){
         const ip=d[ipField]||'';
         const asr=d.asr||0;
         const acd=d.acd||0;
-        const asrColor=asr>=70?'v-green':asr>=40?'v-yellow':'v-red';
+        const asrColor=asr>=70?'c-ok':asr>=40?'c-warn':'c-err';
         rows+='<tr class="cursor-pointer" onclick="location.hash=\'#/ip?addr='+encodeURIComponent(ip)+'\'">'+
           '<td class="mono c-accent">'+h(ip)+'</td>'+
           '<td class="mono">'+n(d,'invites')+'</td>'+
-          '<td class="mono v-green">'+n(d,'ok_2xx')+'</td>'+
-          '<td class="mono '+(n(d,'errors')>0?'v-red':'')+'">'+n(d,'errors')+'</td>'+
+          '<td class="mono c-ok">'+n(d,'ok_2xx')+'</td>'+
+          '<td class="mono '+(n(d,'errors')>0?'c-err':'')+'">'+n(d,'errors')+'</td>'+
           '<td class="mono '+asrColor+'">'+asr+'%</td>'+
           '<td class="mono">'+acd+'s</td></tr>';
       });
-      $(elId).innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">'+label+'</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">ASR and ACD per IP (5 min window). Click to view history.</div></div><table><thead><tr><th>IP</th><th>Attempts</th><th>Answered</th><th>Failed</th><th>ASR</th><th>ACD</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $(elId).innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">'+label+'</div><div class="t-xs mt-1" style="color:var(--z-muted)">ASR and ACD per IP (5 min window). Click to view history.</div></div><table><thead><tr><th>IP</th><th>Attempts</th><th>Answered</th><th>Failed</th><th>ASR</th><th>ACD</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
     ipTable(dests,'Destination IPs (Carriers)','dst','sla-dests');
     ipTable(srcs,'Source IPs (Origins)','src','sla-srcs');
@@ -1211,35 +1213,35 @@ pages['/sla']=function(){
 
 // ===== ALERTS =====
 pages['/alerts']=function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Alerts</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Live anomaly detection from the last 5 minutes</p>'+
+  $('main').innerHTML='<h1 class="t-lg">Alerts</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Live anomaly detection from the last 5 minutes</p>'+
     '<div id="al-status"></div><div class="mt-5" id="al-codes"></div>';
   async function refreshAlerts(){
     const [anomalies,codes]=await Promise.all([api('/api/anomalies'),api('/api/report/response-codes')]);
     if(anomalies&&anomalies.length){
       let rows='';
       anomalies.forEach(a=>{
-        const sev=a.severity==='critical'?'v-red':'v-yellow';
+        const sev=a.severity==='critical'?'c-err':'c-warn';
         const icon=a.severity==='critical'?'&#x26A0;':'&#x26A0;';
         rows+='<div class="flex items-center gap-3 p-3" style="border-bottom:1px solid var(--z-line)">'+
           '<span class="'+sev+'">'+icon+'</span>'+
-          '<div class="flex-1"><div class="text-xs font-medium">'+h(a.message||a.type)+'</div><div class="text-[10px]" style="color:var(--z-muted)">'+h(a.type)+' · '+n(a,'count')+' occurrences</div></div>'+
-          '<span class="text-[10px] font-medium '+sev+'">'+h(a.severity)+'</span></div>';
+          '<div class="flex-1"><div class="sec-label" style="margin:0">'+h(a.message||a.type)+'</div><div class="t-xs" style="color:var(--z-muted)">'+h(a.type)+' · '+n(a,'count')+' occurrences</div></div>'+
+          '<span class="t-xs font-medium '+sev+'">'+h(a.severity)+'</span></div>';
       });
       $('al-status').innerHTML='<div class="card">'+rows+'</div>';
     } else {
-      $('al-status').innerHTML='<div class="card p-5 text-center"><div class="v-green text-lg mb-1">&#x2714;</div><div class="text-xs font-medium">No anomalies detected</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">All metrics within normal thresholds</div></div>';
+      $('al-status').innerHTML='<div class="card p-4 text-center"><div class="c-ok text-lg mb-1">&#x2714;</div><div class="sec-label" style="margin:0">No anomalies detected</div><div class="t-xs mt-1" style="color:var(--z-muted)">All metrics within normal thresholds</div></div>';
     }
     if(codes&&codes.length){
       let rows='';
       const maxCnt=Math.max(...codes.map(c=>c.count||0))||1;
       codes.forEach(c=>{
         const st=c.status||0;
-        const color=st>=500?'v-red':st>=400?'v-yellow':st>=300?'v-blue':st>=200?'v-green':'';
+        const color=st>=500?'c-err':st>=400?'c-warn':st>=300?'c-muted':st>=200?'c-ok':'';
         const pct=((c.count||0)/maxCnt*100).toFixed(0);
         rows+='<tr><td class="mono '+color+'">'+st+'</td><td>'+h(c.reason||'')+'</td><td class="mono">'+n(c,'count').toLocaleString()+'</td>'+
           '<td><div class="w-full rounded-full h-1.5" style="background:var(--z-line)"><div class="h-1.5 rounded-full" style="width:'+pct+'%;background:var(--z-muted)"></div></div></td></tr>';
       });
-      $('al-codes').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Response Code Distribution</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">From recent 50K messages</div></div><table><thead><tr><th>Code</th><th>Reason</th><th>Count</th><th>Volume</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('al-codes').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Response Code Distribution</div><div class="t-xs mt-1" style="color:var(--z-muted)">From recent 50K messages</div></div><table><thead><tr><th>Code</th><th>Reason</th><th>Count</th><th>Volume</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
   }
   refreshAlerts();
@@ -1250,15 +1252,15 @@ pages['/alerts']=function(){
     if(!cfg)return;
     const webhooks=(cfg.webhooks||[]).join('\n');
     $('al-codes').insertAdjacentHTML('afterend',
-      '<div class="card p-5 mt-5"><div class="text-xs font-medium mb-3">Alert Configuration</div>'+
+      '<div class="card p-4 mt-5"><div class="sec-label" style="margin:0 mb-3">Alert Configuration</div>'+
       '<div class="grid xl:grid-cols-2 gap-4">'+
-      '<div><label class="text-[10px] font-medium" style="color:var(--z-dim)">Webhook URLs (one per line)</label>'+
+      '<div><label class="t-xs font-medium" style="color:var(--z-dim)">Webhook URLs (one per line)</label>'+
       '<textarea id="al-webhooks" rows="3" class="w-full mt-1 rounded-md text-xs mono p-2" style="background:var(--z-field);border:1px solid var(--z-line);color:var(--z-ink);resize:vertical">'+h(webhooks)+'</textarea></div>'+
-      '<div><label class="text-[10px] font-medium" style="color:var(--z-dim)">Thresholds</label>'+
+      '<div><label class="t-xs font-medium" style="color:var(--z-dim)">Thresholds</label>'+
       '<div class="grid grid-cols-2 gap-2 mt-1">'+
-      '<div><span class="text-[10px]" style="color:var(--z-dim)">Min ASR %</span><input id="al-asr" type="number" value="'+(cfg.thresholds?.asr_min||70)+'" class="w-full mt-0.5 text-xs"></div>'+
-      '<div><span class="text-[10px]" style="color:var(--z-dim)">Max Error Rate %</span><input id="al-err" type="number" value="'+(cfg.thresholds?.err_rate_max||10)+'" class="w-full mt-0.5 text-xs"></div></div>'+
-      '<button onclick="saveAlertConfig()" class="mt-3 rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Save</button></div></div></div>');
+      '<div><span class="t-xs" style="color:var(--z-dim)">Min ASR %</span><input id="al-asr" type="number" value="'+(cfg.thresholds?.asr_min||70)+'" class="w-full mt-0.5 text-xs"></div>'+
+      '<div><span class="t-xs" style="color:var(--z-dim)">Max Error Rate %</span><input id="al-err" type="number" value="'+(cfg.thresholds?.err_rate_max||10)+'" class="w-full mt-0.5 text-xs"></div></div>'+
+      '<button onclick="saveAlertConfig()" class="mt-3 rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Save</button></div></div></div>');
   });
   window.saveAlertConfig=async function(){
     const webhooks=$('al-webhooks').value.split('\n').map(s=>s.trim()).filter(Boolean);
@@ -1270,16 +1272,16 @@ pages['/alerts']=function(){
 
 // ===== QOS =====
 pages['/qos']=async function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Call Quality</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Aggregate QoS from RTCP data.</p><div id="qos-c"></div>';
+  $('main').innerHTML='<h1 class="t-lg">Call Quality</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Aggregate QoS from RTCP data.</p><div id="qos-c"></div>';
   $('qos-c').innerHTML='<div class="card p-4 text-sm text-[var(--z-muted)]">No RTCP data available yet. Configure your media server to send HEP type 5 (RTCP) to zaman on port 9060.</div>';
 };
 
 // ===== IP =====
 pages['/ip']=function(params){
   const preIP=params?params.get('addr')||'':'';
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">IP History</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Traffic analysis for a specific endpoint</p>'+
+  $('main').innerHTML='<h1 class="t-lg">IP History</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Traffic analysis for a specific endpoint</p>'+
     '<div class="flex gap-2 mb-5"><input id="ip-addr" placeholder="Enter an IP address (e.g. 44.196.20.220)" value="'+h(preIP)+'" class="flex-1">'+
-    '<button onclick="ipLookup()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button></div>'+
+    '<button onclick="ipLookup()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button></div>'+
     '<div id="ip-geo" class="mb-4"></div>'+
     '<div id="ip-summary"></div>'+
     '<div id="ip-carrier" class="mb-5"></div>'+
@@ -1294,13 +1296,13 @@ pages['/ip']=function(params){
       talkers.forEach((t,i)=>{
         const ip=(t.src||'').split(':')[0];
         rows+='<tr class="cursor-pointer" onclick="$(\'ip-addr\').value=\''+h(ip)+'\';ipLookup()">'+
-          '<td class="mono text-[10px]" style="color:var(--z-dim)">'+(i+1)+'</td>'+
+          '<td class="mono t-xs" style="color:var(--z-dim)">'+(i+1)+'</td>'+
           '<td class="mono c-accent">'+h(t.src||'')+'</td>'+
           '<td class="mono">'+n(t,'messages').toLocaleString()+'</td>'+
           '<td class="mono">'+n(t,'calls').toLocaleString()+'</td>'+
           '</tr>';
       });
-      $('ip-top').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Top Endpoints</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">Click an IP to view its traffic history.</div></div><table><thead><tr><th>#</th><th>Endpoint</th><th>Messages</th><th>Calls</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      $('ip-top').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Top Endpoints</div><div class="t-xs mt-1" style="color:var(--z-muted)">Click an IP to view its traffic history.</div></div><table><thead><tr><th>#</th><th>Endpoint</th><th>Messages</th><th>Calls</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     });
   }
 
@@ -1354,25 +1356,25 @@ pages['/ip']=function(params){
     // Summary cards
     const methodList=Object.entries(methods).sort((a,b)=>b[1]-a[1]).map(([m,c])=>m+': '+c).join(' · ');
     $('ip-summary').innerHTML='<div class="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-4">'+
-      kpi('ASR',asr+'%','answered / '+invites+' INVITEs',asr>=70?'v-green':asr>=40?'v-yellow':'v-red')+
-      kpi('ACD',acd+'s',durations.length+' completed calls','v-purple')+
-      kpi('Answered',answered,'of '+invites+' attempts','v-green')+
-      kpi('Failed',failed,failList||'no failures',failed>0?'v-red':'v-green')+
+      kpi('ASR',asr+'%','answered / '+invites+' INVITEs',asr>=70?'c-ok':asr>=40?'c-warn':'c-err')+
+      kpi('ACD',acd+'s',durations.length+' completed calls','c-muted')+
+      kpi('Answered',answered,'of '+invites+' attempts','c-ok')+
+      kpi('Failed',failed,failList||'no failures',failed>0?'c-err':'c-ok')+
       '</div>'+
       '<div class="grid grid-cols-2 xl:grid-cols-5 gap-3 mb-4">'+
-      kpi('Messages',msgs.length,'in sample','v-blue')+
-      kpi('Call IDs',callIds.size,'unique calls','v-purple')+
-      kpi('As source',asSrc,'outbound','v-green')+
-      kpi('As dest',asDst,'inbound','v-yellow')+
-      kpi('Peers',peers.size,'unique endpoints','v-pink')+
+      kpi('Messages',msgs.length,'in sample','c-muted')+
+      kpi('Call IDs',callIds.size,'unique calls','c-muted')+
+      kpi('As source',asSrc,'outbound','c-ok')+
+      kpi('As dest',asDst,'inbound','c-warn')+
+      kpi('Peers',peers.size,'unique endpoints','c-muted')+
       '</div>'+
-      '<div class="card p-3 px-4 mb-4 text-[10px] mono" style="color:var(--z-muted)">'+methodList+'</div>';
+      '<div class="card p-4 px-4 mb-4 t-xs mono" style="color:var(--z-muted)">'+methodList+'</div>';
 
     // GeoIP + carrier scorecard (async, non-blocking)
     Promise.all([api('/api/geoip?ip='+encodeURIComponent(ip)),api('/api/sla/carrier?ip='+encodeURIComponent(ip))]).then(([geo,carrier])=>{
       // GeoIP card with map
       if(geo&&geo.status==='success'){
-        let geoHtml='<div class="card"><div class="grid xl:grid-cols-[1fr_300px]"><div class="p-4"><div class="text-xs font-medium mb-3">Location</div>'+
+        let geoHtml='<div class="card"><div class="grid xl:grid-cols-[1fr_300px]"><div class="p-4"><div class="sec-label" style="margin:0 mb-3">Location</div>'+
           '<div class="grid grid-cols-2 gap-3 text-xs">'+
           '<div><span style="color:var(--z-dim)">City:</span> '+h(geo.city||'—')+'</div>'+
           '<div><span style="color:var(--z-dim)">Region:</span> '+h(geo.regionName||'—')+'</div>'+
@@ -1392,21 +1394,21 @@ pages['/ip']=function(params){
       }
       // Carrier scorecard with trend chart
       if(carrier&&carrier.invites>0){
-        let cHtml='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Carrier Scorecard (60 min)</div></div>'+
+        let cHtml='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Carrier Scorecard (60 min)</div></div>'+
           '<div class="grid grid-cols-2 xl:grid-cols-5 gap-3 p-4">'+
-          kpi('ASR',carrier.asr+'%','answer rate',carrier.asr>=70?'v-green':carrier.asr>=40?'v-yellow':'v-red')+
-          kpi('ACD',carrier.acd+'s','avg duration','v-purple')+
-          kpi('Attempts',carrier.invites,'INVITEs','v-blue')+
-          kpi('Answered',carrier.ok_2xx,'completed','v-green')+
-          kpi('Failed',carrier.errors,'rejected',carrier.errors>0?'v-red':'v-green')+
+          kpi('ASR',carrier.asr+'%','answer rate',carrier.asr>=70?'c-ok':carrier.asr>=40?'c-warn':'c-err')+
+          kpi('ACD',carrier.acd+'s','avg duration','c-muted')+
+          kpi('Attempts',carrier.invites,'INVITEs','c-muted')+
+          kpi('Answered',carrier.ok_2xx,'completed','c-ok')+
+          kpi('Failed',carrier.errors,'rejected',carrier.errors>0?'c-err':'c-ok')+
           '</div>';
         // Error code breakdown
         if(carrier.error_codes&&Object.keys(carrier.error_codes).length){
           let codes='';
           Object.entries(carrier.error_codes).sort((a,b)=>b[1]-a[1]).forEach(([c,n])=>{
-            codes+='<span class="mono text-xs v-yellow">'+c+': '+n+'</span> ';
+            codes+='<span class="mono text-xs c-warn">'+c+': '+n+'</span> ';
           });
-          cHtml+='<div class="px-4 pb-3 text-[10px]" style="color:var(--z-dim)">Failure codes: '+codes+'</div>';
+          cHtml+='<div class="px-4 pb-3 t-xs" style="color:var(--z-dim)">Failure codes: '+codes+'</div>';
         }
         // Trend chart
         if(carrier.trend&&carrier.trend.length>1){
@@ -1429,7 +1431,7 @@ pages['/ip']=function(params){
     let rows='';
     msgs.forEach(m=>{
       const st=m.status||0;
-      const sc=st>=500?'v-red':st>=400?'v-yellow':st>=200?'v-green':'';
+      const sc=st>=500?'c-err':st>=400?'c-warn':st>=200?'c-ok':'';
       const mc=m.method==='INVITE'?'c-invite':m.method==='BYE'?'c-bye':'';
       rows+='<tr class="cursor-pointer" onclick="location.hash=\'#/ladder?call_id='+encodeURIComponent(m.call_id||'')+'\'">'+
         '<td class="mono '+mc+'">'+h(m.method||'')+'</td>'+
@@ -1440,7 +1442,7 @@ pages['/ip']=function(params){
         '<td>'+agentHtml(m.agent)+'</td>'+
         '<td style="color:var(--z-muted)">'+(m.ts_ms?timeAgo(m.ts_ms):'')+'</td></tr>';
     });
-    $('ip-r').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Traffic for '+h(ip)+'</div><div class="text-[10px] mt-1" style="color:var(--z-muted)">'+msgs.length+' messages · '+callIds.size+' calls · '+peers.size+' peers</div></div><table><thead><tr><th>Method</th><th>Code</th><th>Call-ID</th><th>Source</th><th>Destination</th><th>Server</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    $('ip-r').innerHTML='<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Traffic for '+h(ip)+'</div><div class="t-xs mt-1" style="color:var(--z-muted)">'+msgs.length+' messages · '+callIds.size+' calls · '+peers.size+' peers</div></div><table><thead><tr><th>Method</th><th>Code</th><th>Call-ID</th><th>Source</th><th>Destination</th><th>Server</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   };
   if(preIP) ipLookup();
 };
@@ -1448,10 +1450,10 @@ pages['/ip']=function(params){
 // ===== PROBE =====
 pages['/probe']=function(){
   window._probeHistory=window._probeHistory||[];
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">SIP Probe</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Send SIP OPTIONS to test endpoint reachability and measure RTT</p>'+
-    '<div class="card p-5 mb-5"><div class="flex gap-2 mb-2 flex-wrap"><input id="pr-host" placeholder="Hostname or IP" class="flex-1 min-w-[200px]"><input id="pr-port" placeholder="5060" class="w-24">'+
-    '<button onclick="doProbe()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Probe</button></div>'+
-    '<div class="text-[10px]" style="color:var(--z-dim)">Sends SIP OPTIONS and waits for a response. Requires ZAMAN_PROBE=1 on the core.</div></div>'+
+  $('main').innerHTML='<h1 class="t-lg">SIP Probe</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Send SIP OPTIONS to test endpoint reachability and measure RTT</p>'+
+    '<div class="card p-4 mb-5"><div class="flex gap-2 mb-2 flex-wrap"><input id="pr-host" placeholder="Hostname or IP" class="flex-1 min-w-[200px]"><input id="pr-port" placeholder="5060" class="w-24">'+
+    '<button onclick="doProbe()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Probe</button></div>'+
+    '<div class="t-xs" style="color:var(--z-dim)">Sends SIP OPTIONS and waits for a response. Requires ZAMAN_PROBE=1 on the core.</div></div>'+
     '<div id="pr-r"></div><div id="pr-history"></div>';
   $('pr-host').addEventListener('keydown',e=>{if(e.key==='Enter')doProbe();});
   function renderHistory(){
@@ -1459,10 +1461,10 @@ pages['/probe']=function(){
     let rows='';
     window._probeHistory.forEach((p,i)=>{
       const ok=p.ok;
-      rows+='<tr><td class="'+(ok?'v-green':'v-red')+'">'+(ok?'✓':'✗')+'</td><td class="mono">'+h(p.host||'')+'</td><td class="mono">'+h(p.port||'')+'</td>'+
+      rows+='<tr><td class="'+(ok?'c-ok':'c-err')+'">'+(ok?'✓':'✗')+'</td><td class="mono">'+h(p.host||'')+'</td><td class="mono">'+h(p.port||'')+'</td>'+
         '<td class="mono">'+(ok?p.rtt_ms+'ms':'—')+'</td><td class="mono">'+(p.status||'—')+'</td><td style="color:var(--z-muted)">'+h(p.time||'')+'</td></tr>';
     });
-    $('pr-history').innerHTML='<div class="card mt-5"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Probe History</div></div><table><thead><tr><th></th><th>Host</th><th>Port</th><th>RTT</th><th>Status</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    $('pr-history').innerHTML='<div class="card mt-5"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Probe History</div></div><table><thead><tr><th></th><th>Host</th><th>Port</th><th>RTT</th><th>Status</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   }
   renderHistory();
   window.doProbe=async function(){
@@ -1473,11 +1475,11 @@ pages['/probe']=function(){
       const r=await fetch('/api/probe',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({host,port,wait_ms:3000})});
       const d=await r.json();
       const ok=d.ok===true;
-      $('pr-r').innerHTML='<div class="card p-5"><div class="grid grid-cols-2 xl:grid-cols-4 gap-3">'+
-        kpi('Result',ok?'Reachable':'Unreachable',h(d.error||''),ok?'v-green':'v-red')+
-        kpi('RTT',ok?d.rtt_ms+'ms':'—','round trip time',ok?'v-blue':'v-red')+
-        kpi('Status',d.status||'—','SIP response code','v-purple')+
-        kpi('Target',host+':'+port,'',ok?'v-green':'v-red')+
+      $('pr-r').innerHTML='<div class="card p-4"><div class="grid grid-cols-2 xl:grid-cols-4 gap-3">'+
+        kpi('Result',ok?'Reachable':'Unreachable',h(d.error||''),ok?'c-ok':'c-err')+
+        kpi('RTT',ok?d.rtt_ms+'ms':'—','round trip time',ok?'c-muted':'c-err')+
+        kpi('Status',d.status||'—','SIP response code','c-muted')+
+        kpi('Target',host+':'+port,'',ok?'c-ok':'c-err')+
         '</div></div>';
       window._probeHistory.unshift({ok,host,port,rtt_ms:d.rtt_ms,status:d.status,error:d.error,time:new Date().toLocaleTimeString()});
       if(window._probeHistory.length>20)window._probeHistory.pop();
@@ -1488,32 +1490,32 @@ pages['/probe']=function(){
 
 // ===== ADMIN =====
 pages['/admin']=function(){
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Settings</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">System configuration and user management.</p>'+
-    '<div class="grid xl:grid-cols-2 gap-5">'+
+  $('main').innerHTML='<h1 class="t-lg">Settings</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">System configuration and user management.</p>'+
+    '<div class="grid xl:grid-cols-2 gap-4">'+
     '<div>'+
-    '<div class="card p-5 mb-5"><div class="section-title mb-2">API Key</div><div class="flex gap-2"><input id="ak" type="password" value="'+h(KEY)+'" class="flex-1"><button onclick="localStorage.setItem(\'zaman_api_key\',document.getElementById(\'ak\').value);location.reload()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Save</button></div><p class="text-[10px] text-[var(--z-muted)] mt-2">Stored in localStorage. Sent as X-API-Key header with every request.</p></div>'+
-    '<div class="card p-5"><div class="section-title mb-2">System Health</div><div id="ah">Loading...</div></div>'+
+    '<div class="card p-4 mb-5"><div class="section-title mb-2">API Key</div><div class="flex gap-2"><input id="ak" type="password" value="'+h(KEY)+'" class="flex-1"><button onclick="localStorage.setItem(\'zaman_api_key\',document.getElementById(\'ak\').value);location.reload()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Save</button></div><p class="t-xs text-[var(--z-muted)] mt-2">Stored in localStorage. Sent as X-API-Key header with every request.</p></div>'+
+    '<div class="card p-4"><div class="section-title mb-2">System Health</div><div id="ah">Loading...</div></div>'+
     '</div>'+
     '<div>'+
-    '<div class="card p-5 mb-5"><div class="section-title mb-3">User Management</div><div id="user-list">Loading...</div>'+
+    '<div class="card p-4 mb-5"><div class="section-title mb-3">User Management</div><div id="user-list">Loading...</div>'+
     '<div class="mt-4 pt-4" style="border-top:1px solid var(--z-line)"><div class="section-title mb-2">Add User</div>'+
     '<div class="flex gap-2 flex-wrap"><input id="nu-name" placeholder="Username" class="w-32"><input id="nu-pw" type="password" placeholder="Password" class="w-32">'+
     '<select id="nu-role" class="w-28"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option></select>'+
-    '<button onclick="addUser()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Add</button></div>'+
-    '<div id="nu-err" class="text-xs text-[#ef4444] mt-1"></div></div></div>'+
+    '<button onclick="addUser()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Add</button></div>'+
+    '<div id="nu-err" class="text-xs c-err mt-1"></div></div></div>'+
     '</div></div>';
 
   async function loadUserList(){
     const users=await fetch('/web/users',{headers:headers()}).then(r=>r.ok?r.json():null);
     if(!users){$('user-list').innerHTML='<div class="text-xs" style="color:var(--z-muted)">Admin access required to manage users.</div>';return;}
-    const roleBadge=r=>r==='admin'?'<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold" style="background:rgba(248,113,113,.1);color:#f87171;border:1px solid rgba(248,113,113,.2)">admin</span>':r==='operator'?'<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold" style="background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)">operator</span>':'<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold" style="background:rgba(161,161,170,.1);color:#a1a1aa;border:1px solid rgba(161,161,170,.2)">viewer</span>';
+    const roleBadge=r=>r==='admin'?'<span class="px-2 py-0.5 rounded-full t-xs font-semibold" style="background:rgba(248,113,113,.1);color:#f87171;border:1px solid rgba(248,113,113,.2)">admin</span>':r==='operator'?'<span class="px-2 py-0.5 rounded-full t-xs font-semibold" style="background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)">operator</span>':'<span class="px-2 py-0.5 rounded-full t-xs font-semibold" style="background:rgba(161,161,170,.1);color:#a1a1aa;border:1px solid rgba(161,161,170,.2)">viewer</span>';
     let rows='';
     users.forEach(u=>{
       rows+='<div class="flex items-center justify-between py-2.5" style="border-bottom:1px solid var(--z-line)">'+
         '<div class="flex items-center gap-2"><span class="text-sm font-medium">'+h(u.username)+'</span>'+roleBadge(u.role)+'</div>'+
         '<div class="flex gap-1">'+
-        '<button onclick="resetPw('+u.id+',\''+h(u.username)+'\')" class="text-[10px] px-2 py-1 rounded" style="color:var(--z-muted);border:1px solid var(--z-line)">Reset pw</button>'+
-        '<button onclick="deleteUser('+u.id+',\''+h(u.username)+'\')" class="text-[10px] px-2 py-1 rounded" style="color:#f87171;border:1px solid rgba(248,113,113,.2)">Delete</button>'+
+        '<button onclick="resetPw('+u.id+',\''+h(u.username)+'\')" class="t-xs px-2 py-1 rounded" style="color:var(--z-muted);border:1px solid var(--z-line)">Reset pw</button>'+
+        '<button onclick="deleteUser('+u.id+',\''+h(u.username)+'\')" class="t-xs px-2 py-1 rounded" style="color:#f87171;border:1px solid rgba(248,113,113,.2)">Delete</button>'+
         '</div></div>';
     });
     $('user-list').innerHTML=rows||'<div class="text-xs" style="color:var(--z-muted)">No users.</div>';
@@ -1547,9 +1549,9 @@ pages['/admin']=function(){
 // ===== NUMBER/DID SEARCH (accessible from IP History or directly) =====
 pages['/number']=function(params){
   const preNum=params?params.get('q')||'':'';
-  $('main').innerHTML='<h1 class="text-lg font-semibold tracking-tight">Number Lookup</h1><p class="text-xs mt-0.5 mb-5" style="color:var(--z-muted)">Search call history by phone number or DID</p>'+
+  $('main').innerHTML='<h1 class="t-lg">Number Lookup</h1><p class="t-xs mt-1 mb-5" style="color:var(--z-sub)">Search call history by phone number or DID</p>'+
     '<div class="flex gap-2 mb-5"><input id="num-q" placeholder="Enter phone number (e.g. 7273491561)" value="'+h(preNum)+'" class="flex-1">'+
-    '<button onclick="numSearch()" class="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button></div>'+
+    '<button onclick="numSearch()" class="rounded-md px-3 py-1.5 sec-label" style="margin:0 cursor-pointer transition-colors" style="background:var(--z-ink);color:var(--z-bg)">Search</button></div>'+
     '<div id="num-r"></div>';
   $('num-q').addEventListener('keydown',e=>{if(e.key==='Enter')numSearch();});
   window.numSearch=async function(){
@@ -1557,23 +1559,23 @@ pages['/number']=function(params){
     $('num-r').innerHTML='<div class="card p-4 text-xs" style="color:var(--z-muted)">Searching...</div>';
     const d=await api('/api/number?q='+encodeURIComponent(q));
     if(!d||!d.total){$('num-r').innerHTML='<div class="card p-4 text-xs" style="color:var(--z-muted)">No calls found for '+h(q)+'.</div>';return;}
-    const asrColor=d.asr>=70?'v-green':d.asr>=40?'v-yellow':'v-red';
+    const asrColor=d.asr>=70?'c-ok':d.asr>=40?'c-warn':'c-err';
     let cards='<div class="grid grid-cols-2 xl:grid-cols-5 gap-3 mb-5">'+
-      kpi('Total Calls',d.total,'in last 60 min','v-blue')+
-      kpi('Answered',d.answered,'completed','v-green')+
-      kpi('Failed',d.failed,'rejected',d.failed>0?'v-red':'v-green')+
+      kpi('Total Calls',d.total,'in last 60 min','c-muted')+
+      kpi('Answered',d.answered,'completed','c-ok')+
+      kpi('Failed',d.failed,'rejected',d.failed>0?'c-err':'c-ok')+
       kpi('ASR',d.asr+'%','answer rate',asrColor)+
-      kpi('ACD',d.acd+'s','avg duration','v-purple')+'</div>';
+      kpi('ACD',d.acd+'s','avg duration','c-muted')+'</div>';
     let rows='';
     (d.calls||[]).forEach(c=>{
-      const sc=c.state==='completed'?'v-green':c.state==='failed'?'v-red':c.state==='in_progress'?'v-yellow':'';
+      const sc=c.state==='completed'?'c-ok':c.state==='failed'?'c-err':c.state==='in_progress'?'c-warn':'';
       rows+='<tr class="cursor-pointer" onclick="location.hash=\'#/ladder?call_id='+encodeURIComponent(c.call_id||'')+'\'">'+
         '<td class="mono c-accent truncate max-w-[180px]">'+h(c.call_id||'')+'</td>'+
         '<td>'+agentHtml(c.agent)+'</td><td class="mono">'+h(c.src||'')+'</td><td class="mono">'+h(c.dst||'')+'</td>'+
         '<td class="'+sc+'">'+h(c.state)+'</td><td class="mono">'+(c.status||'')+'</td>'+
         '<td style="color:var(--z-muted)">'+(c.first_ts_ms?timeAgo(c.first_ts_ms):'')+'</td></tr>';
     });
-    $('num-r').innerHTML=cards+'<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="text-xs font-medium">Calls for '+h(q)+'</div></div><table><thead><tr><th>Call-ID</th><th>Server</th><th>Source</th><th>Destination</th><th>State</th><th>Code</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    $('num-r').innerHTML=cards+'<div class="card"><div class="p-4" style="border-bottom:1px solid var(--z-line)"><div class="sec-label" style="margin:0">Calls for '+h(q)+'</div></div><table><thead><tr><th>Call-ID</th><th>Server</th><th>Source</th><th>Destination</th><th>State</th><th>Code</th><th>Time</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   };
   if(preNum)numSearch();
 };
@@ -1587,21 +1589,21 @@ pages['/wallboard']=function(){
     const rt=await api('/api/realtime?window=1');
     if(!rt)return;
     const asr=n(rt,'asr');const fails=n(rt,'resp_4xx')+n(rt,'resp_5xx');
-    $('wb').innerHTML='<div class="grid grid-cols-4 gap-6 mb-8">'+
-      '<div class="card p-8 text-center"><div class="text-[11px] uppercase tracking-widest" style="color:var(--z-dim)">Concurrent Calls</div><div class="text-5xl font-bold mono mt-3 v-pink">'+n(rt,'active_calls').toLocaleString()+'</div></div>'+
-      '<div class="card p-8 text-center"><div class="text-[11px] uppercase tracking-widest" style="color:var(--z-dim)">CPS</div><div class="text-5xl font-bold mono mt-3 v-green">'+perSec(n(rt,'invites'),60)+'</div></div>'+
-      '<div class="card p-8 text-center"><div class="text-[11px] uppercase tracking-widest" style="color:var(--z-dim)">ASR</div><div class="text-5xl font-bold mono mt-3 '+(asr>=70?'v-green':asr>=40?'v-yellow':'v-red')+'">'+asr+'%</div></div>'+
-      '<div class="card p-8 text-center"><div class="text-[11px] uppercase tracking-widest" style="color:var(--z-dim)">Failures</div><div class="text-5xl font-bold mono mt-3 '+(fails>0?'v-red':'v-green')+'">'+fails+'</div></div>'+
+    $('wb').innerHTML='<div class="grid grid-cols-4 gap-4 mb-8">'+
+      '<div class="card p-8 text-center"><div class="t-xs uppercase tracking-widest" style="color:var(--z-dim)">Concurrent Calls</div><div class="text-5xl font-bold mono mt-3 c-muted">'+n(rt,'active_calls').toLocaleString()+'</div></div>'+
+      '<div class="card p-8 text-center"><div class="t-xs uppercase tracking-widest" style="color:var(--z-dim)">CPS</div><div class="text-5xl font-bold mono mt-3 c-ok">'+perSec(n(rt,'invites'),60)+'</div></div>'+
+      '<div class="card p-8 text-center"><div class="t-xs uppercase tracking-widest" style="color:var(--z-dim)">ASR</div><div class="text-5xl font-bold mono mt-3 '+(asr>=70?'c-ok':asr>=40?'c-warn':'c-err')+'">'+asr+'%</div></div>'+
+      '<div class="card p-8 text-center"><div class="t-xs uppercase tracking-widest" style="color:var(--z-dim)">Failures</div><div class="text-5xl font-bold mono mt-3 '+(fails>0?'c-err':'c-ok')+'">'+fails+'</div></div>'+
       '</div>'+
       '<div class="grid grid-cols-6 gap-4">'+
-      '<div class="card p-5 text-center"><div class="text-[10px]" style="color:var(--z-dim)">Msg/sec</div><div class="text-2xl font-bold mono mt-1">'+perSec(n(rt,'total'),60)+'</div></div>'+
-      '<div class="card p-5 text-center"><div class="text-[10px]" style="color:var(--z-dim)">ACD</div><div class="text-2xl font-bold mono mt-1">'+n(rt,'acd_seconds')+'s</div></div>'+
-      '<div class="card p-5 text-center"><div class="text-[10px]" style="color:var(--z-dim)">2xx</div><div class="text-2xl font-bold mono mt-1 v-green">'+n(rt,'resp_2xx').toLocaleString()+'</div></div>'+
-      '<div class="card p-5 text-center"><div class="text-[10px]" style="color:var(--z-dim)">4xx</div><div class="text-2xl font-bold mono mt-1 v-yellow">'+n(rt,'resp_4xx').toLocaleString()+'</div></div>'+
-      '<div class="card p-5 text-center"><div class="text-[10px]" style="color:var(--z-dim)">5xx</div><div class="text-2xl font-bold mono mt-1 v-red">'+n(rt,'resp_5xx').toLocaleString()+'</div></div>'+
-      '<div class="card p-5 text-center"><div class="text-[10px]" style="color:var(--z-dim)">Agents</div><div class="text-2xl font-bold mono mt-1">'+n(rt,'agents_active')+'</div></div>'+
+      '<div class="card p-4 text-center"><div class="t-xs" style="color:var(--z-dim)">Msg/sec</div><div class="text-2xl font-bold mono mt-1">'+perSec(n(rt,'total'),60)+'</div></div>'+
+      '<div class="card p-4 text-center"><div class="t-xs" style="color:var(--z-dim)">ACD</div><div class="text-2xl font-bold mono mt-1">'+n(rt,'acd_seconds')+'s</div></div>'+
+      '<div class="card p-4 text-center"><div class="t-xs" style="color:var(--z-dim)">2xx</div><div class="text-2xl font-bold mono mt-1 c-ok">'+n(rt,'resp_2xx').toLocaleString()+'</div></div>'+
+      '<div class="card p-4 text-center"><div class="t-xs" style="color:var(--z-dim)">4xx</div><div class="text-2xl font-bold mono mt-1 c-warn">'+n(rt,'resp_4xx').toLocaleString()+'</div></div>'+
+      '<div class="card p-4 text-center"><div class="t-xs" style="color:var(--z-dim)">5xx</div><div class="text-2xl font-bold mono mt-1 c-err">'+n(rt,'resp_5xx').toLocaleString()+'</div></div>'+
+      '<div class="card p-4 text-center"><div class="t-xs" style="color:var(--z-dim)">Agents</div><div class="text-2xl font-bold mono mt-1">'+n(rt,'agents_active')+'</div></div>'+
       '</div>'+
-      '<div class="text-center mt-6 text-[10px]" style="color:var(--z-dim)">Zaman · '+new Date().toLocaleTimeString()+'</div>';
+      '<div class="text-center mt-5 t-xs" style="color:var(--z-dim)">Zaman · '+new Date().toLocaleTimeString()+'</div>';
   }
   poll(refreshWB,3000);
   // Restore sidebar on navigate away
