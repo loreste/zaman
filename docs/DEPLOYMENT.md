@@ -1,24 +1,21 @@
 # Zaman Deployment Guide
 
-This guide covers production-track Zaman v0.3 deployments. Keep environment-
-specific hosts, keys, customer names, and server labels out of source control.
-Use environment files, nginx configuration, firewall rules, and runtime labels
-managed from the dashboard.
+Production deployment guide for Zaman v0.4. Keep environment-specific hosts,
+keys, and server labels out of source control. Use environment files, nginx,
+firewall rules, and runtime labels managed from the dashboard.
 
 ---
 
 ## Sizing
 
-| Traffic | Calls/day | Recommended DB | CPU | RAM | Disk | Notes |
-|---------|-----------|----------------|-----|-----|------|-------|
-| Lab / POC | < 1,000 | SQLite | 1 vCPU | 1 GB | 10 GB | Local demo or test VM |
-| Small | 1,000-10,000 | SQLite or PostgreSQL | 2 vCPU | 2 GB | 20 GB | Single site |
-| Medium | 10,000-100,000 | PostgreSQL | 4 vCPU | 4 GB | 50 GB SSD | Production single region |
-| Large | 100,000-1M | PostgreSQL | 8 vCPU | 8 GB | 200 GB SSD | Multi-site ITSP |
-| Carrier | 1M+ | ClickHouse | 8+ vCPU | 16+ GB | 500 GB+ SSD | Long retention/high volume |
+| Traffic | Calls/day | CPU | RAM | Disk | Notes |
+|---------|-----------|-----|-----|------|-------|
+| Small | 1,000–10,000 | 2 vCPU | 2 GB | 20 GB | Single site |
+| Medium | 10,000–100,000 | 4 vCPU | 8 GB | 100 GB SSD | Production |
+| Large | 100,000–1M | 8 vCPU | 16 GB | 500 GB SSD | Multi-site |
 
-Rule of thumb: one captured SIP message is roughly 1 KB before database/index
-overhead. Plan retention from message volume, not just call volume.
+Rule of thumb: one captured SIP message is roughly 1 KB before index overhead.
+At 300K messages/hour with 2-day retention, expect ~50 GB of PostgreSQL data.
 
 ---
 
@@ -28,208 +25,101 @@ overhead. Plan retention from message volume, not just call volume.
 |------|----------|-----------|---------|----------|
 | 443 | TCP | inbound | Dashboard HTTPS via nginx | Users or VPN |
 | 80 | TCP | inbound | HTTP redirect to HTTPS | Users or VPN |
-| 9060 | UDP | inbound | HEP3 from SIP infrastructure | SIP/HEP peers only |
-| 9061 | TCP | inbound | HEP3 over TLS | Remote HEP peers only |
-| 9062 | TCP | inbound | HEP3 over TCP | LAN HEP peers only |
-| 5060 | UDP | inbound | SIP capture/echo | SIP infrastructure only |
-| 9090 | TCP | local | Core API | localhost/nginx only |
-| 3000 | TCP | local | Web UI | localhost/nginx only |
-
-Avoid exposing 9090 or 3000 directly. Put nginx in front of the web UI and keep
-the core API private.
+| 5060 | UDP | inbound | SIP capture | SIP infrastructure |
+| 9060 | UDP | inbound | HEP3 capture | HEP agents |
+| 9090 | TCP | internal | Core API | localhost only (UFW blocked) |
+| 3000 | TCP | internal | Web dashboard | localhost only (UFW blocked) |
 
 ---
 
-## Install Modes
-
-### Lab
+## Firewall
 
 ```bash
-sudo ZAMAN_DB=sqlite bash install.sh
+sudo ufw default deny incoming
+sudo ufw allow 22/tcp    # SSH
+sudo ufw allow 80/tcp    # HTTP redirect
+sudo ufw allow 443/tcp   # HTTPS
+sudo ufw allow 5060/udp  # SIP
+sudo ufw allow 9060/udp  # HEP
+sudo ufw enable
 ```
 
-Use this for local testing and quick demos.
+Ports 9090 and 3000 must NOT be exposed externally. Nginx proxies to 3000.
 
-### Production With PostgreSQL
+---
+
+## PostgreSQL Tuning
+
+For 8 GB RAM servers:
 
 ```bash
-sudo ZAMAN_DB=postgres ZAMAN_TLS=1 ZAMAN_DOMAIN=your-dashboard-domain bash install.sh
+sudo -u postgres psql -c "
+ALTER SYSTEM SET shared_buffers = '2GB';
+ALTER SYSTEM SET work_mem = '64MB';
+ALTER SYSTEM SET maintenance_work_mem = '512MB';
+ALTER SYSTEM SET effective_cache_size = '6GB';
+ALTER SYSTEM SET random_page_cost = 1.1;
+ALTER SYSTEM SET max_parallel_workers_per_gather = 2;
+"
+sudo systemctl restart postgresql
 ```
 
-Use a real DNS name in `ZAMAN_DOMAIN` at install time. Do not commit that value
-to the repository.
+---
 
-### High Volume With ClickHouse
+## Systemd Units
+
+**Core** (`/etc/systemd/system/zaman-core.service`):
+```ini
+[Service]
+ExecStart=/opt/zaman/bin/zaman-core
+EnvironmentFile=-/etc/zaman/core.env
+User=zaman
+Restart=always
+RestartSec=5
+```
+
+**Web** (`/etc/systemd/system/zaman-web.service`):
+```ini
+[Service]
+ExecStart=/opt/zaman/bin/zaman-web
+EnvironmentFile=-/etc/zaman/web.env
+User=zaman
+Restart=always
+RestartSec=5
+```
+
+---
+
+## Backups
+
+Daily PostgreSQL backup with 7-day rotation:
 
 ```bash
-sudo ZAMAN_DB=clickhouse ZAMAN_CH_URL=your-clickhouse-http-url bash install.sh
+# /etc/cron.d/zaman-backup
+0 2 * * * zaman pg_dump -Fc zaman -f /opt/zaman/backups/zaman-$(date +\%Y\%m\%d).dump && find /opt/zaman/backups -name "*.dump" -mtime +7 -delete
 ```
 
-Use ClickHouse when retention and ingest rate outgrow PostgreSQL.
+---
 
-### Non-Interactive Automation
+## Cross-Compilation
+
+Build for Linux from macOS:
 
 ```bash
-sudo ZAMAN_DB=postgres \
-  ZAMAN_TLS=1 \
-  ZAMAN_DOMAIN=your-dashboard-domain \
-  ZAMAN_HEP_TLS_ENABLED=1 \
-  bash install.sh
+cd core-go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ../bin/zaman-core .
+cd web && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ../bin/zaman-web .
 ```
 
----
-
-## Recommended Production Shape
-
-```text
-SIP proxy / SBC / PBX
-        |
-        | HEP3 UDP/TCP/TLS
-        v
-zaman-core  ---> PostgreSQL or ClickHouse
-        |
-        | localhost API
-        v
-zaman-web
-        |
-        | localhost
-        v
-nginx :80/:443
-        |
-        v
-operators / NOC / VPN
-```
-
-For live voice networks, change SIP proxy configuration conservatively:
-
-1. Back up the current SIP proxy config.
-2. Add HEP mirroring without changing routing logic.
-3. Validate syntax with the SIP proxy's native config checker.
-4. Reload only if the checker passes.
-5. Confirm HEP traffic appears in `/messages`, `/calls`, and `/ladder`.
+Both binaries are statically linked with zero external dependencies.
 
 ---
 
-## Post-Install Checklist
+## Deployment Steps
 
-- [ ] Log in and rotate the initial admin password.
-- [ ] Create named admin/operator/viewer accounts.
-- [ ] Configure nginx and TLS for dashboard access.
-- [ ] Keep `zaman-core` and `zaman-web` bound behind nginx.
-- [ ] Set `ZAMAN_API_KEY` for the core API.
-- [ ] Configure `ZAMAN_HEP_ALLOW` or firewall rules for trusted HEP peers.
-- [ ] Point SIP infrastructure at HEP port 9060, 9061, or 9062.
-- [ ] Verify realtime CPS, concurrent calls, live feed, and active calls.
-- [ ] Open a real `/ladder?call_id=...` page and confirm all SIP responses show.
-- [ ] Label SIP nodes in `/noc` and site/customer/carrier IPs in `/ip`.
-- [ ] Set SLA targets in `/sla`.
-- [ ] Configure alert rules and delivery channels in `/alerts`.
-- [ ] Configure retention in `/etc/zaman/core.env`.
-- [ ] Generate API tokens for automation from `/admin/tokens`.
-- [ ] Set up Prometheus scraping if external monitoring is required.
-
----
-
-## HEP Sender Notes
-
-Zaman expects HEP3 packets from SIP infrastructure. The exact sender syntax
-depends on the SIP proxy or capture agent, but the operational pattern is the
-same:
-
-- Send mirrored SIP signaling to the Zaman HEP listener.
-- Prefer a private network or HEP/TLS for remote sites.
-- Use runtime HEP agent names to identify sources.
-- Do not hardcode production collector IPs in committed examples.
-- Confirm received traffic in `/messages` and grouped dialogs in `/calls`.
-
----
-
-## Runtime Labels
-
-Runtime labels are stored outside source control:
-
-| Label Type | UI | Runtime File |
-|------------|----|--------------|
-| Node/server names | `/noc` | `zaman-node-names.json` |
-| Site/customer/carrier IP labels | `/ip` | `zaman-site-labels.json` |
-
-Use these labels for local names such as SIP proxy names, carriers, customer
-sites, and private routing identifiers. Do not commit those values.
-
----
-
-## Retention Planning
-
-| Retention | 10k calls/day | 100k calls/day | 1M calls/day |
-|-----------|---------------|----------------|--------------|
-| 7 days | 350 MB | 3.5 GB | 35 GB |
-| 30 days | 1.5 GB | 15 GB | 150 GB |
-| 90 days | 4.5 GB | 45 GB | 450 GB |
-| 365 days | 18 GB | 180 GB | 1.8 TB |
-
-Set `ZAMAN_DB_RETENTION_DAYS` in `/etc/zaman/core.env`. It prunes raw captures,
-call summaries, and daily rollups in small batches (LIMIT 500) every 1024
-inserts to avoid blocking the DB writer. Use `0` only when an external
-retention process is in place.
-
-For PostgreSQL deployments, schedule a daily `VACUUM` cron to reclaim disk
-from deleted rows. Without VACUUM, PostgreSQL marks dead tuples as reusable
-but does not return space to the OS.
-
----
-
-## Upgrades
-
-```bash
-cd /opt/zaman
-git pull
-make build
-sudo systemctl restart zaman-core zaman-web
-```
-
-Configuration in `/etc/zaman/` is preserved. Database schema migrations run at
-startup.
-
----
-
-## Backup
-
-```bash
-# SQLite
-cp /opt/zaman/data/zaman.db /backup/zaman-$(date +%Y%m%d).db
-
-# PostgreSQL
-pg_dump -U zaman zaman > /backup/zaman-$(date +%Y%m%d).sql
-
-# Config and runtime JSON state
-tar czf /backup/zaman-config-$(date +%Y%m%d).tar.gz /etc/zaman/ /opt/zaman/data/*.json
-```
-
-Back up runtime JSON files because they contain users, tokens, alert rules,
-node labels, IP labels, and audit state.
-
----
-
-## Troubleshooting
-
-```bash
-systemctl status zaman-core
-systemctl status zaman-web
-
-journalctl -u zaman-core -f
-journalctl -u zaman-web -f
-
-curl http://127.0.0.1:9090/api/health
-
-python3 /opt/zaman/scripts/send_hep.py --port 9060
-python3 /opt/zaman/scripts/send_options.py 127.0.0.1 5060
-```
-
-Useful UI checks:
-
-- `/` for realtime CPS, concurrent calls, active calls, and live feed.
-- `/messages` for raw capture visibility and filters.
-- `/calls` for active and recent dialogs.
-- `/ladder?call_id=...` for full SIP ladder rows and responses.
-- `/ip` for source/destination history and labels.
-- `/report` for exportable telecom KPIs.
+1. Build or cross-compile both binaries
+2. SCP to server: `scp bin/zaman-core bin/zaman-web user@server:/opt/zaman/bin/`
+3. Copy static files: `scp -r web/static/* user@server:/opt/zaman/web/static/`
+4. Set permissions: `chown -R zaman:zaman /opt/zaman`
+5. Configure `/etc/zaman/core.env` and `/etc/zaman/web.env`
+6. Restart services: `systemctl restart zaman-core zaman-web`
+7. Verify: `curl http://127.0.0.1:9090/api/health`
