@@ -327,65 +327,35 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// DB writer
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		dbWriter(ctx, db, cfg, metrics, dbCh)
-	}()
+	// safeGo wraps goroutines with panic recovery — logs the panic
+	// and lets the goroutine exit. systemd Restart=always handles
+	// full process recovery if a critical worker dies.
+	safeGo := func(name string, fn func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("PANIC in %s: %v", name, r)
+				}
+			}()
+			fn()
+		}()
+	}
 
-	// Cache worker
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		cacheWorker(ctx, db, cfg, metrics, cache)
-	}()
+	safeGo("dbWriter", func() { dbWriter(ctx, db, cfg, metrics, dbCh) })
+	safeGo("cacheWorker", func() { cacheWorker(ctx, db, cfg, metrics, cache) })
+	safeGo("sipWorker", func() { sipWorker(ctx, cfg, metrics, ring, dbCh) })
+	safeGo("hepUDPWorker", func() { hepUDPWorker(ctx, cfg, metrics, ring, dbCh) })
 
-	// SIP worker
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		sipWorker(ctx, cfg, metrics, ring, dbCh)
-	}()
-
-	// HEP UDP worker
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		hepUDPWorker(ctx, cfg, metrics, ring, dbCh)
-	}()
-
-	// HEP TCP worker (optional)
 	if cfg.HEPTCPPort > 0 && cfg.HEPTCPPort != cfg.HEPPort {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			hepTCPWorker(ctx, cfg, metrics, ring, dbCh)
-		}()
+		safeGo("hepTCPWorker", func() { hepTCPWorker(ctx, cfg, metrics, ring, dbCh) })
 	}
-
-	// HEP TLS worker (optional)
 	if cfg.HEPTLS && cfg.HEPTLSCert != "" && cfg.HEPTLSKey != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			hepTLSWorker(ctx, cfg, metrics, ring, dbCh)
-		}()
+		safeGo("hepTLSWorker", func() { hepTLSWorker(ctx, cfg, metrics, ring, dbCh) })
 	}
-
-	// HTTP API worker
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		apiWorker(ctx, db, cfg, metrics, ring, cache, dbCh)
-	}()
-
-	// Alert webhook worker
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		alertWorker(ctx, db, cfg)
-	}()
+	safeGo("apiWorker", func() { apiWorker(ctx, db, cfg, metrics, ring, cache, dbCh) })
+	safeGo("alertWorker", func() { alertWorker(ctx, db, cfg) })
 
 	log.Printf("zaman-core ready")
 	wg.Wait()

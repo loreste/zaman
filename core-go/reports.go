@@ -2,28 +2,23 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// buildTrendJSON returns daily ASR/ACD/volume for historical analysis.
-// Uses report_daily + call_state for up to 30 days even with short capture retention.
-func buildTrendJSON(db *sql.DB, days int) string {
-	if days <= 0 || days > 90 {
-		days = 14
-	}
-	cutoffMs := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
-
-	// Daily call metrics from call_state (survives longer than captures)
+// buildTrendBucketJSON queries call_state bucketed by divisorMs, formats each row via fmtRow.
+func buildTrendBucketJSON(db *sql.DB, cutoffMs int64, divisorMs int64, fmtRow func(bucket, total, answered, failed, asr, acd int64) string) string {
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT (first_ts_ms / 86400000) AS day_bucket,
+		SELECT (first_ts_ms / %d) AS bucket,
 			count(*) AS total,
 			count(*) FILTER (WHERE answered=1) AS answered,
 			count(*) FILTER (WHERE answered=0 AND open=0 AND last_status >= 400) AS failed,
 			COALESCE(round(avg((last_ts_ms-answer_ts_ms)/1000.0) FILTER (WHERE answered=1 AND open=0 AND answer_ts_ms>0 AND last_ts_ms>answer_ts_ms)),0) AS acd
 		FROM call_state WHERE first_ts_ms >= %d
-		GROUP BY day_bucket ORDER BY day_bucket`, cutoffMs))
+		GROUP BY bucket ORDER BY bucket`, divisorMs, cutoffMs))
 	if err != nil {
 		return "[]"
 	}
@@ -39,13 +34,22 @@ func buildTrendJSON(db *sql.DB, days int) string {
 			asr = answered * 100 / completed
 			if asr > 100 { asr = 100 }
 		}
-		// Convert bucket back to date string
-		day := time.Unix(bucket*86400, 0).UTC().Format("2006-01-02")
-		parts = append(parts, fmt.Sprintf(
-			`{"day":"%s","total":%d,"answered":%d,"failed":%d,"asr":%d,"acd":%d}`,
-			day, total, answered, failed, asr, acd))
+		parts = append(parts, fmtRow(bucket, total, answered, failed, asr, acd))
 	}
 	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// buildTrendJSON returns daily ASR/ACD/volume for historical analysis.
+func buildTrendJSON(db *sql.DB, days int) string {
+	if days <= 0 || days > 90 {
+		days = 14
+	}
+	cutoffMs := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+	return buildTrendBucketJSON(db, cutoffMs, 86400000, func(bucket, total, answered, failed, asr, acd int64) string {
+		day := time.Unix(bucket*86400, 0).UTC().Format("2006-01-02")
+		return fmt.Sprintf(`{"day":"%s","total":%d,"answered":%d,"failed":%d,"asr":%d,"acd":%d}`,
+			day, total, answered, failed, asr, acd)
+	})
 }
 
 // buildHourlyTrendJSON returns hourly metrics for the last N hours.
@@ -54,36 +58,10 @@ func buildHourlyTrendJSON(db *sql.DB, hours int) string {
 		hours = 24
 	}
 	cutoffMs := time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
-
-	rows, err := db.Query(fmt.Sprintf(`
-		SELECT (first_ts_ms / 3600000) AS hour_bucket,
-			count(*) AS total,
-			count(*) FILTER (WHERE answered=1) AS answered,
-			count(*) FILTER (WHERE answered=0 AND open=0 AND last_status >= 400) AS failed,
-			COALESCE(round(avg((last_ts_ms-answer_ts_ms)/1000.0) FILTER (WHERE answered=1 AND open=0 AND answer_ts_ms>0 AND last_ts_ms>answer_ts_ms)),0) AS acd
-		FROM call_state WHERE first_ts_ms >= %d
-		GROUP BY hour_bucket ORDER BY hour_bucket`, cutoffMs))
-	if err != nil {
-		return "[]"
-	}
-	defer rows.Close()
-
-	var parts []string
-	for rows.Next() {
-		var bucket, total, answered, failed, acd int64
-		rows.Scan(&bucket, &total, &answered, &failed, &acd)
-		completed := answered + failed
-		asr := int64(0)
-		if completed > 0 {
-			asr = answered * 100 / completed
-			if asr > 100 { asr = 100 }
-		}
-		ts := bucket * 3600000
-		parts = append(parts, fmt.Sprintf(
-			`{"ts":%d,"total":%d,"answered":%d,"failed":%d,"asr":%d,"acd":%d}`,
-			ts, total, answered, failed, asr, acd))
-	}
-	return "[" + strings.Join(parts, ",") + "]"
+	return buildTrendBucketJSON(db, cutoffMs, 3600000, func(bucket, total, answered, failed, asr, acd int64) string {
+		return fmt.Sprintf(`{"ts":%d,"total":%d,"answered":%d,"failed":%d,"asr":%d,"acd":%d}`,
+			bucket*3600000, total, answered, failed, asr, acd)
+	})
 }
 
 func csvField(v interface{}) string {
@@ -612,17 +590,23 @@ func buildMessagesJSON(db *sql.DB, limit int, callID, transport, agent, method, 
 	}
 	if status != "" {
 		// Support status ranges: "4" matches 4xx, "48" matches 480-489
-		if len(status) < 3 {
-			where += fmt.Sprintf(" AND CAST(status AS TEXT) LIKE '%s%%'", sqlQuote(status))
-		} else {
-			where += fmt.Sprintf(" AND status=%s", sqlQuote(status))
+		if _, err := strconv.Atoi(status); err == nil {
+			if len(status) < 3 {
+				where += fmt.Sprintf(" AND CAST(status AS TEXT) LIKE '%s%%'", status)
+			} else {
+				where += fmt.Sprintf(" AND status=%s", status)
+			}
 		}
 	}
 	if sinceMs != "" {
-		where += fmt.Sprintf(" AND ts_ms >= %s", sqlQuote(sinceMs))
+		if _, err := strconv.ParseInt(sinceMs, 10, 64); err == nil {
+			where += fmt.Sprintf(" AND ts_ms >= %s", sinceMs)
+		}
 	}
 	if untilMs != "" {
-		where += fmt.Sprintf(" AND ts_ms <= %s", sqlQuote(untilMs))
+		if _, err := strconv.ParseInt(untilMs, 10, 64); err == nil {
+			where += fmt.Sprintf(" AND ts_ms <= %s", untilMs)
+		}
 	}
 
 	if limit <= 0 || limit > 5000 {
@@ -631,7 +615,7 @@ func buildMessagesJSON(db *sql.DB, limit int, callID, transport, agent, method, 
 
 	rows, err := db.Query(fmt.Sprintf(`
 		SELECT id, ts_ms, src, dst, transport, proto, agent, kind, method, status,
-			call_id, from_h, to_h, cseq, ruri, hep_node_id, hep_node, hep_cid, size, raw_b64
+			call_id, from_h, to_h, cseq, ruri, hep_node_id, hep_node, hep_cid, size, COALESCE(raw, ''), raw_b64
 		FROM captures WHERE %s
 		ORDER BY ts_ms DESC, id DESC LIMIT %d`, where, limit))
 	if err != nil {
@@ -645,13 +629,18 @@ func buildMessagesJSON(db *sql.DB, limit int, callID, transport, agent, method, 
 		var src, dst, transport, proto, agent, kind, method string
 		var status, hepNodeID, size int
 		var callID, fromH, toH, cseq, ruri, hepNode, hepCID, rawB64 string
+		var rawBytes []byte
 		rows.Scan(&id, &tsMs, &src, &dst, &transport, &proto, &agent, &kind, &method, &status,
-			&callID, &fromH, &toH, &cseq, &ruri, &hepNodeID, &hepNode, &hepCID, &size, &rawB64)
+			&callID, &fromH, &toH, &cseq, &ruri, &hepNodeID, &hepNode, &hepCID, &size, &rawBytes, &rawB64)
+		b64 := rawB64
+		if len(rawBytes) > 0 {
+			b64 = base64.StdEncoding.EncodeToString(rawBytes)
+		}
 		parts = append(parts, fmt.Sprintf(
 			`{"id":%d,"ts_ms":%d,"src":"%s","dst":"%s","transport":"%s","proto":"%s","agent":"%s","kind":"%s","method":"%s","status":%d,"call_id":"%s","from_h":"%s","to_h":"%s","cseq":"%s","ruri":"%s","hep_node_id":%d,"hep_node":"%s","hep_cid":"%s","size":%d,"raw_b64":"%s"}`,
 			id, tsMs, jesc(src), jesc(dst), jesc(transport), jesc(proto), jesc(agent),
 			jesc(kind), jesc(method), status, jesc(callID), jesc(fromH), jesc(toH),
-			jesc(cseq), jesc(ruri), hepNodeID, jesc(hepNode), jesc(hepCID), size, jesc(rawB64)))
+			jesc(cseq), jesc(ruri), hepNodeID, jesc(hepNode), jesc(hepCID), size, jesc(b64)))
 	}
 	return "[" + strings.Join(parts, ",") + "]"
 }
@@ -759,64 +748,42 @@ func buildCPSJSON(db *sql.DB, minutes int) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-// buildSLADestJSON returns SLA metrics per destination IP with ASR and ACD.
-func buildSLADestJSON(db *sql.DB, cfg *Config) string {
+// buildSLAByIPJSON returns SLA metrics grouped by a column (src or dst).
+func buildSLAByIPJSON(db *sql.DB, cfg *Config, col, jsonKey string) string {
 	cutoffMs := time.Now().Add(-5 * time.Minute).UnixMilli()
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT split_part(dst,':',1) AS dest,
+		SELECT split_part(%s,':',1) AS ip,
 			count(*) FILTER (WHERE invite_id > 0) AS invites,
 			count(*) FILTER (WHERE answered=1) AS ok_2xx,
 			count(*) FILTER (WHERE answered=0 AND open=0 AND last_status >= 400) AS errors,
 			COALESCE(round(avg((last_ts_ms - answer_ts_ms)/1000.0) FILTER (WHERE answered=1 AND open=0 AND answer_ts_ms > 0 AND last_ts_ms > answer_ts_ms)),0) AS acd
 		FROM call_state WHERE first_ts_ms >= %d
-		GROUP BY dest HAVING count(*) FILTER (WHERE invite_id > 0) > 0
-		ORDER BY invites DESC LIMIT 50`, cutoffMs))
+		GROUP BY ip HAVING count(*) FILTER (WHERE invite_id > 0) > 0
+		ORDER BY invites DESC LIMIT 50`, col, cutoffMs))
 	if err != nil {
 		return "[]"
 	}
 	defer rows.Close()
 	var parts []string
 	for rows.Next() {
-		var dest string
+		var ip string
 		var invites, ok2xx, errors, acd int64
-		rows.Scan(&dest, &invites, &ok2xx, &errors, &acd)
+		rows.Scan(&ip, &invites, &ok2xx, &errors, &acd)
 		asr := int64(0)
 		if invites > 0 { asr = ok2xx * 100 / invites; if asr > 100 { asr = 100 } }
 		parts = append(parts, fmt.Sprintf(
-			`{"dst":"%s","invites":%d,"ok_2xx":%d,"errors":%d,"asr":%d,"acd":%d}`,
-			jesc(dest), invites, ok2xx, errors, asr, acd))
+			`{"%s":"%s","invites":%d,"ok_2xx":%d,"errors":%d,"asr":%d,"acd":%d}`,
+			jsonKey, jesc(ip), invites, ok2xx, errors, asr, acd))
 	}
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-// buildSLASrcJSON returns SLA metrics per source IP with ASR and ACD.
+func buildSLADestJSON(db *sql.DB, cfg *Config) string {
+	return buildSLAByIPJSON(db, cfg, "dst", "dst")
+}
+
 func buildSLASrcJSON(db *sql.DB, cfg *Config) string {
-	cutoffMs := time.Now().Add(-5 * time.Minute).UnixMilli()
-	rows, err := db.Query(fmt.Sprintf(`
-		SELECT split_part(src,':',1) AS source,
-			count(*) FILTER (WHERE invite_id > 0) AS invites,
-			count(*) FILTER (WHERE answered=1) AS ok_2xx,
-			count(*) FILTER (WHERE answered=0 AND open=0 AND last_status >= 400) AS errors,
-			COALESCE(round(avg((last_ts_ms - answer_ts_ms)/1000.0) FILTER (WHERE answered=1 AND open=0 AND answer_ts_ms > 0 AND last_ts_ms > answer_ts_ms)),0) AS acd
-		FROM call_state WHERE first_ts_ms >= %d
-		GROUP BY source HAVING count(*) FILTER (WHERE invite_id > 0) > 0
-		ORDER BY invites DESC LIMIT 50`, cutoffMs))
-	if err != nil {
-		return "[]"
-	}
-	defer rows.Close()
-	var parts []string
-	for rows.Next() {
-		var source string
-		var invites, ok2xx, errors, acd int64
-		rows.Scan(&source, &invites, &ok2xx, &errors, &acd)
-		asr := int64(0)
-		if invites > 0 { asr = ok2xx * 100 / invites; if asr > 100 { asr = 100 } }
-		parts = append(parts, fmt.Sprintf(
-			`{"src":"%s","invites":%d,"ok_2xx":%d,"errors":%d,"asr":%d,"acd":%d}`,
-			jesc(source), invites, ok2xx, errors, asr, acd))
-	}
-	return "[" + strings.Join(parts, ",") + "]"
+	return buildSLAByIPJSON(db, cfg, "src", "src")
 }
 
 // buildCarrierScoreJSON returns detailed per-carrier metrics with breakdown.

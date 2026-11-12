@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	json2 "encoding/json"
 	"fmt"
 	"io"
@@ -81,21 +82,23 @@ func apiWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, r
 	rl := newAPIRateLimiter()
 	mux := http.NewServeMux()
 
+	// extractAPIKey pulls the key from X-API-Key header or Authorization: Bearer.
+	extractAPIKey := func(r *http.Request) string {
+		if key := r.Header.Get("X-API-Key"); key != "" {
+			return key
+		}
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			return auth[7:]
+		}
+		return ""
+	}
+
 	// Auth middleware
 	requireAuth := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if cfg.APIKey != "" {
-				key := r.Header.Get("X-API-Key")
-				if key == "" {
-					auth := r.Header.Get("Authorization")
-					if strings.HasPrefix(auth, "Bearer ") {
-						key = auth[7:]
-					}
-				}
-				if !constantTimeEqual(key, cfg.APIKey) {
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-					return
-				}
+			if cfg.APIKey != "" && !constantTimeEqual(extractAPIKey(r), cfg.APIKey) {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
 			}
 			next(w, r)
 		}
@@ -119,22 +122,12 @@ func apiWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, r
 	}
 
 	// ---- Health ----
-	mux.HandleFunc("/health", withRateLimit(func(w http.ResponseWriter, r *http.Request) {
-		// Basic health always available
-		if cfg.APIKey != "" {
-			key := r.Header.Get("X-API-Key")
-			if key == "" {
-				auth := r.Header.Get("Authorization")
-				if strings.HasPrefix(auth, "Bearer ") {
-					key = auth[7:]
-				}
-			}
-			if !constantTimeEqual(key, cfg.APIKey) {
-				json(w, `{"ok":true}`)
-				return
-			}
+	healthHandler := withRateLimit(func(w http.ResponseWriter, r *http.Request) {
+		// Unauthenticated callers get a simple ok (load balancer probes)
+		if cfg.APIKey != "" && !constantTimeEqual(extractAPIKey(r), cfg.APIKey) {
+			json(w, `{"ok":true}`)
+			return
 		}
-		// Detailed health
 		metrics.mu.Lock()
 		uptime := time.Since(metrics.StartTime).Milliseconds()
 		dbOk := metrics.DBOk
@@ -149,35 +142,9 @@ func apiWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, r
 			Version, uptime, cfg.DBDriver, dbOk, dbErr, dbDrop,
 			cfg.RetentionDays, time.Now().Add(-time.Duration(cfg.RetentionDays)*24*time.Hour).UnixMilli(),
 			cfg.RetentionDays > 0, captures))
-	}))
-	// /api/health is just an alias
-	mux.HandleFunc("/api/health", withRateLimit(func(w http.ResponseWriter, r *http.Request) {
-		if cfg.APIKey != "" {
-			key := r.Header.Get("X-API-Key")
-			if key == "" {
-				auth := r.Header.Get("Authorization")
-				if strings.HasPrefix(auth, "Bearer ") {
-					key = auth[7:]
-				}
-			}
-			if !constantTimeEqual(key, cfg.APIKey) {
-				json(w, `{"ok":true}`)
-				return
-			}
-		}
-		metrics.mu.Lock()
-		uptime := time.Since(metrics.StartTime).Milliseconds()
-		dbOk := metrics.DBOk
-		dbErr := metrics.DBErr
-		dbDrop := metrics.DBDrop
-		metrics.mu.Unlock()
-		var captures int64
-		db.QueryRow("SELECT reltuples::bigint FROM pg_class WHERE relname='captures'").Scan(&captures)
-		json(w, fmt.Sprintf(`{"ok":true,"service":"zaman-core","version":"%s","uptime_ms":%d,"db":{"driver":"%s","writes_ok":%d,"writes_err":%d,"writes_dropped":%d},"retention":{"days":%d,"cutoff_ms":%d,"enabled":%t},"captures":%d,"channel_capacity":4096}`,
-			Version, uptime, cfg.DBDriver, dbOk, dbErr, dbDrop,
-			cfg.RetentionDays, time.Now().Add(-time.Duration(cfg.RetentionDays)*24*time.Hour).UnixMilli(),
-			cfg.RetentionDays > 0, captures))
-	}))
+	})
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/health", healthHandler)
 
 	// ---- Metrics ----
 	mux.HandleFunc("/api/metrics", withRateLimit(requireAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -278,22 +245,27 @@ func apiWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, r
 			return
 		}
 		row := db.QueryRow(`SELECT id, ts_ms, src, dst, transport, proto, agent, kind, method, status,
-			call_id, from_h, to_h, cseq, ruri, hep_node_id, hep_node, hep_cid, size, raw_b64
+			call_id, from_h, to_h, cseq, ruri, hep_node_id, hep_node, hep_cid, size, COALESCE(raw, ''), raw_b64
 			FROM captures WHERE id=$1`, id)
 		var mid, tsMs int64
 		var src, dst, transport, proto, agent, kind, method string
 		var status, hepNodeID, size int
 		var callID, fromH, toH, cseq, ruri, hepNode, hepCID, rawB64 string
+		var rawBytes []byte
 		if err := row.Scan(&mid, &tsMs, &src, &dst, &transport, &proto, &agent, &kind, &method, &status,
-			&callID, &fromH, &toH, &cseq, &ruri, &hepNodeID, &hepNode, &hepCID, &size, &rawB64); err != nil {
+			&callID, &fromH, &toH, &cseq, &ruri, &hepNodeID, &hepNode, &hepCID, &size, &rawBytes, &rawB64); err != nil {
 			json(w, "null")
 			return
+		}
+		b64 := rawB64
+		if len(rawBytes) > 0 {
+			b64 = base64.StdEncoding.EncodeToString(rawBytes)
 		}
 		json(w, fmt.Sprintf(
 			`{"id":%d,"ts_ms":%d,"src":"%s","dst":"%s","transport":"%s","proto":"%s","agent":"%s","kind":"%s","method":"%s","status":%d,"call_id":"%s","from_h":"%s","to_h":"%s","cseq":"%s","ruri":"%s","hep_node_id":%d,"hep_node":"%s","hep_cid":"%s","size":%d,"raw_b64":"%s"}`,
 			mid, tsMs, jesc(src), jesc(dst), jesc(transport), jesc(proto), jesc(agent),
 			jesc(kind), jesc(method), status, jesc(callID), jesc(fromH), jesc(toH),
-			jesc(cseq), jesc(ruri), hepNodeID, jesc(hepNode), jesc(hepCID), size, jesc(rawB64)))
+			jesc(cseq), jesc(ruri), hepNodeID, jesc(hepNode), jesc(hepCID), size, jesc(b64)))
 	})))
 
 	// ---- Report endpoints ----
@@ -604,8 +576,7 @@ func apiWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, r
 
 	// ---- Stats ----
 	mux.HandleFunc("/api/stats", withRateLimit(requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		// Redirect to metrics
-		mux.ServeHTTP(w, r)
+		http.Redirect(w, r, "/api/metrics", http.StatusTemporaryRedirect)
 	})))
 
 	// ---- Probe ----

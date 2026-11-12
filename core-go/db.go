@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -49,6 +50,7 @@ func dbInit(cfg *Config) (*sql.DB, error) {
 			hep_cid     TEXT DEFAULT '',
 			size        INTEGER DEFAULT 0,
 			raw_b64     TEXT DEFAULT '',
+			raw         BYTEA DEFAULT '',
 			record_json TEXT DEFAULT ''
 		) PARTITION BY RANGE (ts_ms)
 	`)
@@ -63,6 +65,9 @@ func dbInit(cfg *Config) (*sql.DB, error) {
 			return nil, fmt.Errorf("create captures: %w", err)
 		}
 	}
+
+	// Migration: add raw BYTEA column if missing (existing installs)
+	db.Exec("ALTER TABLE captures ADD COLUMN IF NOT EXISTS raw BYTEA DEFAULT ''")
 
 	// Check if table is partitioned before trying to create partitions
 	var isPartitioned bool
@@ -104,15 +109,24 @@ func dbInit(cfg *Config) (*sql.DB, error) {
 		log.Printf("db: call_state create (may exist): %v", err)
 	}
 
-	// call_state indexes
+	// call_state indexes — only the ones actually used by queries
 	for _, idx := range []string{
 		"CREATE INDEX IF NOT EXISTS idx_call_state_open_agent_last ON call_state (open, agent, last_ts_ms DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_call_state_first ON call_state (first_ts_ms DESC)",
-		"CREATE INDEX IF NOT EXISTS idx_call_state_first_answered ON call_state (first_ts_ms DESC, answered)",
 		"CREATE INDEX IF NOT EXISTS idx_call_state_first_open_status ON call_state (first_ts_ms DESC, open, last_status)",
 		"CREATE INDEX IF NOT EXISTS idx_call_state_agent_last ON call_state (agent, last_ts_ms DESC)",
 	} {
 		db.Exec(idx)
+	}
+	// Drop legacy indexes that waste space (LIKE '%x%' can't use btree)
+	for _, drop := range []string{
+		"DROP INDEX IF EXISTS idx_call_state_dst_last",
+		"DROP INDEX IF EXISTS idx_call_state_src_last",
+		"DROP INDEX IF EXISTS idx_call_state_to_last",
+		"DROP INDEX IF EXISTS idx_call_state_from_last",
+		"DROP INDEX IF EXISTS idx_call_state_first_answered",
+	} {
+		db.Exec(drop)
 	}
 
 	// report_daily table
@@ -161,7 +175,7 @@ func createDayPartition(db *sql.DB, day time.Time) {
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s_call_id ON %s (call_id)", name, name),
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s_agent_ts ON %s (agent, ts_ms DESC)", name, name),
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s_ts ON %s (ts_ms DESC)", name, name),
-			fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s_method_kind_ts ON %s (method, kind, ts_ms DESC, call_id)", name, name),
+			fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s_method_kind_ts ON %s (method, kind, ts_ms DESC)", name, name),
 		} {
 			db.Exec(idx)
 		}
@@ -224,6 +238,7 @@ type CaptureRecord struct {
 	HEPCID        string `json:"hep_cid"`
 	Size          int    `json:"size"`
 	RawB64        string `json:"raw_b64"`
+	RawBytes      []byte `json:"-"` // populated from raw_b64 at insert time
 }
 
 // dbWriter consumes records from the channel and batch-inserts into PostgreSQL.
@@ -243,6 +258,22 @@ func dbWriter(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, ch
 	retentionTick := time.NewTicker(15 * time.Minute)
 	defer retentionTick.Stop()
 
+	// DB health: log when connection drops and recovers
+	dbHealthy := true
+	checkDB := func() {
+		ctx2, cancel2 := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel2()
+		if err := db.PingContext(ctx2); err != nil {
+			if dbHealthy {
+				log.Printf("db: connection lost: %v", err)
+				dbHealthy = false
+			}
+		} else if !dbHealthy {
+			log.Printf("db: connection restored")
+			dbHealthy = true
+		}
+	}
+
 	flush := func() {
 		if len(batch) == 0 {
 			return
@@ -256,9 +287,12 @@ func dbWriter(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, ch
 			}
 			recs = append(recs, rec)
 		}
-		if err := dbBatchInsert(db, recs, batch, metrics); err != nil {
+		if err := dbBatchInsert(db, recs, metrics); err != nil {
 			metrics.Inc(&metrics.DBErr, int64(len(recs)))
-			if metrics.DBErr%100 < int64(len(recs)) {
+			metrics.mu.Lock()
+			shouldLog := metrics.DBErr%100 < int64(len(recs))
+			metrics.mu.Unlock()
+			if shouldLog {
 				log.Printf("db: batch insert error: %v", err)
 			}
 		} else {
@@ -275,10 +309,15 @@ func dbWriter(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, ch
 		case <-partitionTick.C:
 			ensurePartitions(db, time.Now())
 		case <-retentionTick.C:
+			checkDB()
 			dropOldPartitions(db, cfg.RetentionDays)
 			if cfg.RetentionDays > 0 {
 				cutoffMs := time.Now().Add(-time.Duration(cfg.RetentionDays) * 24 * time.Hour).UnixMilli()
-				db.Exec("DELETE FROM call_state WHERE last_ts_ms < $1", cutoffMs)
+				delCtx, delCancel := context.WithTimeout(ctx, 30*time.Second)
+				if _, err := db.ExecContext(delCtx, "DELETE FROM call_state WHERE last_ts_ms < $1", cutoffMs); err != nil {
+					log.Printf("db: call_state cleanup: %v", err)
+				}
+				delCancel()
 			}
 		case <-flushTick.C:
 			flush()
@@ -296,7 +335,7 @@ func dbWriter(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics, ch
 }
 
 // dbBatchInsert inserts multiple records in a single transaction.
-func dbBatchInsert(db *sql.DB, recs []CaptureRecord, rawJSONs []string, metrics *Metrics) error {
+func dbBatchInsert(db *sql.DB, recs []CaptureRecord, metrics *Metrics) error {
 	if len(recs) == 0 {
 		return nil
 	}
@@ -309,8 +348,8 @@ func dbBatchInsert(db *sql.DB, recs []CaptureRecord, rawJSONs []string, metrics 
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO captures (ts_ms, src, dst, transport, proto, agent, kind, method, status,
-			call_id, from_h, to_h, cseq, ruri, hep_node_id, hep_node, hep_cid, size, raw_b64, record_json)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+			call_id, from_h, to_h, cseq, ruri, hep_node_id, hep_node, hep_cid, size, raw)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		RETURNING id`)
 	if err != nil {
 		return err
@@ -320,12 +359,12 @@ func dbBatchInsert(db *sql.DB, recs []CaptureRecord, rawJSONs []string, metrics 
 	// Prepare call_state upsert ($7=isClosed 0/1, $8=isAnswered 0/1, $9=isInviteReq 0/1)
 	csStmt, err := tx.Prepare(`
 		INSERT INTO call_state (call_id, agent, first_ts_ms, last_ts_ms, last_id, last_method, last_status,
-			open, answered, invite_id, src, dst, from_h, to_h, record_json, answer_ts_ms)
+			open, answered, invite_id, src, dst, from_h, to_h, answer_ts_ms)
 		VALUES ($1, $2, $3::bigint, $3::bigint, $4::bigint, $5, $6::int,
 			CASE WHEN $7::int = 1 THEN 0 ELSE 1 END,
 			$8::int,
 			CASE WHEN $9::int = 1 THEN $4::bigint ELSE 0::bigint END,
-			$10, $11, $12, $13, $14,
+			$10, $11, $12, $13,
 			CASE WHEN $8::int = 1 THEN $3::bigint ELSE 0::bigint END)
 		ON CONFLICT (call_id, agent) DO UPDATE SET
 			last_ts_ms = GREATEST(call_state.last_ts_ms, $3::bigint),
@@ -335,8 +374,7 @@ func dbBatchInsert(db *sql.DB, recs []CaptureRecord, rawJSONs []string, metrics 
 			open = CASE WHEN $7::int = 1 THEN 0 ELSE call_state.open END,
 			answered = CASE WHEN $8::int = 1 THEN 1 ELSE call_state.answered END,
 			invite_id = CASE WHEN $9::int = 1 AND call_state.invite_id = 0 THEN $4::bigint ELSE call_state.invite_id END,
-			answer_ts_ms = CASE WHEN $8::int = 1 AND call_state.answer_ts_ms = 0 THEN $3::bigint ELSE call_state.answer_ts_ms END,
-			record_json = $14`)
+			answer_ts_ms = CASE WHEN $8::int = 1 AND call_state.answer_ts_ms = 0 THEN $3::bigint ELSE call_state.answer_ts_ms END`)
 	if err != nil {
 		return err
 	}
@@ -345,17 +383,18 @@ func dbBatchInsert(db *sql.DB, recs []CaptureRecord, rawJSONs []string, metrics 
 	// Daily rollup accumulator
 	dailyCounts := make(map[string]int)
 
-	for i, rec := range recs {
+	for _, rec := range recs {
 		var id int64
-		rawJSON := ""
-		if i < len(rawJSONs) {
-			rawJSON = rawJSONs[i]
+		// Decode base64 to raw bytes — PG TOAST compresses BYTEA automatically
+		var rawBytes []byte
+		if rec.RawB64 != "" {
+			rawBytes, _ = base64.StdEncoding.DecodeString(rec.RawB64)
 		}
 		err := stmt.QueryRow(
 			rec.TsMs, rec.Src, rec.Dst, rec.Transport, rec.Proto, rec.Agent,
 			rec.Kind, rec.Method, rec.Status, rec.CallID,
 			rec.From, rec.To, rec.CSeq, rec.RURI,
-			rec.HEPNodeID, rec.HEPNode, rec.HEPCID, rec.Size, rec.RawB64, rawJSON,
+			rec.HEPNodeID, rec.HEPNode, rec.HEPCID, rec.Size, rawBytes,
 		).Scan(&id)
 		if err != nil {
 			continue // skip this record, don't fail the batch
@@ -387,7 +426,7 @@ func dbBatchInsert(db *sql.DB, recs []CaptureRecord, rawJSONs []string, metrics 
 			}
 			csStmt.Exec(rec.CallID, rec.Agent, rec.TsMs, id, rec.Method, rec.Status,
 				isClosed, isAnswered, isInvReq,
-				rec.Src, rec.Dst, rec.From, rec.To, rec.Method+" record")
+				rec.Src, rec.Dst, rec.From, rec.To)
 		}
 
 		// Accumulate daily rollup

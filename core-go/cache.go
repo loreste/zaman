@@ -45,7 +45,19 @@ func cacheWorker(ctx context.Context, db *sql.DB, cfg *Config, metrics *Metrics,
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			refreshCache(db, cfg, metrics, cache)
+			// Timeout guard: don't let a hung query block the worker forever
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				refreshCache(db, cfg, metrics, cache)
+			}()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				log.Printf("cache: refresh timed out (>10s), serving stale data")
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }

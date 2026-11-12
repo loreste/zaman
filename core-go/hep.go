@@ -200,8 +200,16 @@ func hepPeerAllowed(peer string, cfg *Config) bool {
 		host = peer
 	}
 	for _, allowed := range cfg.HEPAllow {
-		if host == allowed || strings.HasPrefix(host, allowed) {
+		if host == allowed {
 			return true
+		}
+		// Support CIDR notation: "10.0.0.0/24"
+		if strings.Contains(allowed, "/") {
+			if _, cidr, err := net.ParseCIDR(allowed); err == nil {
+				if ip := net.ParseIP(host); ip != nil && cidr.Contains(ip) {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -411,11 +419,12 @@ func hepTLSWorker(ctx context.Context, cfg *Config, metrics *Metrics, ring *Ring
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.SIPHost, cfg.HEPTLSPort)
-	ln, err := tls.Listen("tcp", addr, tlsCfg)
+	tcpLn, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Printf("hep/tls: listen %s: %v", addr, err)
 		return
 	}
+	ln := tls.NewListener(tcpLn, tlsCfg)
 	defer ln.Close()
 
 	log.Printf("hep/tls: listening on %s", addr)
@@ -427,8 +436,12 @@ func hepTLSWorker(ctx context.Context, cfg *Config, metrics *Metrics, ring *Ring
 		default:
 		}
 
+		tcpLn.(*net.TCPListener).SetDeadline(time.Now().Add(500 * time.Millisecond))
 		conn, err := ln.Accept()
 		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
 			continue
 		}
 

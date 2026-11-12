@@ -52,3 +52,4 @@ weft.lock
 # Temporary
 /tmp/
 *.pcap
+core-go/core-go
